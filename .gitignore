@@ -1,0 +1,50 @@
+# Python build / install
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Test / coverage caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS noise
+.DS_Store
+._*
+
+# ccloop runtime state (per-run state under a project)
+.ccloop/runs/
+
+# ccteam runtime state (sockets, pid files)
+.ccteam/sockets/
+.ccteam/runtime/
+
+# ccmemory local index
+.memory_index.db
+
+# Legacy / dev artifacts
+legacy-bash.tar.gz
+state.md
+
+# Pre-consolidation backups
+.archive-pre-consolidation/

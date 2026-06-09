@@ -1,0 +1,143 @@
+# ccusage-mcp
+
+MCP server that exposes Claude Code's own context-window and rate-limit usage
+to Claude Code. Lets the assistant answer "how many tokens do I have left?"
+with a real number rather than a guess.
+
+## Install
+
+```sh
+python3 install.py
+```
+
+The installer is UID-aware:
+
+- **non-root** — `pip3 install --user .` (binaries in `~/.local/bin/`),
+  `statusLine` written to `~/.claude/settings.json`, MCP server registered via
+  `claude mcp add --scope user` (writes to `~/.claude.json`)
+- **root** — system-wide `pip3 install .` (binaries in `/usr/local/bin/`),
+  `statusLine` written to `/etc/claude-code/managed-settings.json`, MCP server
+  registered in `/etc/claude-code/managed-mcp.json` (both apply to all users)
+
+Idempotent: re-running skips entries that are already correct, warns on
+conflicts. Requires `python3` and `pip3` (and the `claude` CLI, for the
+non-root MCP registration step).
+
+### Manual install
+
+If you'd rather wire it up yourself:
+
+```sh
+pip3 install .                                  # exposes ccusage-mcp + ccusage-statusline
+claude mcp add --scope user ccusage ccusage-mcp # user scope = available in all projects
+```
+
+Then point your Claude Code `statusLine` at `ccusage-statusline` (in
+`~/.claude/settings.json` or `/etc/claude-code/managed-settings.json`):
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/full/path/to/ccusage-statusline"
+  }
+}
+```
+
+`ccusage-statusline` reads Claude Code's status JSON on stdin, writes it to
+the cache file the MCP server reads, and prints the formatted status line on
+stdout. If you have an existing statusline you want to keep, drop this block
+into the top of it instead — same effect:
+
+```python
+# in any python script that gets the JSON on stdin
+import json, os, sys
+from pathlib import Path
+raw = sys.stdin.read()
+cache = Path(os.environ.get("TMPDIR", "/tmp")) / f"ccusage-{os.getuid()}.json"
+tmp = cache.with_name(f".{cache.name}.{os.getpid()}")
+old = os.umask(0o077)
+try:
+    tmp.write_text(raw)
+finally:
+    os.umask(old)
+os.replace(tmp, cache)
+```
+
+## Tools
+
+- **`get_context_usage`** — human-readable summary. Context tokens used vs
+  total, percent, remaining; 5-hour and 7-day rate-limit usage and reset times;
+  cache age.
+- **`get_context_usage_raw`** — the raw JSON Claude Code passed to the
+  statusline, plus cache age in seconds. Use when you need exact numbers or
+  fields the summary omits.
+
+## Architecture
+
+```
+Claude Code turn ends
+      |
+      v
+ccusage-statusline  (receives JSON on stdin from Claude Code)
+      |
+      |--> writes status line to stdout
+      |--> writes JSON to ${TMPDIR:-/tmp}/ccusage-$UID.json (atomic, 0600)
+                                  ^
+                                  |
+ccusage-mcp server (stdio)  ------+
+      |
+      v
+get_context_usage  ->  formatted string returned to Claude
+```
+
+The MCP server never receives the context JSON directly — Claude Code only
+pipes that to the statusline. So the statusline acts as the data source: it
+writes the JSON atomically to a per-UID cache file (mode 0600), and the
+server reads that cache on each tool call.
+
+Cache freshness ≈ "time since the last statusline render", which is roughly
+once per turn. The cache file's mtime is reported as `cache age` in the tool
+output so Claude can judge staleness.
+
+## Files
+
+- `server.py` — FastMCP server, defines the two tools (`ccusage-mcp`)
+- `statusline.py` — Claude Code statusline + cache writer (`ccusage-statusline`)
+- `paths.py` — shared cache-path resolution, imported by both
+- `run_server.py` — stdio entrypoint for running the MCP server from source
+- `install.py` — UID-aware installer
+- `pyproject.toml` — packaging, exposes both console scripts
+- `LICENSE` — MIT
+
+## Cache file path
+
+`${TMPDIR:-/tmp}/ccusage-$UID.json` — single per-UID file, mode 0600, written
+atomically (tmpfile in same dir + `mv`). Works on Linux and macOS (no tmpfs
+assumption). Originally considered `/dev/shm` for RAM-backing, but that's
+Linux-only and the file is tiny enough that page cache makes the distinction
+irrelevant.
+
+## Versions
+
+- **0.1.1** — `install.py` stages the source into a local tmpdir before
+  invoking pip, so the wheel build never runs on NFS/SMB/AFP mounts where
+  macOS auto-creates `._*` AppleDouble sidecars (fixes "multiple .dist-info
+  directories found" wheel-build failure). The `statusLine` setting is now
+  force-replaced rather than warned-about-on-conflict in both install modes
+  (user → `~/.claude/settings.json`, root → `/etc/claude-code/managed-settings.json`),
+  so re-running the installer always points statusLine at the bundled
+  `ccusage-statusline`.
+- **0.1.0** — Initial release. Two tools, file-cache data source.
+
+## Known limitations
+
+- If the statusline has not run yet in a session, the cache is missing or
+  stale and the tool returns an error / old `cache age`. First tool call in a
+  brand-new session may need to wait one turn.
+- Bound to the statusline data shape Claude Code provides. If Anthropic
+  renames `context_window.used_percentage` etc., the formatter needs updating.
+
+## License
+
+MIT — see `LICENSE`.
