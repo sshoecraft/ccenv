@@ -92,6 +92,21 @@ step() { echo ""; echo "=== [$1] $2 ==="; }
 info() { echo "  $*"; }
 warn() { echo "  WARNING: $*" >&2; }
 
+# Resolve a bare command name to an absolute path via PATH lookup.
+# Falls back to the bare name if not currently on PATH (Claude Code will
+# do its own PATH lookup at MCP launch time in that case).
+resolve_cmd() {
+    local cmd="$1"
+    local resolved
+    resolved=$(command -v "$cmd" 2>/dev/null)
+    if [ -n "$resolved" ]; then
+        echo "$resolved"
+    else
+        warn "command '$cmd' not on PATH at install time — registering bare name"
+        echo "$cmd"
+    fi
+}
+
 # Check whether an MCP server is already registered (any scope).
 mcp_registered() {
     local name="$1"
@@ -148,7 +163,7 @@ fi
 if should_install ccmemory; then
     step ccmemory "pip install --user + register MCP 'ccmemory'"
     pip3 install --user "$SCRIPT_DIR/ccmemory"
-    register_mcp ccmemory ccmemory mcp
+    register_mcp ccmemory "$(resolve_cmd ccmemory)" mcp
 fi
 
 # ----------------------------------------------------------------------------
@@ -173,7 +188,7 @@ fi
 if should_install ccteam; then
     step ccteam "pip install --user + register MCP 'ccteam' + SessionStart hook"
     pip3 install --user "$SCRIPT_DIR/ccteam"
-    register_mcp ccteam ccteam-mcp
+    register_mcp ccteam "$(resolve_cmd ccteam-mcp)"
 
     # Register a SessionStart hook so users see a notice in the conversation
     # if NATS is unreachable in a ccteam-bootstrapped project (.ccteam/ present).
@@ -274,6 +289,15 @@ install_overlay_mcp_subdir() {
         mcp_command=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('command','$name'))" "$sidecar")
         mcp_args_json=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get('args',[])))" "$sidecar")
     fi
+
+    # Resolve command to absolute path for robust execution regardless of
+    # how Claude Code is launched (desktop launcher, headless cron, etc.).
+    # Skip resolution for commands containing slashes — those are already
+    # explicit paths.
+    case "$mcp_command" in
+        */*) ;;  # already a path
+        *)   mcp_command=$(resolve_cmd "$mcp_command") ;;
+    esac
 
     # Convert JSON args array to positional shell args
     local mcp_args=()
