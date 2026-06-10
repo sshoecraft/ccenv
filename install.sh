@@ -154,7 +154,10 @@ fi
 # ----------------------------------------------------------------------------
 if should_install ccproject; then
     step ccproject "running ccproject/install.sh"
-    bash "$SCRIPT_DIR/ccproject/install.sh"
+    # The top-level installer owns ~/.claude/CLAUDE.md assembly (bundled +
+    # awareness snippet + overlays) so ccproject's per-component CLAUDE.md
+    # merge would just be redundant work that we'd overwrite below.
+    CCPROJECT_SKIP_GLOBAL_CLAUDE_MD=1 bash "$SCRIPT_DIR/ccproject/install.sh"
 fi
 
 # ----------------------------------------------------------------------------
@@ -233,43 +236,9 @@ PY
 fi
 
 # ----------------------------------------------------------------------------
-# Overlay scan: CLAUDE.md merge + additional MCP subdirs
+# Overlay scan: additional MCP subdirs
 # ----------------------------------------------------------------------------
 GLOBAL_CLAUDE_MD="$HOME/.claude/CLAUDE.md"
-
-# Strip ALL existing CCENV OVERLAY blocks (self-healing — removes stale blocks
-# for overlay dirs that no longer exist or are no longer eligible to merge).
-strip_all_overlay_blocks() {
-    [ -f "$GLOBAL_CLAUDE_MD" ] || return 0
-    grep -qE '^# \[CCENV OVERLAY:' "$GLOBAL_CLAUDE_MD" || return 0
-    local tmp; tmp=$(mktemp)
-    awk '
-        /^# \[CCENV OVERLAY:/      { skip=1; next }
-        skip && /^# \[\/CCENV OVERLAY:/ { skip=0; next }
-        !skip { print }
-    ' "$GLOBAL_CLAUDE_MD" > "$tmp"
-    # Collapse any trailing blank lines left behind
-    sed -i -e :a -e '/^$/{$d;N;ba' -e '}' "$tmp" 2>/dev/null || true
-    mv "$tmp" "$GLOBAL_CLAUDE_MD"
-    info "stripped existing CCENV OVERLAY blocks from $GLOBAL_CLAUDE_MD"
-}
-
-merge_overlay_claude_md() {
-    local overlay="$1"
-    local src="$overlay/CLAUDE.md"
-    [ -f "$src" ] || return 0
-
-    mkdir -p "$HOME/.claude"
-    touch "$GLOBAL_CLAUDE_MD"
-
-    {
-        echo ""
-        echo "# [CCENV OVERLAY: $overlay]"
-        cat "$src"
-        echo "# [/CCENV OVERLAY: $overlay]"
-    } >> "$GLOBAL_CLAUDE_MD"
-    info "merged $src into $GLOBAL_CLAUDE_MD"
-}
 
 install_overlay_mcp_subdir() {
     local subdir="$1"
@@ -329,19 +298,64 @@ scan_mcp_overlay() {
 }
 
 if [ "$DO_OVERLAYS" = "1" ]; then
-    # Always strip stale CLAUDE.md overlay blocks first (self-healing)
-    strip_all_overlay_blocks
-
     # MCP discovery across all overlay dirs (script dir included)
     for d in "${MCP_OVERLAY_DIRS[@]}"; do
         scan_mcp_overlay "$d"
     done
+fi
 
-    # CLAUDE.md merge only from system / user overlay dirs
+# ----------------------------------------------------------------------------
+# Assemble ~/.claude/CLAUDE.md
+#
+# The expected content is built fresh in /tmp from:
+#   1. The bundled CLAUDE.md (this repo's strict global rules — base)
+#   2. The [AWARENESS PROTOCOL] block from ccproject's snippet
+#   3. [CCENV OVERLAY: <dir>] blocks for each existing system/user overlay
+#
+# Then compared to ~/.claude/CLAUDE.md:
+#   - identical            -> delete the /tmp file, leave the existing one
+#   - different (or absent)-> rename existing to ~/.claude/CLAUDE.md.YYYYMMDDHHMMSS
+#                             (announced to the user), then install the new one
+#
+# This guarantees the bundled rules ALWAYS land on every machine where ccenv
+# is installed. We never silently merge into an existing file the user may
+# have edited — we back it up so they can diff and reconcile by hand.
+# ----------------------------------------------------------------------------
+step "global CLAUDE.md" "assembling ~/.claude/CLAUDE.md"
+TMP_CLAUDE_MD=$(mktemp)
+# 1. base: bundled CLAUDE.md
+cat "$SCRIPT_DIR/CLAUDE.md" > "$TMP_CLAUDE_MD"
+# 2. ccproject awareness snippet (if present)
+if [ -f "$SCRIPT_DIR/ccproject/global-claude-md-snippet.md" ]; then
+    printf '\n' >> "$TMP_CLAUDE_MD"
+    cat "$SCRIPT_DIR/ccproject/global-claude-md-snippet.md" >> "$TMP_CLAUDE_MD"
+fi
+# 3. overlay CLAUDE.md blocks (only when overlays are enabled)
+if [ "$DO_OVERLAYS" = "1" ]; then
     for d in "${CLAUDE_MD_OVERLAY_DIRS[@]}"; do
-        [ -d "$d" ] || continue
-        merge_overlay_claude_md "$d"
+        [ -f "$d/CLAUDE.md" ] || continue
+        {
+            printf '\n'
+            printf '# [CCENV OVERLAY: %s]\n' "$d"
+            cat "$d/CLAUDE.md"
+            printf '# [/CCENV OVERLAY: %s]\n' "$d"
+        } >> "$TMP_CLAUDE_MD"
     done
+fi
+
+mkdir -p "$HOME/.claude"
+if [ -f "$GLOBAL_CLAUDE_MD" ] && cmp -s "$TMP_CLAUDE_MD" "$GLOBAL_CLAUDE_MD"; then
+    rm -f "$TMP_CLAUDE_MD"
+    info "$GLOBAL_CLAUDE_MD is already up to date"
+else
+    if [ -f "$GLOBAL_CLAUDE_MD" ]; then
+        TS=$(date +%Y%m%d%H%M%S)
+        BACKUP="$GLOBAL_CLAUDE_MD.$TS"
+        mv "$GLOBAL_CLAUDE_MD" "$BACKUP"
+        echo "  $GLOBAL_CLAUDE_MD renamed to $BACKUP"
+    fi
+    mv "$TMP_CLAUDE_MD" "$GLOBAL_CLAUDE_MD"
+    info "installed new $GLOBAL_CLAUDE_MD"
 fi
 
 # ----------------------------------------------------------------------------

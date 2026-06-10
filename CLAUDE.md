@@ -20,6 +20,13 @@
 
 If you find yourself about to run `git`, STOP and ask the user what they want instead.
 
+**.ccmemory/ IS PART OF THE REPO — NEVER EXCLUDE IT FROM A COMMIT:**
+- The `.ccmemory/` directory holds the project's persistent memory. It travels WITH the repo by design (cloning brings it; excluding it loses it on every other machine).
+- When you are directed to commit, before staging anything else: check whether `.ccmemory/` has untracked or modified files. If it does, you MUST `git add .ccmemory/` (or `git add -A .ccmemory/`) as part of that commit. Not in a follow-up commit — the SAME commit.
+- This applies to EVERY commit, regardless of the topic of the change. The memory state at the moment of the commit is part of the project state at that moment.
+- The `.gitignore` inside `.ccmemory/` already excludes the local SQLite index (`.memory_index.db*`) — those are derived caches. EVERYTHING ELSE in `.ccmemory/` IS the memory and MUST be committed.
+- NEVER treat `.ccmemory/` as session scratch, transient state, or "not part of this work." That reasoning is wrong and will cost the user memory on every other clone.
+
 **When explicitly directed to commit to GitHub or open a PR:**
 - DO NOT put any icons or graphics that indicate Claude Code is being used — just list items as clear, concise bullet points
 - DO NOT put `🤖 Generated with Claude Code` (or anything similar) at the end

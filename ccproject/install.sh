@@ -69,6 +69,9 @@ echo "  Installed 4 scripts to $SKILL_DIR/scripts/"
 
 # Step 4: Update global awareness protocol in ~/.claude/CLAUDE.md
 echo "[4/6] Updating global CLAUDE.md ..."
+if [ "${CCPROJECT_SKIP_GLOBAL_CLAUDE_MD:-0}" = "1" ]; then
+    echo "  CCPROJECT_SKIP_GLOBAL_CLAUDE_MD=1 — skipping (top-level installer owns this)."
+else
 mkdir -p "$HOME/.claude"
 SNIPPET_FILE="$SCRIPT_DIR/global-claude-md-snippet.md"
 if [ -f "$GLOBAL_CLAUDE_MD" ]; then
@@ -100,6 +103,7 @@ else
     cp "$SNIPPET_FILE" "$GLOBAL_CLAUDE_MD"
     echo "  Created $GLOBAL_CLAUDE_MD with awareness protocol."
 fi
+fi  # end of CCPROJECT_SKIP_GLOBAL_CLAUDE_MD gate
 
 # Step 5: Register awareness-maintenance hooks in ~/.claude/settings.json
 echo "[5/6] Registering awareness hooks ..."
