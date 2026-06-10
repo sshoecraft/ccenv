@@ -88,6 +88,20 @@ def pip_install() -> Path:
     flags = [] if IS_ROOT else ["--user"]
     info(f"installing package via pip3 ({'system' if IS_ROOT else 'user'} scope)")
 
+    # For user-scope installs, force pip's --user destination to ~/.local on
+    # every platform via PYTHONUSERBASE. Without this, on macOS with Homebrew
+    # Python pip writes scripts to ~/Library/Python/<ver>/bin/ — a path that
+    # isn't on default macOS PATH and shifts on every Python upgrade. With
+    # this, ccusage binaries land in ~/.local/bin alongside every other ccenv
+    # component (top-level install.sh does the same). Root-scope installs
+    # ignore PYTHONUSERBASE since they don't use --user.
+    env = os.environ.copy()
+    user_base: Optional[Path] = None
+    if not IS_ROOT:
+        user_base = Path.home() / ".local"
+        env["PYTHONUSERBASE"] = str(user_base)
+        info(f"PYTHONUSERBASE={user_base} (pin --user installs to ~/.local)")
+
     def ignore_sidecars(_dir, names):
         return [n for n in names if n.startswith("._") or n == ".git"
                 or n == "build" or n.endswith(".egg-info")]
@@ -98,10 +112,13 @@ def pip_install() -> Path:
         info(f"staged source at {staged} for clean build")
         subprocess.run(
             [sys.executable, "-m", "pip", "install", *flags, str(staged)],
-            check=True,
+            check=True, env=env,
         )
-    scheme = "posix_prefix" if IS_ROOT else "posix_user"
-    scripts_dir = Path(sysconfig.get_path("scripts", scheme=scheme))
+    if IS_ROOT:
+        scripts_dir = Path(sysconfig.get_path("scripts", scheme="posix_prefix"))
+    else:
+        assert user_base is not None
+        scripts_dir = user_base / "bin"
     return scripts_dir
 
 
@@ -152,11 +169,26 @@ def register_mcp_user(mcp_bin: Path) -> None:
             ["claude", "mcp", "add", "--scope", "user", "ccusage", str(mcp_bin)],
             check=True,
         )
+        info("MCP server 'ccusage' registered (user scope)")
     elif existing == str(mcp_bin):
         info("MCP server 'ccusage' already registered (user scope)")
     else:
-        warn(f"MCP server 'ccusage' is registered pointing to: {existing}")
-        warn("leaving as-is. To switch: claude mcp remove ccusage && re-run.")
+        # Heal a stale registration (e.g. an older install pointing into the
+        # macOS framework-user dir ~/Library/Python/<ver>/bin/) by removing
+        # and re-adding it. Without this, the entry stays broken forever
+        # because we'd see it as "already registered" but with the wrong
+        # command, and Claude Code can't connect to the old path.
+        info(f"MCP server 'ccusage' registered with stale command — re-registering")
+        info(f"  was: {existing}")
+        info(f"  now: {mcp_bin}")
+        subprocess.run(
+            ["claude", "mcp", "remove", "--scope", "user", "ccusage"],
+            check=False,
+        )
+        subprocess.run(
+            ["claude", "mcp", "add", "--scope", "user", "ccusage", str(mcp_bin)],
+            check=True,
+        )
 
 
 def install_system(mcp_bin: Path, statusline_bin: Path) -> None:

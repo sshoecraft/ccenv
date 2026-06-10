@@ -94,12 +94,12 @@ warn() { echo "  WARNING: $*" >&2; }
 
 # Resolve a bare command name to an absolute path.
 #
-# `command -v` only finds things already on PATH, which fails on macOS with
-# Homebrew Python: `pip3 install --user` writes scripts to
-# `~/Library/Python/<ver>/bin/` (NOT `~/.local/bin/`), and that path is rarely
-# on a default user PATH. We compute pip's actual user-bin directory via
-# Python (`site.USER_BASE/bin`) once at startup as $USER_BIN, fall back to
-# checking there, and only register a bare name when both fail.
+# `command -v` only finds things on PATH. We temporarily add $USER_BIN
+# (~/.local/bin, pinned via PYTHONUSERBASE) to PATH for the duration of
+# this script, so this normally succeeds. The fallback to $USER_BIN/$cmd
+# covers the edge case where a binary was installed but is not on PATH
+# (e.g. another shell with a stale PATH), and registering a bare name is
+# the last resort.
 resolve_cmd() {
     local cmd="$1"
     local resolved
@@ -178,13 +178,24 @@ command -v pip3    >/dev/null || { echo "ERROR: pip3 required"; exit 1; }
 info "python3: $(python3 --version 2>&1)"
 info "pip3:    $(pip3 --version 2>&1 | awk '{print $1, $2}')"
 
-# Discover where `pip3 install --user` actually puts console scripts.
-# On Linux this is typically ~/.local/bin; on macOS with Homebrew Python it
-# is ~/Library/Python/<ver>/bin/. Without this, MCP registrations register
-# a bare command name that Claude Code cannot resolve at runtime, and the
-# verify step at the bottom misreports installed commands as missing.
-USER_BIN=$(python3 -c 'import site, os; print(os.path.join(site.USER_BASE, "bin"))' 2>/dev/null || echo "")
-info "user-bin: ${USER_BIN:-<unknown>}"
+# Force pip's `--user` installs to land under ~/.local on every platform.
+#
+# Without this, pip obeys Python's `sysconfig` user scheme, which on macOS
+# with Homebrew Python picks `osx_framework_user` and writes scripts to
+# `~/Library/Python/<ver>/bin/` — a path that isn't on default macOS PATH,
+# splits the install between Mac and Linux, and breaks every time the user
+# upgrades Python (3.14/bin/ -> 3.15/bin/ -> ...). PYTHONUSERBASE overrides
+# the scheme and pins `--user` scripts to $PYTHONUSERBASE/bin, so on both
+# OSes ccenv binaries end up in ~/.local/bin — which is already on the
+# user's PATH (every component creates it as a side effect of `--user` use
+# and most distros put it on PATH by default).
+#
+# This also redirects user-site packages to ~/.local/lib/pythonX.Y/site-packages/
+# instead of the platform default, but only commands that run with this env
+# variable see them — which is exactly the components we install here.
+export PYTHONUSERBASE="$HOME/.local"
+USER_BIN="$PYTHONUSERBASE/bin"
+info "user-base: $PYTHONUSERBASE  (PYTHONUSERBASE forced for consistency)"
 
 # Snapshot the user's real PATH before we augment it, so the verify step
 # at the bottom can tell the user accurately whether THEIR shell sees the
@@ -194,17 +205,26 @@ ORIGINAL_PATH="$PATH"
 # Augment PATH for the duration of this script so `command -v` finds the
 # scripts we just installed. We do NOT modify the user's shell rc — that is
 # their decision. We warn at the end if $USER_BIN is not on their PATH.
-if [ -n "$USER_BIN" ]; then
-    case ":$PATH:" in
-        *":$USER_BIN:"*) ;;
-        *) export PATH="$USER_BIN:$PATH" ;;
-    esac
-fi
+case ":$PATH:" in
+    *":$USER_BIN:"*) ;;
+    *) export PATH="$USER_BIN:$PATH" ;;
+esac
 
 HAS_CLAUDE=0
 if command -v claude >/dev/null; then
     HAS_CLAUDE=1
-    info "claude:  $(command -v claude)"
+    CLAUDE_PATH=$(command -v claude)
+    info "claude:  $CLAUDE_PATH"
+    # If claude lives outside the user's home (typically /usr/local/bin or
+    # /opt/homebrew/bin), it was installed system-wide — we can't write to
+    # that prefix as a regular user, so ccenv components still install into
+    # $HOME/.local. Surface the asymmetry so the user isn't surprised that
+    # `claude` and `ccloop` live in different directories.
+    case "$CLAUDE_PATH" in
+        "$HOME"/*) ;;
+        *) warn "claude is installed system-wide ($CLAUDE_PATH);"
+           warn "  ccenv components will install to \$HOME/.local (user scope)." ;;
+    esac
 else
     warn "'claude' CLI not found on PATH — MCP registrations will be skipped"
 fi
