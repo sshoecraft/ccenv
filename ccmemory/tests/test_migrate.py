@@ -28,7 +28,9 @@ def test_migrate_happy_path(tmp_path):
     assert copied == ["sess0_lessons.md", "sess1_lessons.md", "sess2_lessons.md"]
     # gitignore + marker created
     assert (dst / ".gitignore").exists()
-    assert ".memory_index.db" in (dst / ".gitignore").read_text()
+    gi_text = (dst / ".gitignore").read_text()
+    assert "index.db" in gi_text
+    assert "._*" in gi_text
     assert (dst / ".migrated-from").exists()
     assert str(src) in (dst / ".migrated-from").read_text()
 

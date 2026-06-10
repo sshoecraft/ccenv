@@ -59,3 +59,28 @@ def test_resolve_must_exist_false_returns_future_path(tmp_path, monkeypatch):
     # .ccmemory/ doesn't exist yet — should still return the path
     assert paths.resolve_memory_dir(must_exist=False) == tmp_path / ".ccmemory"
     assert paths.resolve_memory_dir(must_exist=True) is None
+
+
+def test_ensure_gitignore_creates_file(tmp_path):
+    d = tmp_path / ".ccmemory"
+    d.mkdir()
+    assert paths.ensure_gitignore(d) is True
+    text = (d / ".gitignore").read_text()
+    assert "index.db" in text
+    assert "._*" in text
+    assert ".DS_Store" in text
+    # Idempotent: second call is a no-op (returns False, content unchanged).
+    assert paths.ensure_gitignore(d) is False
+    assert (d / ".gitignore").read_text() == text
+
+
+def test_ensure_gitignore_appends_missing_patterns(tmp_path):
+    d = tmp_path / ".ccmemory"
+    d.mkdir()
+    # Simulate an older/foreign .gitignore lacking ._* and the new index name.
+    (d / ".gitignore").write_text("# mine\n.memory_index.db\n")
+    assert paths.ensure_gitignore(d) is True
+    text = (d / ".gitignore").read_text()
+    assert "# mine" in text          # user content preserved
+    assert "index.db" in text         # new index name added
+    assert "._*" in text              # sidecar coverage added

@@ -37,6 +37,10 @@ def _resolve_dir() -> Path:
     if not d:
         raise RuntimeError("no memory dir resolvable (set CCMEMORY_DIR or run inside a project)")
     d.mkdir(parents=True, exist_ok=True)
+    # Self-heal the store's .gitignore so the derived index + macOS ._*
+    # sidecars never leak into git. Runs on every project ccmemory touches,
+    # on every machine — no per-project manual step. Idempotent.
+    paths.ensure_gitignore(d)
     return d
 
 

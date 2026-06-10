@@ -164,12 +164,26 @@ def _parse_frontmatter_fallback(front: str) -> dict:
     return out
 
 
+#: Filename of the derived SQLite index inside a .ccmemory/ store. No leading
+#: dot — the store dir is already hidden, so dot-hiding the file was redundant
+#: and produced the confusing ._.memory_index.db sidecar on xattr-less volumes.
+INDEX_DB_NAME = "index.db"
+
+#: Pre-0.6.1 index filename. We delete it on init so stores self-migrate to the
+#: new name (the index is a rebuildable cache — nothing is lost).
+LEGACY_INDEX_DB_NAME = ".memory_index.db"
+
+
 class Store:
     """SQLite FTS5-backed index over a directory of memory .md files."""
 
     def __init__(self, memory_dir: Path, db_path: Path | None = None):
         self.memory_dir = Path(memory_dir)
-        self.db_path = Path(db_path) if db_path else self.memory_dir / ".memory_index.db"
+        if db_path:
+            self.db_path = Path(db_path)
+        else:
+            self.db_path = self.memory_dir / INDEX_DB_NAME
+            self._drop_legacy_index()
         self.db = sqlite3.connect(self.db_path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
@@ -182,6 +196,21 @@ class Store:
 
     def __exit__(self, *exc):
         self.close()
+
+    def _drop_legacy_index(self):
+        """Remove a pre-0.6.1 ``.memory_index.db`` (and its WAL/SHM/journal and
+        any ._* sidecar) so the store self-migrates to ``index.db``. The index
+        is a derived cache; deleting it just forces one rebuild. Best-effort."""
+        legacy = self.memory_dir / LEGACY_INDEX_DB_NAME
+        for suffix in ("", "-journal", "-wal", "-shm"):
+            for p in (legacy.with_name(legacy.name + suffix),
+                      legacy.with_name("._" + legacy.name + suffix)):
+                try:
+                    p.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
 
     def reindex(self, *, force: bool = False) -> tuple[int, int, int]:
         """Walk memory_dir, upsert changed files, drop missing rows.

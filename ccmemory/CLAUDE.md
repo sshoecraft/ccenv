@@ -233,6 +233,23 @@ Per global rules: patch = fix, minor = feature, major = breaking.
   server boot when project has legacy memory but no `.ccmemory/`;
   source preserved, never deleted. ``ccmemory migrate`` / ``ccmemory
   where`` CLI subcommands. 17 new tests (39 total, all passing).
+- **v0.6.1**: store hygiene, self-healing everywhere. The v0.6.0
+  "index is gitignored" promise was only wired into the *migrate* path,
+  so stores created by ``memory_write`` (the common case) got no
+  ``.gitignore`` and leaked the derived DB — and, on filesystems that
+  can't store xattrs natively (NFS/SMB/some bind mounts), macOS ``._*``
+  AppleDouble sidecars too. Fix: ``paths.ensure_gitignore()`` is the one
+  source of truth for the store's ``.gitignore`` (index cache + ``._*``
+  + ``.DS_Store``), called from ``mcp_server._resolve_dir()`` so EVERY
+  project ccmemory touches self-heals on EVERY machine — no per-project
+  manual step (the projects live on other hosts we can't reach). It is
+  idempotent and append-only for pre-existing/foreign gitignores.
+  ``migrate.py`` now delegates to the same helper. Renamed the index
+  file ``.memory_index.db`` → ``index.db`` (the leading dot was
+  redundant inside the already-hidden ``.ccmemory/`` and produced the
+  confusing ``._.memory_index.db`` sidecar); ``Store`` deletes any
+  legacy ``.memory_index.db`` on init so stores self-migrate (the index
+  is a rebuildable cache). 2 new tests (41 total, all passing).
 
 ## Layout
 

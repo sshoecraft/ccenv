@@ -30,15 +30,6 @@ from pathlib import Path
 from . import paths
 
 
-GITIGNORE_CONTENT = """\
-# ccmemory: SQLite index is a derived cache, regenerated locally.
-.memory_index.db
-.memory_index.db-journal
-.memory_index.db-wal
-.memory_index.db-shm
-"""
-
-
 @dataclass
 class MigrationResult:
     status: str  # "ok" | "skipped" | "refused" | "no-source" | "no-target"
@@ -155,10 +146,8 @@ def migrate(
             reason=f"hash mismatch on {len(mismatches)} file(s); rolled back",
         )
 
-    # Drop gitignore for the SQLite cache. Don't clobber an existing one.
-    gi = target / ".gitignore"
-    if not gi.exists():
-        gi.write_text(GITIGNORE_CONTENT, encoding="utf-8")
+    # Drop/refresh the gitignore for the SQLite cache + macOS sidecars.
+    paths.ensure_gitignore(target)
 
     # Provenance marker.
     marker = target / ".migrated-from"

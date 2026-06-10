@@ -30,6 +30,67 @@ PROJECT_LOCAL_DIRNAME = ".ccmemory"
 # as the first match wins per directory level.
 PROJECT_MARKERS = ("pyproject.toml", "package.json", "Makefile", "Cargo.toml", "go.mod")
 
+# .gitignore dropped inside every .ccmemory/ store. The .md files are the
+# git-friendly source of truth; the SQLite index is a derived cache and must
+# stay out of git. ._* covers macOS AppleDouble sidecars: some filesystems
+# (NFS/SMB, certain bind mounts) can't store extended attributes natively, so
+# macOS materializes ._<name> files next to anything written here — including
+# the index DB and even this .gitignore. Excluding them keeps commits clean.
+GITIGNORE_CONTENT = """\
+# ccmemory: SQLite index is a derived cache, regenerated locally.
+index.db
+index.db-journal
+index.db-wal
+index.db-shm
+# legacy pre-0.6.1 index name (auto-deleted on next run, ignored meanwhile).
+.memory_index.db
+
+# macOS AppleDouble sidecars + Finder droppings (see paths.py for why).
+._*
+.DS_Store
+"""
+
+# Patterns we guarantee are present even in a pre-existing .gitignore (e.g. one
+# written by an older ccmemory that predates ._* coverage or used the old
+# .memory_index.db name). The legacy db patterns stay listed so a lingering
+# pre-0.6.1 cache that hasn't been cleaned yet still can't leak into git.
+GITIGNORE_REQUIRED = (
+    "index.db",
+    "index.db-journal",
+    "index.db-wal",
+    "index.db-shm",
+    ".memory_index.db",
+    "._*",
+    ".DS_Store",
+)
+
+
+def ensure_gitignore(memory_dir: Path) -> bool:
+    """Ensure ``<memory_dir>/.gitignore`` excludes the derived index cache and
+    macOS sidecar droppings.
+
+    Idempotent and non-destructive: writes the full template when the file is
+    missing, otherwise appends only the required patterns not already present
+    (never clobbers user-added lines). Returns True if it created or modified
+    the file, else False. Called from every store-dir resolution so each
+    project ccmemory touches self-heals — no per-project manual step.
+    """
+    gi = memory_dir / ".gitignore"
+    if not gi.exists():
+        gi.write_text(GITIGNORE_CONTENT, encoding="utf-8")
+        return True
+
+    existing = gi.read_text(encoding="utf-8")
+    present = {line.strip() for line in existing.splitlines()}
+    missing = [pat for pat in GITIGNORE_REQUIRED if pat not in present]
+    if not missing:
+        return False
+
+    sep = "" if existing.endswith("\n") else "\n"
+    addition = sep + "\n# ccmemory: required ignore patterns\n" + "\n".join(missing) + "\n"
+    gi.write_text(existing + addition, encoding="utf-8")
+    return True
+
 
 def project_root(start: Path | None = None) -> Path | None:
     """Find the project root by walking up from start (default CWD).

@@ -61,8 +61,10 @@ in `~/.claude`. This means:
 - Cloning the repo brings the memory with it
 - Multiple machines / collaborators see the same memory
 - Git diffs of individual session lessons are clean and incremental
-- The SQLite index (`.memory_index.db`) is gitignored — it's a derived
-  cache, regenerated locally on first use
+- The SQLite index (`index.db`) is gitignored — it's a derived
+  cache, regenerated locally on first use. ccmemory writes/refreshes the
+  store's `.gitignore` automatically (also covering macOS `._*` sidecars),
+  so no per-project setup is needed on any machine.
 
 ccmemory resolves the memory dir in this order:
 
