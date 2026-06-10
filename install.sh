@@ -92,19 +92,28 @@ step() { echo ""; echo "=== [$1] $2 ==="; }
 info() { echo "  $*"; }
 warn() { echo "  WARNING: $*" >&2; }
 
-# Resolve a bare command name to an absolute path via PATH lookup.
-# Falls back to the bare name if not currently on PATH (Claude Code will
-# do its own PATH lookup at MCP launch time in that case).
+# Resolve a bare command name to an absolute path.
+#
+# `command -v` only finds things already on PATH, which fails on macOS with
+# Homebrew Python: `pip3 install --user` writes scripts to
+# `~/Library/Python/<ver>/bin/` (NOT `~/.local/bin/`), and that path is rarely
+# on a default user PATH. We compute pip's actual user-bin directory via
+# Python (`site.USER_BASE/bin`) once at startup as $USER_BIN, fall back to
+# checking there, and only register a bare name when both fail.
 resolve_cmd() {
     local cmd="$1"
     local resolved
     resolved=$(command -v "$cmd" 2>/dev/null)
     if [ -n "$resolved" ]; then
         echo "$resolved"
-    else
-        warn "command '$cmd' not on PATH at install time — registering bare name"
-        echo "$cmd"
+        return
     fi
+    if [ -n "$USER_BIN" ] && [ -x "$USER_BIN/$cmd" ]; then
+        echo "$USER_BIN/$cmd"
+        return
+    fi
+    warn "command '$cmd' not on PATH and not found in $USER_BIN — registering bare name"
+    echo "$cmd"
 }
 
 # Check whether an MCP server is already registered (any scope).
@@ -113,7 +122,26 @@ mcp_registered() {
     claude mcp get "$name" >/dev/null 2>&1
 }
 
-# Register an MCP server at user scope. Skips if already registered.
+# Return the registered "command + args" line for an MCP server, normalized
+# so it can be string-compared against the same shape we'd register now.
+# `claude mcp get` prints Command: and Args: on separate lines; we glue them
+# back together (skipping a blank Args line) to recover the original cmdline.
+mcp_current_command() {
+    local name="$1"
+    claude mcp get "$name" 2>/dev/null | awk -F': *' '
+        tolower($1) ~ /^[[:space:]]*command/ { c = $2 }
+        tolower($1) ~ /^[[:space:]]*args/    { a = $2 }
+        END {
+            if (a == "") print c
+            else         print c " " a
+        }
+    '
+}
+
+# Register an MCP server at user scope. If it is already registered with a
+# command that DIFFERS from what we want, heal the registration by removing
+# and re-adding it — otherwise stale bare-name entries stick forever and the
+# server never connects.
 # Args: name command [args...]
 register_mcp() {
     local name="$1"; shift
@@ -121,9 +149,18 @@ register_mcp() {
         warn "skipping MCP register for '$name' (claude CLI not on PATH)"
         return
     fi
+    local want="$*"
     if mcp_registered "$name"; then
-        info "MCP $name already registered"
-        return
+        local have
+        have=$(mcp_current_command "$name")
+        if [ -n "$have" ] && [ "$have" = "$want" ]; then
+            info "MCP $name already registered (command up to date)"
+            return
+        fi
+        info "MCP $name registered with stale command — re-registering"
+        info "  was:  ${have:-<unknown>}"
+        info "  now:  $want"
+        claude mcp remove -s user "$name" >/dev/null 2>&1 || true
     fi
     if claude mcp add -s user "$name" "$@"; then
         info "registered MCP $name"
@@ -140,6 +177,29 @@ command -v python3 >/dev/null || { echo "ERROR: python3 required"; exit 1; }
 command -v pip3    >/dev/null || { echo "ERROR: pip3 required"; exit 1; }
 info "python3: $(python3 --version 2>&1)"
 info "pip3:    $(pip3 --version 2>&1 | awk '{print $1, $2}')"
+
+# Discover where `pip3 install --user` actually puts console scripts.
+# On Linux this is typically ~/.local/bin; on macOS with Homebrew Python it
+# is ~/Library/Python/<ver>/bin/. Without this, MCP registrations register
+# a bare command name that Claude Code cannot resolve at runtime, and the
+# verify step at the bottom misreports installed commands as missing.
+USER_BIN=$(python3 -c 'import site, os; print(os.path.join(site.USER_BASE, "bin"))' 2>/dev/null || echo "")
+info "user-bin: ${USER_BIN:-<unknown>}"
+
+# Snapshot the user's real PATH before we augment it, so the verify step
+# at the bottom can tell the user accurately whether THEIR shell sees the
+# bin dir — not the temporarily-augmented one this script is running in.
+ORIGINAL_PATH="$PATH"
+
+# Augment PATH for the duration of this script so `command -v` finds the
+# scripts we just installed. We do NOT modify the user's shell rc — that is
+# their decision. We warn at the end if $USER_BIN is not on their PATH.
+if [ -n "$USER_BIN" ]; then
+    case ":$PATH:" in
+        *":$USER_BIN:"*) ;;
+        *) export PATH="$USER_BIN:$PATH" ;;
+    esac
+fi
 
 HAS_CLAUDE=0
 if command -v claude >/dev/null; then
@@ -363,15 +423,35 @@ fi
 # ----------------------------------------------------------------------------
 echo ""
 echo "=== verifying installed commands ==="
-USER_BIN="$HOME/.local/bin"
-case ":$PATH:" in
-    *":$USER_BIN:"*) info "$USER_BIN is on PATH" ;;
-    *) warn "$USER_BIN is NOT on PATH — add it to your shell rc" ;;
-esac
+# We auto-augmented PATH with $USER_BIN above so `command -v` works here too.
+# Report the bin dir we computed, and warn if the *user's* permanent PATH
+# does not include it — we don't edit their shell rc, so MCP launches by
+# Claude Code will still work (we registered absolute paths) but the user
+# won't see the commands in an interactive shell until they fix their rc.
+if [ -n "$USER_BIN" ]; then
+    info "user-bin: $USER_BIN"
+    USER_BIN_ON_REAL_PATH=0
+    OLD_IFS="$IFS"; IFS=":"
+    for d in $ORIGINAL_PATH; do
+        [ "$d" = "$USER_BIN" ] && USER_BIN_ON_REAL_PATH=1 && break
+    done
+    IFS="$OLD_IFS"
+    if [ "$USER_BIN_ON_REAL_PATH" = "1" ]; then
+        info "$USER_BIN is on your PATH"
+    else
+        warn "$USER_BIN is NOT on your shell PATH"
+        warn "  Add to your shell rc:  export PATH=\"$USER_BIN:\$PATH\""
+        warn "  (MCP servers still work because we registered absolute paths;"
+        warn "   this only affects interactive shell command lookup.)"
+    fi
+fi
 
 for cmd in ccmemory ccusage-mcp ccusage-statusline ccloop ccteam ccteam-mcp; do
-    if command -v "$cmd" >/dev/null; then
-        info "OK       $cmd -> $(command -v $cmd)"
+    resolved=$(command -v "$cmd" 2>/dev/null)
+    if [ -n "$resolved" ]; then
+        info "OK       $cmd -> $resolved"
+    elif [ -n "$USER_BIN" ] && [ -x "$USER_BIN/$cmd" ]; then
+        info "OK       $cmd -> $USER_BIN/$cmd"
     else
         info "MISSING  $cmd"
     fi
