@@ -1,5 +1,13 @@
 # ccmemory: SQLite index is a derived cache, regenerated locally.
+# Cover both the legacy ".memory_index.db" name and the current "index.db",
+# plus SQLite's WAL/journal sidecars and macOS AppleDouble (._*) files NFS
+# creates when the repo is shared between Linux and Mac.
 .memory_index.db
 .memory_index.db-journal
 .memory_index.db-wal
 .memory_index.db-shm
+index.db
+index.db-journal
+index.db-wal
+index.db-shm
+._*

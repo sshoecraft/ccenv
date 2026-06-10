@@ -198,6 +198,18 @@ info "pip3:    $(pip3 --version 2>&1 | awk '{print $1, $2}')"
 # this at the end to decide whether to print the copy-paste rc snippet.
 ORIGINAL_PYTHONUSERBASE="${PYTHONUSERBASE:-}"
 
+# Detect the PLATFORM DEFAULT user-base (what Python's site.py picks when
+# PYTHONUSERBASE is unset). On Linux this is already $HOME/.local — so the
+# PYTHONUSERBASE override below is a no-op there, and we won't tell the user
+# to set anything. On macOS with Homebrew Python it's ~/Library/Python/<ver>,
+# which is where our override actually matters and where the runtime needs
+# the env var to find packages.
+PLATFORM_USER_BASE=$(env -u PYTHONUSERBASE python3 -c 'import site; print(site.USER_BASE)' 2>/dev/null)
+PLATFORM_DEFAULTS_TO_LOCAL=0
+if [ "$PLATFORM_USER_BASE" = "$HOME/.local" ]; then
+    PLATFORM_DEFAULTS_TO_LOCAL=1
+fi
+
 export PYTHONUSERBASE="$HOME/.local"
 USER_BIN="$PYTHONUSERBASE/bin"
 info "user-base: $PYTHONUSERBASE  (PYTHONUSERBASE forced for consistency)"
@@ -554,9 +566,15 @@ fi
 # Same trade-off the official `claude` installer makes for ~/.local/bin on
 # PATH: we don't edit the user's rc for them, but we print the exact line
 # they need to paste so this is one copy-paste, not detective work.
-need_pythonuserbase=1
-if [ "$ORIGINAL_PYTHONUSERBASE" = "$HOME/.local" ]; then
-    need_pythonuserbase=0
+# Only ask the user to set PYTHONUSERBASE when their platform's DEFAULT
+# user-base differs from ~/.local. On Linux they already match, so the env
+# var is purely redundant — pip --user lands in ~/.local and Python at
+# runtime also looks there. On macOS+Homebrew Python the default is
+# ~/Library/Python/<ver>, so the env var is required at runtime for any
+# script that needs to import our packages.
+need_pythonuserbase=0
+if [ "$PLATFORM_DEFAULTS_TO_LOCAL" != "1" ] && [ "$ORIGINAL_PYTHONUSERBASE" != "$HOME/.local" ]; then
+    need_pythonuserbase=1
 fi
 need_path=1
 if [ "$USER_BIN_ON_REAL_PATH" = "1" ]; then
@@ -582,10 +600,21 @@ if [ "$need_pythonuserbase" = "1" ] || [ "$need_path" = "1" ]; then
     echo "============================================================"
     echo ""
     echo "  Add the following to $rc_file (then 'source $rc_file' or open"
-    echo "  a new terminal). Without these, ccenv binaries will fail with"
-    echo "  ModuleNotFoundError when launched by Claude Code's hooks or MCP"
-    echo "  subprocesses (those run in non-interactive shells, which do NOT"
-    echo "  source ~/.zshrc)."
+    echo "  a new terminal):"
+    echo ""
+    if [ "$need_pythonuserbase" = "1" ]; then
+        echo "    - Without PYTHONUSERBASE, ccenv binaries will fail at"
+        echo "      runtime with ModuleNotFoundError when launched by Claude"
+        echo "      Code's hooks or MCP subprocesses. Python's default"
+        echo "      user-base on this platform is $PLATFORM_USER_BASE,"
+        echo "      but we installed packages under \$HOME/.local."
+    fi
+    if [ "$need_path" = "1" ]; then
+        echo "    - Without \$HOME/.local/bin on PATH, the ccenv commands"
+        echo "      (ccloop, ccmemory, etc.) aren't accessible from your"
+        echo "      shell. (MCP/hook invocations still work — they use"
+        echo "      absolute paths registered at install time.)"
+    fi
     echo ""
     if [ "$need_pythonuserbase" = "1" ]; then
         echo "    export PYTHONUSERBASE=\"\$HOME/.local\""
