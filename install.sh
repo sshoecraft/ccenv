@@ -193,6 +193,11 @@ info "pip3:    $(pip3 --version 2>&1 | awk '{print $1, $2}')"
 # This also redirects user-site packages to ~/.local/lib/pythonX.Y/site-packages/
 # instead of the platform default, but only commands that run with this env
 # variable see them — which is exactly the components we install here.
+# Capture whether the user's shell environment already has PYTHONUSERBASE set
+# to what we want, BEFORE we override it for this script's subshell. We use
+# this at the end to decide whether to print the copy-paste rc snippet.
+ORIGINAL_PYTHONUSERBASE="${PYTHONUSERBASE:-}"
+
 export PYTHONUSERBASE="$HOME/.local"
 USER_BIN="$PYTHONUSERBASE/bin"
 info "user-base: $PYTHONUSERBASE  (PYTHONUSERBASE forced for consistency)"
@@ -230,6 +235,46 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# pip_install_local SRC_DIR -- install a local pip package from a CLEAN copy.
+#
+# This repo may live on a filesystem that cannot store macOS extended
+# attributes natively (e.g. some bind mounts / network volumes). On such a
+# volume the OS materializes AppleDouble "._*" sidecar files next to anything
+# written here, INCLUDING the "<name>.dist-info" directory setuptools emits
+# during a wheel build. bdist_wheel then zips both "<name>.dist-info" and the
+# junk "._<name>.dist-info" into the wheel, and pip rejects it with
+# "multiple .dist-info directories found". COPYFILE_DISABLE does not help —
+# that only governs tar/cp, not the FS-level sidecar creation.
+#
+# Fix: stage the source to /tmp (native APFS, no sidecars), stripping all
+# build cruft and "._*" files, and build/install from there. The wheel then
+# contains exactly one dist-info and installs cleanly.
+pip_install_local() {
+    local src="$1"
+    local name; name=$(basename "$src")
+    local stage; stage=$(mktemp -d "/tmp/ccenv-${name}.XXXXXX")
+
+    # Copy source minus build cruft and AppleDouble sidecars. rsync is present
+    # on macOS by default; fall back to cp + prune if it is ever missing.
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -a \
+            --exclude='._*' --exclude='build' --exclude='dist' \
+            --exclude='*.egg-info' --exclude='__pycache__' \
+            "$src"/ "$stage"/
+    else
+        cp -R "$src"/ "$stage"/
+        find "$stage" \( -name '._*' -o -name '__pycache__' \
+            -o -name '*.egg-info' -o -name 'build' -o -name 'dist' \) \
+            -prune -exec rm -rf {} + 2>/dev/null || true
+    fi
+
+    COPYFILE_DISABLE=1 pip3 install --user "$stage"
+    local rc=$?
+    rm -rf "$stage"
+    return $rc
+}
+
+# ----------------------------------------------------------------------------
 # Core: ccproject (its own installer handles the awareness skill + snippet)
 # ----------------------------------------------------------------------------
 if should_install ccproject; then
@@ -245,7 +290,7 @@ fi
 # ----------------------------------------------------------------------------
 if should_install ccmemory; then
     step ccmemory "pip install --user + register MCP 'ccmemory'"
-    pip3 install --user "$SCRIPT_DIR/ccmemory"
+    pip_install_local "$SCRIPT_DIR/ccmemory"
     register_mcp ccmemory "$(resolve_cmd ccmemory)" mcp
 fi
 
@@ -262,7 +307,18 @@ fi
 # ----------------------------------------------------------------------------
 if should_install ccloop; then
     step ccloop "pip install --user"
-    pip3 install --user "$SCRIPT_DIR/ccloop"
+    pip_install_local "$SCRIPT_DIR/ccloop"
+    # ccloop registers its own PostToolUse/Stop hooks (the keepgoing /
+    # context-guard pair). When the ccloop binary moves — e.g. from a
+    # legacy ~/.venvs/ccloop install to ~/.local/bin/ccloop — those
+    # registrations stay pinned to the old absolute path until something
+    # tells ccloop to re-register. `ccloop install` does exactly that
+    # (its registration logic uses a loose `_is_ours` matcher so it
+    # rewrites any stale ccloop entry rather than duplicating).
+    if command -v ccloop >/dev/null 2>&1; then
+        info "refreshing ccloop hook registrations (heals stale paths)"
+        ccloop install 2>&1 | sed 's/^/  /' || warn "ccloop install failed (non-fatal)"
+    fi
 fi
 
 # ----------------------------------------------------------------------------
@@ -270,7 +326,7 @@ fi
 # ----------------------------------------------------------------------------
 if should_install ccteam; then
     step ccteam "pip install --user + register MCP 'ccteam' + SessionStart hook"
-    pip3 install --user "$SCRIPT_DIR/ccteam"
+    pip_install_local "$SCRIPT_DIR/ccteam"
     register_mcp ccteam "$(resolve_cmd ccteam-mcp)"
 
     # Register a SessionStart hook so users see a notice in the conversation
@@ -326,7 +382,7 @@ install_overlay_mcp_subdir() {
     [ -f "$subdir/pyproject.toml" ] || return 0
 
     info "overlay MCP package: $name ($subdir)"
-    pip3 install --user "$subdir"
+    pip_install_local "$subdir"
 
     # Sidecar config (optional): .ccenv-mcp.json overrides defaults.
     local mcp_name="$name"
@@ -481,6 +537,78 @@ if [ "$HAS_CLAUDE" = "1" ]; then
     echo ""
     echo "Registered MCP servers (claude mcp list):"
     claude mcp list 2>&1 | sed 's/^/  /' || true
+fi
+
+# ----------------------------------------------------------------------------
+# Shell environment setup (REQUIRED — not optional)
+# ----------------------------------------------------------------------------
+# ccenv installs Python packages with PYTHONUSERBASE=$HOME/.local so the
+# scripts land in ~/.local/bin (consistent across Mac/Linux, on PATH by
+# default). But Python at runtime only consults PYTHONUSERBASE if it is in
+# the *environment* — the install-time export doesn't travel with the
+# scripts. Without PYTHONUSERBASE in the user's shell env, Python's site.py
+# falls back to the platform default user-base (~/Library/Python/<ver>/ on
+# macOS), which is empty (we wrote packages elsewhere), and every ccenv
+# binary fails at runtime with `ModuleNotFoundError`.
+#
+# Same trade-off the official `claude` installer makes for ~/.local/bin on
+# PATH: we don't edit the user's rc for them, but we print the exact line
+# they need to paste so this is one copy-paste, not detective work.
+need_pythonuserbase=1
+if [ "$ORIGINAL_PYTHONUSERBASE" = "$HOME/.local" ]; then
+    need_pythonuserbase=0
+fi
+need_path=1
+if [ "$USER_BIN_ON_REAL_PATH" = "1" ]; then
+    need_path=0
+fi
+
+if [ "$need_pythonuserbase" = "1" ] || [ "$need_path" = "1" ]; then
+    # For zsh, this MUST go in ~/.zshenv, not ~/.zshrc: ~/.zshrc is sourced
+    # only by *interactive* shells, but Claude Code runs hooks, the statusLine
+    # and MCP servers in *non-interactive* shells. zsh sources ~/.zshenv on
+    # every invocation, so it's the only file that guarantees PYTHONUSERBASE
+    # reaches those subprocesses. (bash has no clean non-interactive analogue;
+    # ~/.bashrc is the pragmatic best target there.)
+    case "${SHELL##*/}" in
+        zsh)  rc_file="~/.zshenv" ;;
+        bash) rc_file="~/.bashrc" ;;
+        *)    rc_file="your shell rc" ;;
+    esac
+
+    echo ""
+    echo "============================================================"
+    echo "  REQUIRED: shell environment setup"
+    echo "============================================================"
+    echo ""
+    echo "  Add the following to $rc_file (then 'source $rc_file' or open"
+    echo "  a new terminal). Without these, ccenv binaries will fail with"
+    echo "  ModuleNotFoundError when launched by Claude Code's hooks or MCP"
+    echo "  subprocesses (those run in non-interactive shells, which do NOT"
+    echo "  source ~/.zshrc)."
+    echo ""
+    if [ "$need_pythonuserbase" = "1" ]; then
+        echo "    export PYTHONUSERBASE=\"\$HOME/.local\""
+    fi
+    if [ "$need_path" = "1" ]; then
+        echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+    fi
+    echo ""
+    echo "  Copy-paste one-liner to append both (idempotent — checks first):"
+    echo ""
+    case "${SHELL##*/}" in
+        zsh)  target_rc="\$HOME/.zshenv" ;;
+        bash) target_rc="\$HOME/.bashrc" ;;
+        *)    target_rc="\$HOME/.profile" ;;
+    esac
+    if [ "$need_pythonuserbase" = "1" ]; then
+        echo "    grep -q PYTHONUSERBASE $target_rc 2>/dev/null || echo 'export PYTHONUSERBASE=\"\$HOME/.local\"' >> $target_rc"
+    fi
+    if [ "$need_path" = "1" ]; then
+        echo "    grep -q 'PATH.*\\.local/bin' $target_rc 2>/dev/null || echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> $target_rc"
+    fi
+    echo ""
+    echo "============================================================"
 fi
 
 echo ""
