@@ -244,8 +244,11 @@ class Store:
 
     def _iter_md_files(self) -> Iterator[Path]:
         # Skip MEMORY.md itself — that's a generated index, not a memory.
+        # Skip macOS AppleDouble sidecars (._*.md): on filesystems that can't
+        # store xattrs natively the OS writes a ._<name> file next to every
+        # real file, and rglob would otherwise index them as null-type junk.
         for p in sorted(self.memory_dir.rglob("*.md")):
-            if p.name == "MEMORY.md":
+            if p.name == "MEMORY.md" or p.name.startswith("._"):
                 continue
             yield p
 

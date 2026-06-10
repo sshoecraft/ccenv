@@ -67,3 +67,15 @@ def test_excludes_MEMORY_md_from_index(memory_dir):
     with Store(memory_dir) as s:
         _, _, total = s.reindex()
     assert total == 1  # MEMORY.md excluded
+
+
+def test_reindex_skips_appledouble_sidecars(memory_dir):
+    write_memory(memory_dir, "real", description="a real one")
+    # macOS AppleDouble sidecar the FS materializes next to real.md on
+    # xattr-less volumes — must not be indexed as a (null-type) memory.
+    (memory_dir / "._real.md").write_text("garbage sidecar content")
+    with Store(memory_dir) as s:
+        changed, removed, total = s.reindex(force=True)
+        rows = [r["name"] for r in s.db.execute("SELECT name FROM mem ORDER BY name")]
+    assert total == 1
+    assert rows == ["real"]

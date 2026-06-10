@@ -250,6 +250,12 @@ Per global rules: patch = fix, minor = feature, major = breaking.
   confusing ``._.memory_index.db`` sidecar); ``Store`` deletes any
   legacy ``.memory_index.db`` on init so stores self-migrate (the index
   is a rebuildable cache). 2 new tests (41 total, all passing).
+- **v0.6.2**: index scan skips macOS AppleDouble sidecars. ``_iter_md_files``
+  rglob'd ``*.md`` and matched ``._<name>.md`` sidecars (created by the OS on
+  xattr-less volumes next to every real file), indexing them as null-type junk
+  rows that polluted search. Now skips any name starting with ``._``. The
+  v0.6.1 gitignore keeps sidecars out of *git*; this keeps them out of the
+  *index*. 1 new test (42 total, all passing).
 
 ## Layout
 

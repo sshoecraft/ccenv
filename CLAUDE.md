@@ -27,6 +27,15 @@ If you find yourself about to run `git`, STOP and ask the user what they want in
 - The `.gitignore` inside `.ccmemory/` already excludes the local SQLite index (`.memory_index.db*`) — those are derived caches. EVERYTHING ELSE in `.ccmemory/` IS the memory and MUST be committed.
 - NEVER treat `.ccmemory/` as session scratch, transient state, or "not part of this work." That reasoning is wrong and will cost the user memory on every other clone.
 
+**COMMIT ALL OUTSTANDING CHANGES — NEVER FILTER TO "ONLY WHAT CLAUDE TOUCHED":**
+- When directed to commit, stage and commit EVERY modified and untracked file in the working tree, not just files you (Claude) edited this session.
+- The user's in-progress work (offline edits, work from another machine, work from another session) is part of the project state at the moment of the commit. Leaving it unstaged "so the user can commit it separately" is wrong — it leaves a dirty tree, hides their work from `git status` next time, and assumes you understand their commit boundaries better than they do. You don't.
+- The ONLY files you may leave unstaged are:
+  - Files already excluded by `.gitignore` (never override that)
+  - Files that look like they could contain secrets (`.env`, `credentials.json`, `*.pem`, `*.key`, anything matching obvious secret patterns) — and even then, surface them to the user and ask, don't silently skip
+- If unrelated work is present and the commit message would get muddled by including it, write a single commit message that honestly describes BOTH groups of changes (e.g. "X: do the thing you asked; also includes pending Y package bump"). Do NOT split into two commits unless the user explicitly asks for that — splitting is a judgment call about commit boundaries, and that is the user's call.
+- If you think a file genuinely shouldn't be committed (e.g. a build artifact that escaped `.gitignore`), surface it to the user before committing — never silently exclude.
+
 **When explicitly directed to commit to GitHub or open a PR:**
 - DO NOT put any icons or graphics that indicate Claude Code is being used — just list items as clear, concise bullet points
 - DO NOT put `🤖 Generated with Claude Code` (or anything similar) at the end
