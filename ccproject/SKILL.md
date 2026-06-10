@@ -174,6 +174,25 @@ When starting a session on a project with awareness infrastructure:
 
 THIS IS CRITICAL. The awareness docs are only useful if they stay current.
 
+### Automated enforcement (hooks)
+
+When ccproject is installed, three hooks keep the docs honest so this isn't
+purely a matter of remembering:
+
+- **PostToolUse** records every source file and awareness doc you touch this
+  session.
+- **Stop** auto-regenerates Layer 3 (the structural map — pure extraction, no
+  judgment needed) and then **blocks the session from ending** if you changed
+  code in a subsystem but did not update that subsystem's doc. The block names
+  the exact docs to fix. It backs off after `CCPROJECT_MAX_NUDGES` re-feeds
+  (default 3) so a genuinely-stuck session can still exit; `CCPROJECT_NO_ENFORCE=1`
+  disables blocking, `CCPROJECT_NO_AUTOREGEN=1` disables the map regen.
+- **SessionStart** reports which subsystems have source newer than their doc.
+
+The hooks handle Layer 3 entirely and *force* you to keep Layers 1–2 current.
+They cannot write the prose for you — that judgment is still yours. The steps
+below are what you do when the Stop hook blocks (or, better, before it has to).
+
 ### During a session:
 - If you discover a NEW invariant or design constraint -> note it for the CLAUDE.md
 - If you discover a pitfall or historical bug -> note it for the subsystem doc

@@ -67,9 +67,36 @@ task automatically.
 
 ### Maintenance
 
+Maintenance is **enforced by hooks**, not left to memory. Once installed,
+ccproject registers three global hooks in `~/.claude/settings.json` that
+self-gate on whether the current project has `.claude/awareness/` (no-ops
+everywhere else):
+
+| Hook | When | What it does |
+|------|------|--------------|
+| `track` | PostToolUse (Edit/Write/MultiEdit) | Records which source files and which docs you touched this session |
+| `sync`  | Stop | Auto-regenerates the structural map (Layer 3), then **blocks the session from ending** if you changed a subsystem's code without updating its doc |
+| `status`| SessionStart | Reports subsystems whose source is newer than their doc |
+
+The split is deliberate: the **structural map is regenerated automatically**
+(it's pure AST extraction — no judgment), while the **prose layers
+(invariants, pitfalls, API intent) cannot be script-generated**, so the Stop
+hook instead refuses to let you walk away from drift. Same philosophy as
+ccloop's keepgoing hook.
+
+Tuning (env vars):
+
+| Var | Default | Effect |
+|-----|---------|--------|
+| `CCPROJECT_MAX_NUDGES` | 3 | Stop-hook re-feeds before it gives up and lets the session end (0 = unlimited) |
+| `CCPROJECT_NO_ENFORCE` | unset | `=1` disables the blocking behavior (still regenerates the map) |
+| `CCPROJECT_NO_AUTOREGEN` | unset | `=1` disables structural-map regeneration |
+
+The slash commands still work for explicit, on-demand passes:
+
 ```
-/project:update-awareness    # Update docs from recent git changes
-/project:refresh-map         # Regenerate the structural map
+/project:update-awareness    # Review + update docs from recent changes
+/project:refresh-map         # Regenerate the structural map by hand
 ```
 
 ### Agent Teams

@@ -59,8 +59,7 @@ nats-server -js &
 # 2. Install the package.
 git clone https://github.com/sshoecraft/ccteam.git
 cd ccteam
-python3 -m venv .venv && source .venv/bin/activate
-pip install .
+pip3 install --user .
 
 # 3. Point ccteam at your NATS server.
 export CCTEAM_NATS_URL=nats://localhost:4222

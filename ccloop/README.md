@@ -42,19 +42,20 @@ document; it just works, and optionally writes `DONE` when finished.
 
 ## Install
 
-ccloop is a Python package with a single `ccloop` console entry point. The
-recommended install is an isolated venv kept **outside** the source tree,
-with the command symlinked onto your `PATH`:
+ccloop is a Python package with a single `ccloop` console entry point.
 
 ```sh
 git clone <repo> /src/ccloop
-python3 -m venv ~/.venvs/ccloop
-~/.venvs/ccloop/bin/pip install /src/ccloop
-ln -sf ~/.venvs/ccloop/bin/ccloop ~/.local/bin/ccloop   # ~/.local/bin on PATH
+cd /src/ccloop
+pip3 install --user .
 ```
 
-If you have [pipx](https://pipx.pypa.io), that's even simpler — it manages
-the venv for you and puts `ccloop` on your PATH directly:
+Make sure `~/.local/bin` is on your `PATH` so the `ccloop` command resolves.
+
+If your distro blocks `pip install --user` with a PEP 668
+"externally-managed-environment" error, use [pipx](https://pipx.pypa.io)
+instead — it sets up an isolated venv and puts `ccloop` on your PATH for
+you:
 
 ```sh
 pipx install /src/ccloop
@@ -209,7 +210,7 @@ own `.ccloop/runs/<run-id>/` directory.
 ## Testing
 
 ```sh
-~/.venvs/ccloop/bin/python -m pytest    # full suite (no real claude needed)
+python3 -m pytest    # full suite (no real claude needed)
 ```
 
 The suite drives the full relay loop against a fake stream-json `claude`
