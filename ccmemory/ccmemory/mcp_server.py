@@ -6,6 +6,7 @@ so this module only declares tools and dispatches to the store.
 
 Tools:
   - memory_search(query, n=5)
+  - memory_list(type?)
   - memory_get(name)
   - memory_write(name, type, description, body, tags?)
   - memory_stats()
@@ -94,6 +95,16 @@ def serve() -> int:
                 },
             ),
             types.Tool(
+                name="memory_list",
+                description="List all memories (metadata only — name, type, description, age, path), newest first. Use when you need every memory, not a ranked subset. Optional type filter (user|feedback|project|reference).",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["user", "feedback", "project", "reference"], "description": "optional type filter"},
+                    },
+                },
+            ),
+            types.Tool(
                 name="memory_get",
                 description="Fetch one memory file's full contents by name.",
                 inputSchema={
@@ -143,6 +154,13 @@ def serve() -> int:
                 with Store(d) as s:
                     s.reindex()
                     results = s.search(q, limit=n)
+                return _text(json.dumps(results, indent=2, default=str))
+
+            if name == "memory_list":
+                type_filter = arguments.get("type") or None
+                with Store(d) as s:
+                    s.reindex()
+                    results = s.list_all(type_filter=type_filter)
                 return _text(json.dumps(results, indent=2, default=str))
 
             if name == "memory_get":

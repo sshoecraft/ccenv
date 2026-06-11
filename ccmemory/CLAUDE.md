@@ -66,6 +66,7 @@ auto-memory instructions. Discipline is structural, not aspirational.
 
 **MCP tools** — what the model actually uses:
 - `memory_search(query, n=5)`
+- `memory_list(type?)`
 - `memory_get(name)`
 - `memory_write(name, type, description, body, tags?)`
 - `memory_stats()`
@@ -250,6 +251,22 @@ Per global rules: patch = fix, minor = feature, major = breaking.
   confusing ``._.memory_index.db`` sidecar); ``Store`` deletes any
   legacy ``.memory_index.db`` on init so stores self-migrate (the index
   is a rebuildable cache). 2 new tests (41 total, all passing).
+- **v0.7.0**: `memory_list` MCP tool + SessionStart protocol rewrite to
+  steer the model toward it. `memory_search` requires a non-empty query
+  (BM25 has nothing to match on otherwise) — but "show me every memory in
+  this project" is a real workflow that no amount of clever search-term
+  juggling can satisfy. Observed in a live session: Sonnet 4.6 asked "what
+  memories do you have?" went straight to `memory_search` with the query
+  `*` and "ccenv project", both returning empty results. Added
+  `Store.list_all(type_filter=None)` returning the same dict shape as
+  `search()` minus bm25/score, sorted by mtime DESC (newest first), with
+  optional type filter. Exposed as `memory_list` MCP tool. The
+  SessionStart protocol's "search first, get second" section was
+  rewritten to "pick the right tool" — three-way decision tree (`list`
+  for inventory questions, `search` for topic queries, `get` for bodies)
+  with an explicit quick-decision line, so the model picks list for "what
+  do you have" without needing a prompt. 2 new tests (44 total, all
+  passing).
 - **v0.6.2**: index scan skips macOS AppleDouble sidecars. ``_iter_md_files``
   rglob'd ``*.md`` and matched ``._<name>.md`` sidecars (created by the OS on
   xattr-less volumes next to every real file), indexing them as null-type junk

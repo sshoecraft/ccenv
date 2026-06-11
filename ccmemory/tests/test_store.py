@@ -69,6 +69,29 @@ def test_excludes_MEMORY_md_from_index(memory_dir):
     assert total == 1  # MEMORY.md excluded
 
 
+def test_list_all_returns_every_memory_newest_first(memory_dir):
+    now = time.time()
+    write_memory(memory_dir, "old", type="feedback", mtime=now - 30 * 86400)
+    write_memory(memory_dir, "new", type="project", mtime=now - 1)
+    write_memory(memory_dir, "mid", type="reference", mtime=now - 5 * 86400)
+    with Store(memory_dir) as s:
+        s.reindex()
+        results = s.list_all()
+    assert [r["name"] for r in results] == ["new", "mid", "old"]
+    assert all("age_days" in r and "type" in r for r in results)
+
+
+def test_list_all_type_filter(memory_dir):
+    write_memory(memory_dir, "fb1", type="feedback")
+    write_memory(memory_dir, "fb2", type="feedback")
+    write_memory(memory_dir, "ref1", type="reference")
+    with Store(memory_dir) as s:
+        s.reindex()
+        results = s.list_all(type_filter="feedback")
+    assert {r["name"] for r in results} == {"fb1", "fb2"}
+    assert all(r["type"] == "feedback" for r in results)
+
+
 def test_reindex_skips_appledouble_sidecars(memory_dir):
     write_memory(memory_dir, "real", description="a real one")
     # macOS AppleDouble sidecar the FS materializes next to real.md on

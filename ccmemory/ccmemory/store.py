@@ -323,3 +323,31 @@ class Store:
 
     def all_memories(self) -> Iterable[sqlite3.Row]:
         return self.db.execute("SELECT name, path, type, description, mtime FROM mem ORDER BY type, name")
+
+    def list_all(self, *, type_filter: str | None = None) -> list[dict]:
+        """Return all memories' metadata, newest first. No query, no ranking.
+
+        Same dict shape as ``search()`` minus bm25/score: caller gets
+        name/path/type/description/age_days. For "what memories exist" —
+        the answer search() can't give without a non-empty query.
+        """
+        if type_filter:
+            rows = self.db.execute(
+                "SELECT name, path, type, description, mtime FROM mem WHERE type = ? ORDER BY mtime DESC",
+                (type_filter,),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT name, path, type, description, mtime FROM mem ORDER BY mtime DESC"
+            ).fetchall()
+        now = time.time()
+        return [
+            {
+                "name": r["name"],
+                "path": r["path"],
+                "type": r["type"],
+                "description": r["description"],
+                "age_days": max(0.0, (now - r["mtime"]) / 86400.0),
+            }
+            for r in rows
+        ]

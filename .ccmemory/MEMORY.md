@@ -10,7 +10,3 @@
 - [mcp-heal-stale-command-pattern](mcp-heal-stale-command-pattern.md) — install.sh's register_mcp() compares stored Command+Args to the desired command and re-registers when stale — never simplify it away
 - [pythonuserbase-in-zshenv](pythonuserbase-in-zshenv.md) — PYTHONUSERBASE must be exported in ~/.zshenv (not ~/.zshrc) or Claude hooks/statusLine/MCP fail with ModuleNotFoundError
 - [src-tree-appledouble-sidecars](src-tree-appledouble-sidecars.md) — /src tree is on an xattr-less FS that spawns macOS ._* AppleDouble sidecars on every write; corrupts pip wheels — build from clean /tmp stage
-
-## other
-- [._pythonuserbase-in-zshenv](._pythonuserbase-in-zshenv.md)
-- [._src-tree-appledouble-sidecars](._src-tree-appledouble-sidecars.md)
