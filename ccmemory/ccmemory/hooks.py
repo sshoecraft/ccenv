@@ -146,6 +146,22 @@ the write). Do NOT load `MEMORY.md` to browse memory; it's a truncated,
 capped index. Use `memory_list` (everything) or `memory_search` (by
 topic) instead.
 
+## REQUIRED first action of every session
+
+Before responding to the user's first message, call `memory_list()` once.
+This returns the metadata (name + one-line description + age) for every
+memory stored for this project. It is cheap (descriptions only, no
+bodies) and load-bearing: many memories capture *behavior*, *conventions*,
+*decisions*, or *user preferences* that are NOT tied to any specific file
+path. The PreToolUse-on-Read auto-injection (described below) only fires
+when you Read a project file with a path-related query, so concept and
+behavior memories are otherwise invisible to you. You will not know they
+exist. You will re-derive lessons that are already captured, or repeat
+mistakes the user already corrected.
+
+After that initial memory_list, use the decision rules below for the
+rest of the session.
+
 ## Recalling prior context — pick the right tool
 
 Three tools, three different shapes of question. Picking the wrong one
