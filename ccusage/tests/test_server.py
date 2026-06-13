@@ -139,7 +139,7 @@ class CCUsageServerTests(unittest.TestCase):
         try:
             c.initialize()
             resp = c.call_tool("get_context_usage")
-            text = resp["result"]["structuredContent"]["result"]
+            text = resp["result"]["content"][0]["text"]
             self.assertIn("250.0k/1.0M tokens", text)
             self.assertIn("25.0% used", text)
             self.assertIn("750.0k remaining", text)
@@ -186,7 +186,7 @@ class CCUsageServerTests(unittest.TestCase):
         try:
             c.initialize()
             resp = c.call_tool("get_context_usage")
-            text = resp["result"]["structuredContent"]["result"]
+            text = resp["result"]["content"][0]["text"]
             self.assertIn("400.0k/500.0k tokens", text)
             self.assertNotIn("5-hour limit", text)
             self.assertNotIn("7-day limit", text)
