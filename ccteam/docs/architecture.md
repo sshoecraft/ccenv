@@ -24,9 +24,31 @@
    Works across loopback (multiple Claudes on one host) and LAN.
    See `ccteam/discovery.py`.
 2. **NATS JetStream** — user-run external broker. Does all peer-to-peer
-   traffic. No direct TCP between peers.
+   traffic in the default (non-shared) mode. No direct TCP between peers
+   — **except** in the shared-filesystem p2p backend (see below).
 3. **MCP server** — one per Claude Code session; exposes MCP tools and
    a Unix socket for the hook CLI.
+
+## Coordination backends
+
+The lock table has two interchangeable backends, selected by
+`dlm_backend` (`auto` resolves to `p2p` when `shared_filesystem` else
+`nats`):
+
+- **`nats`** — `dlm.DLM` over a NATS KV bucket (CAS). Pairs with the
+  overlay/object-store for replication. Required when peers do **not**
+  share a filesystem.
+- **`p2p`** — `p2p_dlm.P2PDlm`: a broker-free, single-master
+  (lowest-node-ID) election DLM over per-node TCP (`p2p_transport.py`),
+  with membership from discovery. For shared filesystems, where
+  replication is redundant, so **no NATS, no overlay, no watcher**. This
+  is the one place ccteam opens direct TCP between peers. See
+  `docs/shared-dlm.md`.
+
+Both backends expose the same method surface
+(`claim`/`release`/`held_by`/`force_claim`/`purge_node`) returning the
+same `ClaimResult`/`LockState`/`Holder` dataclasses, so the MCP and IPC
+layers are backend-agnostic.
 
 ## Module overview
 
@@ -40,11 +62,13 @@
 | `discovery.py` | UDP multicast sender + receiver; peer table with liveness timeout. |
 | `nats_client.py` | Connect, ensure stream/KV/object-store, derive subject names. |
 | `dlm.py` | CAS-based lock table over NATS KV. Single-key-per-path, multi-holder value for SHARED. |
+| `p2p_transport.py` | Per-node TCP listener + best-effort send; length-prefixed JSON frames. Used only by the p2p backend. |
+| `p2p_dlm.py` | Broker-free election DLM (shared-filesystem). Lowest-node-ID master, request forwarding, failover via `TABLE_SYNC`. Mirrors the `dlm.DLM` surface. |
 | `overlay.py` | Snapshot, diff compute, event publish, event apply, replay. |
 | `local_ipc.py` | Unix-socket JSON line protocol for hook ↔ server. |
 | `watcher.py` | Continuous filesystem watcher (`watchfiles`); publishes DIFF/CREATE/DELETE for edits that bypass Claude's tools (sed, redirects, git pull, etc). |
 | `node.py` | Composition root: wires identity, NATS, discovery, DLM, overlay, watcher. |
-| `mcp_server.py` | FastMCP stdio server; also hosts the local IPC listener. |
+| `mcp_server.py` | FastMCP stdio server (via the stdlib `ccenvmcp` shim, not the official `mcp` SDK — keeps the 3.9 floor); also hosts the local IPC listener. |
 | `cli.py` | `ccteam` CLI + hook shim. |
 
 ## Key invariants

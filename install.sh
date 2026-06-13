@@ -37,6 +37,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+GLOBAL_CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 SKIP=()
 ONLY=()
 DO_OVERLAYS=1
@@ -58,7 +59,7 @@ CLAUDE_MD_OVERLAY_DIRS=(
 
 # Core subdirs in $SCRIPT_DIR — skipped during overlay scan of the script dir
 # (they're already handled explicitly above).
-CORE_SUBDIRS=(ccloop ccmemory ccusage ccproject ccteam)
+CORE_SUBDIRS=(ccenvmcp ccloop ccmemory ccusage ccproject ccteam)
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -280,21 +281,122 @@ pip_install_local() {
             -prune -exec rm -rf {} + 2>/dev/null || true
     fi
 
-    COPYFILE_DISABLE=1 pip3 install --user "$stage"
+    # Use `python3 -m pip` (not the `pip3` script) so an upgraded user-site pip
+    # — see ensure_build_toolchain — is actually used: ~/.local is ahead of the
+    # system dist-packages on sys.path, but the `pip3` entry-point script stays
+    # pinned to the old system pip.
+    COPYFILE_DISABLE=1 python3 -m pip install --user "$stage"
     local rc=$?
     rm -rf "$stage"
     return $rc
 }
 
 # ----------------------------------------------------------------------------
-# Core: ccproject (its own installer handles the awareness skill + snippet)
+# ensure_build_toolchain -- guarantee a PEP 621-capable build toolchain.
+#
+# Old distro toolchains (Debian 11 / Raspberry Pi OS: pip 20.3.4 + setuptools
+# 52, RHEL/Alma/Rocky 9 similar) predate PEP 621: they cannot parse a
+# [project] table, so each ccenv package builds as "UNKNOWN" and then trips
+# Debian's `install_layout` wheel-build bug. Every package in this repo
+# (ccenvmcp included) uses [project], so without a modern setuptools the very
+# first pip build fails — which is exactly the failure seen on `solardirector`.
+#
+# Fix: upgrade pip/setuptools/wheel into the --user site (~/.local) only when
+# the current setuptools is too old (major < 61). This never touches the
+# system interpreter that the distro's own apt/dnf tooling depends on, and is
+# a no-op on machines that already have a recent setuptools.
+# ----------------------------------------------------------------------------
+ensure_build_toolchain() {
+    local sv
+    sv=$(python3 -c 'import setuptools,sys; sys.stdout.write(setuptools.__version__.split(".")[0])' 2>/dev/null || echo 0)
+    if [ "${sv:-0}" -ge 61 ] 2>/dev/null; then
+        info "build toolchain: setuptools $(python3 -c 'import setuptools;print(setuptools.__version__)' 2>/dev/null) (PEP 621 ok)"
+        return 0
+    fi
+    info "build toolchain: setuptools ${sv:-?} is too old for PEP 621 — upgrading pip/setuptools/wheel into $PYTHONUSERBASE"
+    python3 -m pip install --user --upgrade pip setuptools wheel 2>&1 | sed 's/^/  /' \
+        || warn "toolchain upgrade failed — pip builds may still fail on this box"
+}
+
+# ----------------------------------------------------------------------------
+# Assemble the BASE ~/.claude/CLAUDE.md — FIRST, before any component runs.
+#
+# The top-level installer owns ONLY the base (this repo's bundled rules) plus
+# any user/system overlay blocks. It writes that into a delimited
+# [CCENV MANAGED] region and preserves everything outside it. Component
+# installers (ccproject, etc.) own and append their OWN sections afterward
+# (e.g. [AWARENESS PROTOCOL]); the top-level never installs a component's
+# CLAUDE.md content. Re-runs refresh only the managed region, leaving each
+# component's appended section intact.
+# ----------------------------------------------------------------------------
+assemble_ccenv_base_claude_md() {
+    step "global CLAUDE.md" "installing base ~/.claude/CLAUDE.md (components add their own sections)"
+    mkdir -p "$HOME/.claude"
+    local tmp; tmp=$(mktemp)
+    {
+        printf '# [CCENV MANAGED]\n'
+        printf '# Managed by ccenv install.sh — do not edit between these markers.\n\n'
+        cat "$SCRIPT_DIR/CLAUDE.md"
+        if [ "$DO_OVERLAYS" = "1" ]; then
+            for d in "${CLAUDE_MD_OVERLAY_DIRS[@]}"; do
+                [ -f "$d/CLAUDE.md" ] || continue
+                printf '\n# [CCENV OVERLAY: %s]\n' "$d"
+                cat "$d/CLAUDE.md"
+                printf '# [/CCENV OVERLAY: %s]\n' "$d"
+            done
+        fi
+        printf '# [/CCENV MANAGED]\n'
+        # Preserve component-owned sections that live outside our markers.
+        # (Skipped for a legacy file with no markers — that is backed up and
+        # rebuilt, then components re-append their sections.)
+        if [ -f "$GLOBAL_CLAUDE_MD" ] && grep -q '^# \[CCENV MANAGED\]' "$GLOBAL_CLAUDE_MD"; then
+            awk '
+                /^# \[CCENV MANAGED\]/   { skip=1; next }
+                /^# \[\/CCENV MANAGED\]/ { skip=0; next }
+                !skip { print }
+            ' "$GLOBAL_CLAUDE_MD"
+        fi
+    } > "$tmp"
+
+    if [ -f "$GLOBAL_CLAUDE_MD" ] && cmp -s "$tmp" "$GLOBAL_CLAUDE_MD"; then
+        rm -f "$tmp"
+        info "$GLOBAL_CLAUDE_MD already up to date"
+        return
+    fi
+    if [ -f "$GLOBAL_CLAUDE_MD" ]; then
+        local backup; backup="$GLOBAL_CLAUDE_MD.$(date +%Y%m%d%H%M%S)"
+        mv "$GLOBAL_CLAUDE_MD" "$backup"
+        echo "  existing $GLOBAL_CLAUDE_MD renamed to $backup"
+    fi
+    mv "$tmp" "$GLOBAL_CLAUDE_MD"
+    info "installed base $GLOBAL_CLAUDE_MD"
+}
+
+assemble_ccenv_base_claude_md
+
+# Make sure pip can build PEP 621 packages before we install any of them.
+ensure_build_toolchain
+
+# ----------------------------------------------------------------------------
+# Foundation: ccenvmcp — the stdlib-only MCP shim that ccmemory, ccusage, and
+# ccteam import in place of the official `mcp` SDK (which requires Python
+# 3.10+). It MUST be installed before them. It is deliberately NOT a declared
+# dependency of those packages (this repo installs from local source, never
+# PyPI, so a declared dep would trigger a failing PyPI lookup) — install
+# ordering is what guarantees it is importable from the shared --user site.
+# ----------------------------------------------------------------------------
+if should_install ccmemory || should_install ccusage || should_install ccteam; then
+    step ccenvmcp "pip install --user (MCP shim for ccmemory/ccusage/ccteam)"
+    pip_install_local "$SCRIPT_DIR/ccenvmcp"
+fi
+
+# ----------------------------------------------------------------------------
+# Core: ccproject (its own installer owns the awareness skill + its
+# [AWARENESS PROTOCOL] section in ~/.claude/CLAUDE.md)
 # ----------------------------------------------------------------------------
 if should_install ccproject; then
     step ccproject "running ccproject/install.sh"
-    # The top-level installer owns ~/.claude/CLAUDE.md assembly (bundled +
-    # awareness snippet + overlays) so ccproject's per-component CLAUDE.md
-    # merge would just be redundant work that we'd overwrite below.
-    CCPROJECT_SKIP_GLOBAL_CLAUDE_MD=1 bash "$SCRIPT_DIR/ccproject/install.sh"
+    bash "$SCRIPT_DIR/ccproject/install.sh"
 fi
 
 # ----------------------------------------------------------------------------
@@ -386,7 +488,6 @@ fi
 # ----------------------------------------------------------------------------
 # Overlay scan: additional MCP subdirs
 # ----------------------------------------------------------------------------
-GLOBAL_CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 
 install_overlay_mcp_subdir() {
     local subdir="$1"
@@ -452,59 +553,10 @@ if [ "$DO_OVERLAYS" = "1" ]; then
     done
 fi
 
-# ----------------------------------------------------------------------------
-# Assemble ~/.claude/CLAUDE.md
-#
-# The expected content is built fresh in /tmp from:
-#   1. The bundled CLAUDE.md (this repo's strict global rules — base)
-#   2. The [AWARENESS PROTOCOL] block from ccproject's snippet
-#   3. [CCENV OVERLAY: <dir>] blocks for each existing system/user overlay
-#
-# Then compared to ~/.claude/CLAUDE.md:
-#   - identical            -> delete the /tmp file, leave the existing one
-#   - different (or absent)-> rename existing to ~/.claude/CLAUDE.md.YYYYMMDDHHMMSS
-#                             (announced to the user), then install the new one
-#
-# This guarantees the bundled rules ALWAYS land on every machine where ccenv
-# is installed. We never silently merge into an existing file the user may
-# have edited — we back it up so they can diff and reconcile by hand.
-# ----------------------------------------------------------------------------
-step "global CLAUDE.md" "assembling ~/.claude/CLAUDE.md"
-TMP_CLAUDE_MD=$(mktemp)
-# 1. base: bundled CLAUDE.md
-cat "$SCRIPT_DIR/CLAUDE.md" > "$TMP_CLAUDE_MD"
-# 2. ccproject awareness snippet (if present)
-if [ -f "$SCRIPT_DIR/ccproject/global-claude-md-snippet.md" ]; then
-    printf '\n' >> "$TMP_CLAUDE_MD"
-    cat "$SCRIPT_DIR/ccproject/global-claude-md-snippet.md" >> "$TMP_CLAUDE_MD"
-fi
-# 3. overlay CLAUDE.md blocks (only when overlays are enabled)
-if [ "$DO_OVERLAYS" = "1" ]; then
-    for d in "${CLAUDE_MD_OVERLAY_DIRS[@]}"; do
-        [ -f "$d/CLAUDE.md" ] || continue
-        {
-            printf '\n'
-            printf '# [CCENV OVERLAY: %s]\n' "$d"
-            cat "$d/CLAUDE.md"
-            printf '# [/CCENV OVERLAY: %s]\n' "$d"
-        } >> "$TMP_CLAUDE_MD"
-    done
-fi
-
-mkdir -p "$HOME/.claude"
-if [ -f "$GLOBAL_CLAUDE_MD" ] && cmp -s "$TMP_CLAUDE_MD" "$GLOBAL_CLAUDE_MD"; then
-    rm -f "$TMP_CLAUDE_MD"
-    info "$GLOBAL_CLAUDE_MD is already up to date"
-else
-    if [ -f "$GLOBAL_CLAUDE_MD" ]; then
-        TS=$(date +%Y%m%d%H%M%S)
-        BACKUP="$GLOBAL_CLAUDE_MD.$TS"
-        mv "$GLOBAL_CLAUDE_MD" "$BACKUP"
-        echo "  $GLOBAL_CLAUDE_MD renamed to $BACKUP"
-    fi
-    mv "$TMP_CLAUDE_MD" "$GLOBAL_CLAUDE_MD"
-    info "installed new $GLOBAL_CLAUDE_MD"
-fi
+# NOTE: the base ~/.claude/CLAUDE.md is assembled BEFORE the components run
+# (see assemble_ccenv_base_claude_md, invoked above). Each component installer
+# owns and appends its own section (e.g. ccproject's [AWARENESS PROTOCOL]); the
+# top-level installer never reaches into a component's CLAUDE.md content.
 
 # ----------------------------------------------------------------------------
 # Verify

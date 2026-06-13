@@ -4,15 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccteam"
-version = "0.1.0"
+version = "0.3.0"
 description = "MCP coordination layer for multiple Claude Code instances working on the same codebase"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [{name = "Steve Shoecraft", email = "spshoecraft@gmail.com"}]
 dependencies = [
     "nats-py>=2.6.0",
-    "mcp>=1.0.0",
     "watchfiles>=0.21",
 ]
 

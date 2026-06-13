@@ -8,11 +8,11 @@ ccusage statusline (statusline.py) after every turn.
 import json
 import time
 
-from mcp.server.fastmcp import FastMCP
+from ccenvmcp import FastMCP
 
 from paths import cache_path
 
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 
 mcp = FastMCP("ccusage")
 

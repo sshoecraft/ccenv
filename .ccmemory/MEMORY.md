@@ -1,8 +1,11 @@
 ## feedback
+- [install-claude-md-component-owned](install-claude-md-component-owned.md) — Top-level install.sh owns only the BASE ~/.claude/CLAUDE.md (in a [CCENV MANAGED] marker region); each component owns/appends its own section.
 - [no-per-component-venvs](no-per-component-venvs.md) — ccenv components install via pip3 install --user (pipx as PEP 668 fallback); per-component venvs are explicitly rejected
 - [one-line-copy-paste-commands](one-line-copy-paste-commands.md) — Copy-paste shell commands in install output MUST be one physical line — never split with backslash continuations
 
 ## project
+- [ccenvmcp-stdlib-mcp-shim](ccenvmcp-stdlib-mcp-shim.md) — ccenvmcp: stdlib-only Python 3.9+ FastMCP-compatible shim replacing the mcp SDK across ccmemory/ccusage/ccteam so the bundle installs on 3.9.
+- [ccmemory-debian-build-unknown-install-layout](ccmemory-debian-build-unknown-install-layout.md) — FIX IMPLEMENTED (pending on-box verify): install.sh now bootstraps a PEP 621-capable toolchain (setuptools>=61) into --user before any pip build.
 - [pythonuserbase-banner-platform-gated](pythonuserbase-banner-platform-gated.md) — install.sh's REQUIRED-setup banner is gated on the platform's DEFAULT user-base; silent on Linux, fires on macOS+Homebrew Python
 
 ## reference
@@ -10,7 +13,3 @@
 - [mcp-heal-stale-command-pattern](mcp-heal-stale-command-pattern.md) — install.sh's register_mcp() compares stored Command+Args to the desired command and re-registers when stale — never simplify it away
 - [pythonuserbase-in-zshenv](pythonuserbase-in-zshenv.md) — PYTHONUSERBASE must be exported in ~/.zshenv (not ~/.zshrc) or Claude hooks/statusLine/MCP fail with ModuleNotFoundError
 - [src-tree-appledouble-sidecars](src-tree-appledouble-sidecars.md) — /src tree is on an xattr-less FS that spawns macOS ._* AppleDouble sidecars on every write; corrupts pip wheels — build from clean /tmp stage
-
-## other
-- [._pythonuserbase-in-zshenv](._pythonuserbase-in-zshenv.md)
-- [._src-tree-appledouble-sidecars](._src-tree-appledouble-sidecars.md)

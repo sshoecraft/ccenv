@@ -1,12 +1,12 @@
 [project]
-name = "ccmemory"
-version = "0.7.0"
-description = "Persistent file-backed memory for Claude Code: markdown of record + SQLite/FTS5 index + enforcement hooks + MCP server"
-readme = {text = "See CLAUDE.md for design notes and architecture.", content-type = "text/plain"}
+name = "ccenvmcp"
+version = "0.1.0"
+description = "Stdlib-only Python 3.9+ MCP server shim — a drop-in for the tools-only slice of the official mcp SDK, without its 3.10 floor"
+readme = {text = "See docs/mcp.md for the protocol surface and rationale.", content-type = "text/plain"}
 requires-python = ">=3.9"
 authors = [{name = "Steve Shoecraft", email = "spshoecraft@gmail.com"}]
 license = {text = "MIT"}
-keywords = ["claude-code", "mcp", "memory", "fts5", "knowledge-base"]
+keywords = ["claude-code", "mcp", "json-rpc", "stdio"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -20,17 +20,12 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = [
-  "pyyaml>=6.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
 dev = [
   "pytest>=7.0",
 ]
-
-[project.scripts]
-ccmemory = "ccmemory.cli:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -38,7 +33,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["ccmemory*"]
+include = ["ccenvmcp*"]
 exclude = ["tests*"]
 
 [tool.pytest.ini_options]

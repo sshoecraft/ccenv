@@ -246,6 +246,11 @@ async def cmd_session_start(args: argparse.Namespace) -> int:
 
     cfg = config_mod.load(pr.path)
 
+    # The p2p backend (shared filesystem) needs no broker — skip the probe
+    # so we don't falsely warn about NATS being down.
+    if cfg.effective_dlm_backend() == "p2p":
+        return 0
+
     # Suppress nats-py's chatty connect-failure noise. SessionStart hooks
     # must only emit our JSON on stdout; stderr goes to Claude Code's log.
     _logging.getLogger("nats").setLevel(_logging.CRITICAL)

@@ -46,6 +46,7 @@ class Announce:
     pid: int
     nats_url: str
     sent_at: float
+    dlm_port: int = 0  # peer's p2p DLM TCP listener port (0 = none)
 
     def to_bytes(self) -> bytes:
         return json.dumps({
@@ -57,6 +58,7 @@ class Announce:
             "pid": self.pid,
             "nats_url": self.nats_url,
             "sent_at": self.sent_at,
+            "dlm_port": self.dlm_port,
         }).encode("utf-8")
 
     @classmethod
@@ -75,6 +77,7 @@ class Announce:
                 pid=int(obj["pid"]),
                 nats_url=str(obj["nats_url"]),
                 sent_at=float(obj["sent_at"]),
+                dlm_port=int(obj.get("dlm_port", 0)),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -124,6 +127,7 @@ class Discovery:
         multicast_group: str = MULTICAST_GROUP,
         announce_interval_s: float = ANNOUNCE_INTERVAL_S,
         peer_timeout_s: float = PEER_TIMEOUT_S,
+        dlm_port: int = 0,
     ) -> None:
         self.cluster_id = cluster_id
         self.node_id = node_id
@@ -131,6 +135,7 @@ class Discovery:
         self.pid = pid
         self.nats_url = nats_url
         self.port = port
+        self.dlm_port = dlm_port
         self.multicast_group = multicast_group
         self.announce_interval_s = announce_interval_s
         self.peer_timeout_s = peer_timeout_s
@@ -234,6 +239,7 @@ class Discovery:
             pid=self.pid,
             nats_url=self.nats_url,
             sent_at=time.time(),
+            dlm_port=self.dlm_port,
         )
 
     async def announce_loop(self) -> None:

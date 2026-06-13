@@ -25,6 +25,8 @@ DEFAULT_NATS_URL = "nats://localhost:4222"
 DEFAULT_DISCOVERY_PORT = 7500
 DEFAULT_CLAIM_TIMEOUT_MS = 30_000
 DEFAULT_MAX_DIFF_SIZE = 1_048_576  # 1 MB
+DEFAULT_DLM_BACKEND = "auto"  # auto | nats | p2p
+DEFAULT_DLM_PORT = 0  # 0 = ephemeral; OS picks a free port
 
 
 @dataclass
@@ -35,10 +37,25 @@ class Config:
     max_diff_size: int = DEFAULT_MAX_DIFF_SIZE
     cluster_name_override: str | None = None
     shared_filesystem: bool = False
+    dlm_backend: str = DEFAULT_DLM_BACKEND
+    dlm_port: int = DEFAULT_DLM_PORT
     log_level: str = "INFO"
 
+    def effective_dlm_backend(self) -> str:
+        """Resolve ``auto`` to a concrete backend.
 
-_INT_FIELDS = {"discovery_port", "claim_timeout_ms", "max_diff_size"}
+        On a shared filesystem the overlay/replication layer is redundant
+        (all nodes see the same bytes), so coordination only needs a lock
+        table — served by the broker-free peer-to-peer DLM. Otherwise we
+        need NATS for replication anyway, so the KV lock table rides along.
+        """
+        backend = self.dlm_backend.lower()
+        if backend == "auto":
+            return "p2p" if self.shared_filesystem else "nats"
+        return backend
+
+
+_INT_FIELDS = {"discovery_port", "claim_timeout_ms", "max_diff_size", "dlm_port"}
 _BOOL_FIELDS = {"shared_filesystem"}
 _ENV_MAP = {
     "CCTEAM_NATS_URL": "nats_url",
@@ -47,6 +64,8 @@ _ENV_MAP = {
     "CCTEAM_MAX_DIFF_SIZE": "max_diff_size",
     "CCTEAM_CLUSTER": "cluster_name_override",
     "CCTEAM_SHARED": "shared_filesystem",
+    "CCTEAM_DLM_BACKEND": "dlm_backend",
+    "CCTEAM_DLM_PORT": "dlm_port",
     "CCTEAM_LOG_LEVEL": "log_level",
 }
 

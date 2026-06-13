@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccusage-mcp"
-version = "0.1.1"
+version = "0.2.0"
 description = "MCP server that exposes Claude Code's own context-window and rate-limit usage to the assistant"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 authors = [{ name = "Stephen Shoecraft", email = "spshoecraft@gmail.com" }]
 keywords = ["mcp", "claude", "claude-code", "context", "tokens"]
 classifiers = [
@@ -19,12 +19,13 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries",
 ]
-dependencies = ["mcp>=1.0.0"]
+dependencies = []
 
 [project.scripts]
 ccusage-mcp = "server:main"

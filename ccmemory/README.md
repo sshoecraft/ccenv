@@ -206,9 +206,11 @@ behavior, and sentinel detection.
 
 ## Dependencies
 
-- Python 3.10+
+- Python 3.9+
 - `pyyaml >= 6.0`
-- `mcp >= 1.0` (official Anthropic MCP Python SDK)
+- `ccenvmcp` — the bundle's stdlib-only MCP shim (installed first by the
+  top-level `install.sh`; replaces the official `mcp` SDK, which requires
+  Python 3.10+). Not a declared dependency — see `ccenvmcp/docs/mcp.md`.
 - `pytest >= 7.0` (dev only)
 
 Standard library: `sqlite3` (with FTS5 built in), `argparse`, `json`,

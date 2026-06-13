@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from ccenvmcp import FastMCP
 
 from . import dlm as dlm_mod
 from . import local_ipc
@@ -50,6 +50,15 @@ and so the change propagates via the overlay.
 Use `peers` to see who else is connected, `status` for your own state, \
 and `recent_changes` to see what others have edited.
 """
+
+
+def unavailable_msg(node: node_mod.Node, feature: str) -> str:
+    """Explain why a feature is unavailable, given the node's mode."""
+    if node.p2p:
+        return f"{feature} unavailable in p2p mode (shared filesystem, no NATS)"
+    if node.standalone:
+        return "ccteam standalone: NATS unreachable — coordination disabled"
+    return "node not started"
 
 
 def build_mcp(node: node_mod.Node) -> FastMCP:
@@ -93,14 +102,17 @@ def build_mcp(node: node_mod.Node) -> FastMCP:
         on timeout returns `granted: false, timed_out: true` with the
         current holders named so the caller can ask the user what to do.
         """
-        if node.dlm is None or node.overlay is None:
-            return {"granted": False, "error": ("ccteam standalone: NATS unreachable — coordination disabled"
-                   if node.standalone else "node not started")}
+        if node.dlm is None:
+            return {"granted": False, "error": unavailable_msg(node, "claim")}
+        has_overlay = node.overlay is not None
         lock_mode = dlm_mod.LockMode.EXCLUSIVE if mode.lower().startswith("ex") else dlm_mod.LockMode.SHARED
         effective_timeout = timeout_ms if timeout_ms is not None else node.cfg.claim_timeout_ms
         results = []
         for path in paths:
-            snap = node.overlay.snapshot(path) if lock_mode == dlm_mod.LockMode.EXCLUSIVE else None
+            snap = (
+                node.overlay.snapshot(path)
+                if has_overlay and lock_mode == dlm_mod.LockMode.EXCLUSIVE else None
+            )
             result = await node.dlm.claim(path, lock_mode, effective_timeout)
             results.append({
                 "path": path,
@@ -113,7 +125,8 @@ def build_mcp(node: node_mod.Node) -> FastMCP:
                 ] if not result.granted else [],
             })
             if result.granted:
-                await node.overlay.publish_claim(path, lock_mode.value)
+                if has_overlay:
+                    await node.overlay.publish_claim(path, lock_mode.value)
             elif snap is not None:
                 node.overlay.drop_snapshot(path)
         granted_all = all(r["granted"] for r in results)
@@ -122,14 +135,15 @@ def build_mcp(node: node_mod.Node) -> FastMCP:
     @mcp.tool()
     async def release(paths: list[str]) -> dict:
         """Release one or more held paths; publishes the diff on EX releases."""
-        if node.dlm is None or node.overlay is None:
-            return {"released": False, "error": ("ccteam standalone: NATS unreachable — coordination disabled"
-                   if node.standalone else "node not started")}
+        if node.dlm is None:
+            return {"released": False, "error": unavailable_msg(node, "release")}
+        has_overlay = node.overlay is not None
         results = []
         for path in paths:
-            env = await node.overlay.publish_on_release(path)
+            env = await node.overlay.publish_on_release(path) if has_overlay else None
             ok = await node.dlm.release(path)
-            await node.overlay.publish_release(path)
+            if has_overlay:
+                await node.overlay.publish_release(path)
             results.append({
                 "path": path,
                 "released": ok,
@@ -146,6 +160,8 @@ def build_mcp(node: node_mod.Node) -> FastMCP:
             "node_id": node.identity.node_id,
             "root": str(node.root),
             "standalone": node.standalone,
+            "p2p": node.p2p,
+            "dlm_backend": node.cfg.effective_dlm_backend(),
             "peers": len(node.peers()),
             "checkpoint": {
                 "number": cp.checkpoint_number if cp else None,
@@ -167,8 +183,7 @@ def build_mcp(node: node_mod.Node) -> FastMCP:
         If `path` is provided, returns only events affecting that path.
         """
         if node.resources is None:
-            return {"events": [], "error": ("ccteam standalone: NATS unreachable — coordination disabled"
-                   if node.standalone else "node not started")}
+            return {"events": [], "error": unavailable_msg(node, "recent_changes")}
 
         js = node.resources.js
         stream = node.resources.events_stream_name
@@ -217,8 +232,7 @@ def build_mcp(node: node_mod.Node) -> FastMCP:
         before invoking.
         """
         if node.dlm is None:
-            return {"granted": False, "error": ("ccteam standalone: NATS unreachable — coordination disabled"
-                   if node.standalone else "node not started")}
+            return {"granted": False, "error": unavailable_msg(node, "force_claim")}
         results = []
         for path in paths:
             r = await node.force_claim(path, reason)
@@ -236,8 +250,7 @@ def build_mcp(node: node_mod.Node) -> FastMCP:
         out-of-coordination edits (e.g., editor used outside Claude).
         """
         if node.overlay is None:
-            return {"error": ("ccteam standalone: NATS unreachable — coordination disabled"
-                   if node.standalone else "node not started")}
+            return {"error": unavailable_msg(node, "verify")}
         return node.verify()
 
     @mcp.tool()
@@ -249,8 +262,7 @@ def build_mcp(node: node_mod.Node) -> FastMCP:
         you want to reset to the cluster's view.
         """
         if node.overlay is None:
-            return {"error": ("ccteam standalone: NATS unreachable — coordination disabled"
-                   if node.standalone else "node not started")}
+            return {"error": unavailable_msg(node, "resync")}
         return await node.resync(path)
 
     @mcp.tool()
@@ -263,8 +275,7 @@ def build_mcp(node: node_mod.Node) -> FastMCP:
         peers receive them.
         """
         if node.resources is None:
-            return {"ok": False, "error": ("ccteam standalone: NATS unreachable — coordination disabled"
-                   if node.standalone else "node not started")}
+            return {"ok": False, "error": unavailable_msg(node, "checkpoint")}
         meta = await node.take_checkpoint(message=message)
         return {
             "ok": True,
@@ -284,16 +295,21 @@ def build_ipc_handler(node: node_mod.Node) -> local_ipc.Handler:
         args = req.args or {}
 
         if cmd == "claim":
-            if node.dlm is None or node.overlay is None:
-                return local_ipc.Response(ok=False, data={}, error="node not started")
+            if node.dlm is None:
+                return local_ipc.Response(ok=False, data={}, error=unavailable_msg(node, "claim"))
+            has_overlay = node.overlay is not None
             path = args["path"]
             mode_str = str(args.get("mode", "exclusive")).lower()
             mode = dlm_mod.LockMode.EXCLUSIVE if mode_str.startswith("ex") else dlm_mod.LockMode.SHARED
             timeout_ms = int(args.get("timeout_ms", node.cfg.claim_timeout_ms))
-            snap = node.overlay.snapshot(path) if mode == dlm_mod.LockMode.EXCLUSIVE else None
+            snap = (
+                node.overlay.snapshot(path)
+                if has_overlay and mode == dlm_mod.LockMode.EXCLUSIVE else None
+            )
             result = await node.dlm.claim(path, mode, timeout_ms)
             if result.granted:
-                await node.overlay.publish_claim(path, mode.value)
+                if has_overlay:
+                    await node.overlay.publish_claim(path, mode.value)
             elif snap is not None:
                 node.overlay.drop_snapshot(path)
             return local_ipc.Response(
@@ -313,12 +329,14 @@ def build_ipc_handler(node: node_mod.Node) -> local_ipc.Handler:
             )
 
         if cmd == "release":
-            if node.dlm is None or node.overlay is None:
-                return local_ipc.Response(ok=False, data={}, error="node not started")
+            if node.dlm is None:
+                return local_ipc.Response(ok=False, data={}, error=unavailable_msg(node, "release"))
+            has_overlay = node.overlay is not None
             path = args["path"]
-            env = await node.overlay.publish_on_release(path)
+            env = await node.overlay.publish_on_release(path) if has_overlay else None
             ok = await node.dlm.release(path)
-            await node.overlay.publish_release(path)
+            if has_overlay:
+                await node.overlay.publish_release(path)
             return local_ipc.Response(
                 ok=ok,
                 data={"released": ok, "event": env.type if env is not None else None},
@@ -399,6 +417,12 @@ async def run(
             file=sys.stderr,
         )
     else:
+        if node.p2p:
+            print(
+                f"ccteam: shared-filesystem P2P mode — broker-free DLM on TCP "
+                f"port {node.transport.port if node.transport else 0}, no NATS.",
+                file=sys.stderr,
+            )
         ipc_path = local_ipc.socket_path_for(node.root)
         ipc = local_ipc.Server(ipc_path, build_ipc_handler(node))
         await ipc.start()

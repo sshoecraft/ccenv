@@ -17,6 +17,8 @@ from . import discovery as discovery_mod
 from . import manifest as manifest_mod
 from . import nats_client
 from . import overlay as overlay_mod
+from . import p2p_dlm as p2p_dlm_mod
+from . import p2p_transport as p2p_transport_mod
 from . import project_root as project_root_mod
 from . import watcher as watcher_mod
 
@@ -65,14 +67,16 @@ class Node:
         self.identity = identity
         self.resources: nats_client.NatsResources | None = None
         self.discovery: discovery_mod.Discovery | None = None
-        self.dlm: dlm_mod.DLM | None = None
+        self.dlm: dlm_mod.DLM | p2p_dlm_mod.P2PDlm | None = None
         self.overlay: overlay_mod.Overlay | None = None
         self.watcher: watcher_mod.FsWatcher | None = None
+        self.transport: p2p_transport_mod.Transport | None = None
         self.checkpoint_meta: checkpoint_mod.CheckpointMeta | None = None
         self.started_at: float | None = None
         self.consumer_task: asyncio.Task | None = None
         self.running: bool = False
         self.standalone: bool = False
+        self.p2p: bool = False
 
     async def start(
         self,
@@ -85,6 +89,10 @@ class Node:
         Raises ``StartupDivergence`` if the local state does not match the
         cluster's checkpoint and no escape hatch flag is set.
         """
+        if self.cfg.effective_dlm_backend() == "p2p":
+            await self.start_p2p()
+            return
+
         try:
             self.resources = await nats_client.bootstrap(
                 self.cfg.nats_url, self.identity.cluster_id, self.identity.node_id,
@@ -151,6 +159,76 @@ class Node:
             self.identity.cluster_id, self.identity.node_id, self.root,
         )
 
+    async def start_p2p(self) -> None:
+        """Start in broker-free peer-to-peer mode (shared filesystem).
+
+        No NATS: replication is unnecessary when every node shares the
+        same bytes, so only the lock table is coordinated — via the
+        election DLM over a per-node TCP listener. Discovery provides
+        membership; no overlay, watcher, or event consumer is created.
+        """
+        self.transport = p2p_transport_mod.Transport(port=self.cfg.dlm_port)
+        await self.transport.start()
+
+        self.dlm = p2p_dlm_mod.P2PDlm(
+            node_id=self.identity.node_id,
+            pid=self.identity.pid,
+            hostname=self.identity.hostname,
+            transport=self.transport,
+            members_fn=self.p2p_members,
+        )
+
+        self.discovery = discovery_mod.Discovery(
+            cluster_id=self.identity.cluster_id,
+            node_id=self.identity.node_id,
+            hostname=self.identity.hostname,
+            pid=self.identity.pid,
+            nats_url=self.cfg.nats_url,
+            port=self.cfg.discovery_port,
+            dlm_port=self.transport.port,
+        )
+        self.discovery.on_peer_event(self.on_peer_event_p2p)
+        await self.discovery.start()
+
+        self.p2p = True
+        self.running = True
+        self.started_at = time.time()
+        # Establish the initial master (no-op seed when we're alone).
+        await self.dlm.on_membership_change()
+        log.info(
+            "node started (p2p): cluster=%s node=%s dlm_port=%d root=%s",
+            self.identity.cluster_id, self.identity.node_id,
+            self.transport.port, self.root,
+        )
+
+    def p2p_members(self) -> dict[str, tuple[str, int, str, int]]:
+        """Live p2p-capable peers as {node_id: (host, port, hostname, pid)}."""
+        out: dict[str, tuple[str, int, str, int]] = {}
+        if self.discovery is None:
+            return out
+        for p in self.discovery.peers.values():
+            dlm_port = p.announce.dlm_port
+            if dlm_port:
+                out[p.announce.node_id] = (
+                    p.addr[0], dlm_port, p.announce.hostname, p.announce.pid,
+                )
+        return out
+
+    async def on_peer_event_p2p(self, peer: discovery_mod.Peer, event: str) -> None:
+        if not isinstance(self.dlm, p2p_dlm_mod.P2PDlm):
+            return
+        try:
+            await self.dlm.on_membership_change()
+            if event == "leave":
+                count = await self.dlm.purge_node(peer.announce.node_id)
+                if count:
+                    log.info(
+                        "purged %d locks for departed node %s",
+                        count, peer.announce.node_id,
+                    )
+        except Exception:
+            log.exception("p2p membership handling failed for %s", event)
+
     async def stop(self) -> None:
         self.running = False
         if self.consumer_task is not None:
@@ -164,6 +242,8 @@ class Node:
             await self.discovery.stop()
         if self.watcher is not None:
             await self.watcher.stop()
+        if self.transport is not None:
+            await self.transport.stop()
         if self.resources is not None:
             await nats_client.close(self.resources)
         log.info("node stopped")
@@ -478,11 +558,10 @@ class Node:
         of preempted holders so peers have an audit trail.
         """
         assert self.dlm is not None
-        assert self.overlay is not None
         result, prior = await self.dlm.force_claim(
             rel_path, dlm_mod.LockMode.EXCLUSIVE,
         )
-        if result.granted:
+        if result.granted and self.overlay is not None:
             env = overlay_mod.EventEnvelope(
                 type=overlay_mod.EventType.CLAIM.value,
                 path=rel_path,

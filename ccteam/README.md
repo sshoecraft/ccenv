@@ -44,7 +44,8 @@ Three layers, each doing one thing:
 ## Requirements
 
 - **Linux or macOS.** Windows is not supported — run in WSL if you must.
-- Python 3.11+
+- Python 3.9+ (MCP transport is the bundle's stdlib `ccenvmcp` shim, not the
+  official `mcp` SDK, so no 3.10 floor).
 - A reachable `nats-server` with JetStream enabled (run your own; the
   package does not ship or auto-launch one).
 - Claude Code itself, for the MCP integration.
@@ -87,6 +88,8 @@ Precedence (highest first): explicit arg → env var →
 | `CCTEAM_CLAIM_TIMEOUT_MS` | `30000` | Default claim wait |
 | `CCTEAM_MAX_DIFF_SIZE` | `1048576` | Max inline diff payload (1 MB) |
 | `CCTEAM_SHARED` | `false` | Shared-filesystem mode (don't apply peer diffs locally) |
+| `CCTEAM_DLM_BACKEND` | `auto` | Lock backend: `auto` \| `nats` \| `p2p`. `auto` → `p2p` when shared, else `nats` |
+| `CCTEAM_DLM_PORT` | `0` | TCP port for the p2p DLM listener (`0` = ephemeral, advertised via discovery) |
 | `CCTEAM_CLUSTER` | auto | Override cluster name |
 
 ## MCP tools
@@ -128,6 +131,29 @@ pull`) are not locked — we can't tell from a shell command what paths
 will change — but they are *replicated* via a continuous filesystem
 watcher running inside the MCP server. Hashes are deduped against
 Claude's own edits so nothing double-publishes.
+
+## Shared filesystem (broker-free, no NATS)
+
+If your peers share a mounted filesystem (same LAN, same NFS/SMB mount),
+replication is redundant — the bytes are already common to every node.
+In that case ccteam can coordinate locks **without NATS at all**:
+
+```bash
+export CCTEAM_SHARED=true        # → dlm_backend auto-resolves to p2p
+```
+
+The p2p backend runs a broker-free, single-master (lowest-node-ID)
+election DLM over direct TCP between peers, with membership from the
+existing UDP-multicast discovery. A NATS outage cannot disable
+coordination because there is no NATS in the path. The trade-off:
+`recent_changes`, `checkpoint`, `resync`, and `verify` are unavailable in
+this mode (they depend on the NATS overlay/object-store; on a shared FS
+there is no diff log to report and no second copy to verify against).
+`claim`, `release`, `peers`, `status`, and `force_claim` work as usual,
+including the auto-claim Edit/Write hooks.
+
+See [docs/shared-dlm.md](docs/shared-dlm.md) for the protocol, election,
+and failover details.
 
 ## Checkpoints
 

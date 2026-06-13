@@ -1,8 +1,9 @@
 """ccmemory MCP server — exposes the store as MCP tools.
 
-Uses the official Python ``mcp`` SDK (same pattern as /src/influx_mcp). The
-SDK handles protocol handshake, capability negotiation, and stdio framing,
-so this module only declares tools and dispatches to the store.
+Uses ``ccenvmcp`` (a stdlib-only, Python 3.9+ MCP shim) instead of the official
+``mcp`` SDK, which requires Python >=3.10. The shim handles the JSON-RPC
+handshake, capability negotiation, and stdio framing, so this module only
+declares tools and dispatches to the store.
 
 Tools:
   - memory_search(query, n=5)
@@ -14,10 +15,8 @@ Tools:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -54,83 +53,48 @@ def _err(s: str) -> list[dict]:
     return [{"type": "text", "text": s}]
 
 
-def serve() -> int:
-    # Autoinstall hooks on MCP server boot. This is ccmemory's real entry
-    # point (the user "runs" ccmemory by having Claude Code spawn the MCP
-    # server), so it's the natural choke point for self-install — same
-    # logic as /src/ccloop's runner calling ensure_registered() at start,
-    # just applied to ccmemory's actual entry point instead of a CLI.
-    from . import installer, migrate as migrate_mod
-    installer.autoinstall_quiet()
-    # Same pattern for the legacy-dir → project-local-dir migration.
-    migrate_mod.automigrate_quiet()
+def build_app():
+    """Construct the ccenvmcp app with all tools registered.
 
-    try:
-        from mcp.server import Server
-        from mcp.server.stdio import stdio_server
-        import mcp.types as types
-    except ImportError:
-        sys.stderr.write(
-            "ccmemory mcp: the `mcp` package is not installed.\n"
-            "Install with: pip install mcp\n"
-        )
-        return 1
+    Separated from ``serve()`` (which also performs boot-time self-install and
+    runs the stdio loop) so the tool surface can be exercised in tests.
+    """
+    from ccenvmcp import FastMCP
 
-    app = Server("ccmemory")
+    app = FastMCP("ccmemory")
 
-    @app.list_tools()
-    async def list_tools() -> list[types.Tool]:
-        return [
-            types.Tool(
-                name="memory_search",
-                description="Full-text search over project memory. Returns ranked list of {name, type, description, age_days, path}.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "search terms"},
-                        "n": {"type": "integer", "description": "max results", "default": 5},
-                    },
-                    "required": ["query"],
-                },
-            ),
-            types.Tool(
-                name="memory_get",
-                description="Fetch one memory file's full contents by name.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {"name": {"type": "string"}},
-                    "required": ["name"],
-                },
-            ),
-            types.Tool(
-                name="memory_write",
-                description="Create or overwrite a memory file. Description is capped at 150 chars.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "kebab-case slug, used as filename"},
-                        "type": {"type": "string", "enum": ["user", "feedback", "project", "reference"]},
-                        "description": {"type": "string", "description": "one-line summary for the index"},
-                        "body": {"type": "string", "description": "markdown body"},
-                        "tags": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["name", "type", "description", "body"],
-                },
-            ),
-            types.Tool(
-                name="memory_stats",
-                description="Counts by type, DB size, and DB path.",
-                inputSchema={"type": "object", "properties": {}},
-            ),
-            types.Tool(
-                name="memory_regen_index",
-                description="Regenerate MEMORY.md from frontmatter descriptions.",
-                inputSchema={"type": "object", "properties": {}},
-            ),
-        ]
+    # Schemas are hand-written (rather than introspected) to preserve the
+    # memory_write `type` enum, per-field descriptions, and defaults exactly.
+    SCHEMAS = {
+        "memory_search": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "search terms"},
+                "n": {"type": "integer", "description": "max results", "default": 5},
+            },
+            "required": ["query"],
+        },
+        "memory_get": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+        "memory_write": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "kebab-case slug, used as filename"},
+                "type": {"type": "string", "enum": ["user", "feedback", "project", "reference"]},
+                "description": {"type": "string", "description": "one-line summary for the index"},
+                "body": {"type": "string", "description": "markdown body"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["name", "type", "description", "body"],
+        },
+        "memory_stats": {"type": "object", "properties": {}},
+        "memory_regen_index": {"type": "object", "properties": {}},
+    }
 
-    @app.call_tool()
-    async def call_tool(name: str, arguments: dict):
+    def dispatch(name: str, arguments: dict):
         try:
             d = _resolve_dir()
         except RuntimeError as e:
@@ -188,9 +152,60 @@ def serve() -> int:
             log.exception("tool %s failed", name)
             return _err(f"{type(e).__name__}: {e}")
 
-    async def _run():
-        async with stdio_server() as (read_stream, write_stream):
-            await app.run(read_stream, write_stream, app.create_initialization_options())
+    @app.tool(
+        name="memory_search",
+        description="Full-text search over project memory. Returns ranked list of {name, type, description, age_days, path}.",
+        schema=SCHEMAS["memory_search"],
+    )
+    def memory_search(**kwargs):
+        return dispatch("memory_search", kwargs)
 
-    asyncio.run(_run())
+    @app.tool(
+        name="memory_get",
+        description="Fetch one memory file's full contents by name.",
+        schema=SCHEMAS["memory_get"],
+    )
+    def memory_get(**kwargs):
+        return dispatch("memory_get", kwargs)
+
+    @app.tool(
+        name="memory_write",
+        description="Create or overwrite a memory file. Description is capped at 150 chars.",
+        schema=SCHEMAS["memory_write"],
+    )
+    def memory_write(**kwargs):
+        return dispatch("memory_write", kwargs)
+
+    @app.tool(
+        name="memory_stats",
+        description="Counts by type, DB size, and DB path.",
+        schema=SCHEMAS["memory_stats"],
+    )
+    def memory_stats(**kwargs):
+        return dispatch("memory_stats", kwargs)
+
+    @app.tool(
+        name="memory_regen_index",
+        description="Regenerate MEMORY.md from frontmatter descriptions.",
+        schema=SCHEMAS["memory_regen_index"],
+    )
+    def memory_regen_index(**kwargs):
+        return dispatch("memory_regen_index", kwargs)
+
+    return app
+
+
+def serve() -> int:
+    # Autoinstall hooks on MCP server boot. This is ccmemory's real entry
+    # point (the user "runs" ccmemory by having Claude Code spawn the MCP
+    # server), so it's the natural choke point for self-install — same
+    # logic as /src/ccloop's runner calling ensure_registered() at start,
+    # just applied to ccmemory's actual entry point instead of a CLI.
+    from . import installer, migrate as migrate_mod
+    installer.autoinstall_quiet()
+    # Same pattern for the legacy-dir → project-local-dir migration.
+    migrate_mod.automigrate_quiet()
+
+    app = build_app()
+    app.run()
     return 0

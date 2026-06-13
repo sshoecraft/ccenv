@@ -102,7 +102,7 @@ output so Claude can judge staleness.
 
 ## Files
 
-- `server.py` — FastMCP server, defines the two tools (`ccusage-mcp`)
+- `server.py` — MCP server (via the `ccenvmcp` FastMCP shim), defines the two tools (`ccusage-mcp`)
 - `statusline.py` — Claude Code statusline + cache writer (`ccusage-statusline`)
 - `paths.py` — shared cache-path resolution, imported by both
 - `run_server.py` — stdio entrypoint for running the MCP server from source
