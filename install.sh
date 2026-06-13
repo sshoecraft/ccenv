@@ -649,20 +649,6 @@ echo "=== verifying installed commands ==="
 # won't see the commands in an interactive shell until they fix their rc.
 if [ -n "$USER_BIN" ]; then
     info "user-bin: $USER_BIN"
-    USER_BIN_ON_REAL_PATH=0
-    OLD_IFS="$IFS"; IFS=":"
-    for d in $ORIGINAL_PATH; do
-        [ "$d" = "$USER_BIN" ] && USER_BIN_ON_REAL_PATH=1 && break
-    done
-    IFS="$OLD_IFS"
-    if [ "$USER_BIN_ON_REAL_PATH" = "1" ]; then
-        info "$USER_BIN is on your PATH"
-    else
-        warn "$USER_BIN is NOT on your shell PATH"
-        warn "  Add to your shell rc:  export PATH=\"$USER_BIN:\$PATH\""
-        warn "  (MCP servers still work because we registered absolute paths;"
-        warn "   this only affects interactive shell command lookup.)"
-    fi
 fi
 
 for cmd in ccmemory ccusage-mcp ccusage-statusline ccloop ccteam ccteam-mcp; do
@@ -683,93 +669,87 @@ if [ "$HAS_CLAUDE" = "1" ]; then
 fi
 
 # ----------------------------------------------------------------------------
-# Shell environment setup (REQUIRED — not optional)
+# Shell environment setup — auto-write to the env file sourced for EVERY
+# shell invocation, interactive or not.
 # ----------------------------------------------------------------------------
-# ccenv installs Python packages with PYTHONUSERBASE=$HOME/.local so the
-# scripts land in ~/.local/bin (consistent across Mac/Linux, on PATH by
-# default). But Python at runtime only consults PYTHONUSERBASE if it is in
-# the *environment* — the install-time export doesn't travel with the
-# scripts. Without PYTHONUSERBASE in the user's shell env, Python's site.py
-# falls back to the platform default user-base (~/Library/Python/<ver>/ on
-# macOS), which is empty (we wrote packages elsewhere), and every ccenv
-# binary fails at runtime with `ModuleNotFoundError`.
+# Claude Code spawns hooks, MCP servers, and the statusLine in
+# NON-INTERACTIVE shells. The user's interactive rc file (~/.bashrc,
+# ~/.zshrc) is NOT sourced in those contexts, so env vars we need have
+# to live in the file sourced on every invocation:
 #
-# Same trade-off the official `claude` installer makes for ~/.local/bin on
-# PATH: we don't edit the user's rc for them, but we print the exact line
-# they need to paste so this is one copy-paste, not detective work.
-# Only ask the user to set PYTHONUSERBASE when their platform's DEFAULT
-# user-base differs from ~/.local. On Linux they already match, so the env
-# var is purely redundant — pip --user lands in ~/.local and Python at
-# runtime also looks there. On macOS+Homebrew Python the default is
-# ~/Library/Python/<ver>, so the env var is required at runtime for any
-# script that needs to import our packages.
-need_pythonuserbase=0
-if [ "$PLATFORM_DEFAULTS_TO_LOCAL" != "1" ] && [ "$ORIGINAL_PYTHONUSERBASE" != "$HOME/.local" ]; then
-    need_pythonuserbase=1
-fi
-need_path=1
-if [ "$USER_BIN_ON_REAL_PATH" = "1" ]; then
-    need_path=0
+#   zsh  → ~/.zshenv  (sourced for ALL zsh invocations)
+#   bash → ~/.bashrc  (no bash equivalent of zshenv; works for terminal-
+#                      launched claude since env inherits to subprocesses)
+#
+# Per the [pythonuserbase-in-zshenv] memory: Windsurf writes to ~/.zshrc
+# (the wrong file), Claude hooks fail with ModuleNotFoundError. We don't
+# repeat that mistake.
+#
+# Idempotent: each ensure_* call checks the file before appending. PATH
+# additions use the runtime case-guard idiom so even when the env file is
+# sourced repeatedly (nested subshells, fresh terminals over time)
+# ~/.local/bin doesn't accumulate in PATH.
+
+case "${SHELL##*/}" in
+    zsh)  CCENV_ENV_FILE="$HOME/.zshenv" ;;
+    bash) CCENV_ENV_FILE="$HOME/.bashrc" ;;
+    *)    CCENV_ENV_FILE="$HOME/.profile" ;;
+esac
+
+step env "ensuring exports in $CCENV_ENV_FILE"
+[ -f "$CCENV_ENV_FILE" ] || touch "$CCENV_ENV_FILE"
+
+# Ensure VAR=VALUE is exported. If the file already exports VAR (to ANY
+# value — we don't override the user's own setting), leave it alone.
+ensure_env_var() {
+    local var="$1" value="$2"
+    if grep -qE "^[[:space:]]*export[[:space:]]+${var}=" "$CCENV_ENV_FILE" 2>/dev/null; then
+        info "$var already exported in $CCENV_ENV_FILE — leaving alone"
+        return
+    fi
+    {
+        printf '\n# [ccenv]\n'
+        printf 'export %s=%s\n' "$var" "$value"
+    } >> "$CCENV_ENV_FILE"
+    info "appended: export $var=$value"
+}
+
+# Ensure $dir is prepended to PATH via a runtime-guarded export. The case
+# guard makes the line a no-op when PATH already contains $dir, so nested
+# subshells / repeated sourcing don't keep adding duplicate entries. The
+# check for presence in the file just looks for the dir literal anywhere —
+# that catches the user's existing entries regardless of how they wrote
+# the export.
+ensure_env_path() {
+    local dir="$1"  # e.g. '$HOME/.local/bin'
+    local esc
+    esc=$(printf '%s' "$dir" | sed -e 's/[][\\.^$*/]/\\&/g')
+    if grep -qE "$esc" "$CCENV_ENV_FILE" 2>/dev/null; then
+        info "$dir already referenced in $CCENV_ENV_FILE — leaving alone"
+        return
+    fi
+    {
+        printf '\n# [ccenv]\n'
+        printf 'case ":$PATH:" in\n'
+        printf '    *":%s:"*) ;;\n' "$dir"
+        printf '    *) export PATH="%s:$PATH" ;;\n' "$dir"
+        printf 'esac\n'
+    } >> "$CCENV_ENV_FILE"
+    info "appended PATH guard for $dir"
+}
+
+# PATH always gets ~/.local/bin (pip --user lands binaries there).
+ensure_env_path '$HOME/.local/bin'
+
+# PYTHONUSERBASE only when the platform default isn't already ~/.local.
+# Linux's posix_user scheme already defaults there; macOS with Homebrew
+# Python uses osx_framework_user (points at ~/Library/Python/<ver>), and
+# that's when this matters.
+if [ "$PLATFORM_DEFAULTS_TO_LOCAL" != "1" ]; then
+    ensure_env_var PYTHONUSERBASE '"$HOME/.local"'
 fi
 
-if [ "$need_pythonuserbase" = "1" ] || [ "$need_path" = "1" ]; then
-    # For zsh, this MUST go in ~/.zshenv, not ~/.zshrc: ~/.zshrc is sourced
-    # only by *interactive* shells, but Claude Code runs hooks, the statusLine
-    # and MCP servers in *non-interactive* shells. zsh sources ~/.zshenv on
-    # every invocation, so it's the only file that guarantees PYTHONUSERBASE
-    # reaches those subprocesses. (bash has no clean non-interactive analogue;
-    # ~/.bashrc is the pragmatic best target there.)
-    case "${SHELL##*/}" in
-        zsh)  rc_file="~/.zshenv" ;;
-        bash) rc_file="~/.bashrc" ;;
-        *)    rc_file="your shell rc" ;;
-    esac
-
-    echo ""
-    echo "============================================================"
-    echo "  REQUIRED: shell environment setup"
-    echo "============================================================"
-    echo ""
-    echo "  Add the following to $rc_file (then 'source $rc_file' or open"
-    echo "  a new terminal):"
-    echo ""
-    if [ "$need_pythonuserbase" = "1" ]; then
-        echo "    - Without PYTHONUSERBASE, ccenv binaries will fail at"
-        echo "      runtime with ModuleNotFoundError when launched by Claude"
-        echo "      Code's hooks or MCP subprocesses. Python's default"
-        echo "      user-base on this platform is $PLATFORM_USER_BASE,"
-        echo "      but we installed packages under \$HOME/.local."
-    fi
-    if [ "$need_path" = "1" ]; then
-        echo "    - Without \$HOME/.local/bin on PATH, the ccenv commands"
-        echo "      (ccloop, ccmemory, etc.) aren't accessible from your"
-        echo "      shell. (MCP/hook invocations still work — they use"
-        echo "      absolute paths registered at install time.)"
-    fi
-    echo ""
-    if [ "$need_pythonuserbase" = "1" ]; then
-        echo "    export PYTHONUSERBASE=\"\$HOME/.local\""
-    fi
-    if [ "$need_path" = "1" ]; then
-        echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
-    fi
-    echo ""
-    echo "  Copy-paste one-liner to append both (idempotent — checks first):"
-    echo ""
-    case "${SHELL##*/}" in
-        zsh)  target_rc="\$HOME/.zshenv" ;;
-        bash) target_rc="\$HOME/.bashrc" ;;
-        *)    target_rc="\$HOME/.profile" ;;
-    esac
-    if [ "$need_pythonuserbase" = "1" ]; then
-        echo "    grep -q PYTHONUSERBASE $target_rc 2>/dev/null || echo 'export PYTHONUSERBASE=\"\$HOME/.local\"' >> $target_rc"
-    fi
-    if [ "$need_path" = "1" ]; then
-        echo "    grep -q 'PATH.*\\.local/bin' $target_rc 2>/dev/null || echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> $target_rc"
-    fi
-    echo ""
-    echo "============================================================"
-fi
+info "open a new terminal or run: . $CCENV_ENV_FILE"
 
 # ----------------------------------------------------------------------------
 # Record what we just installed.

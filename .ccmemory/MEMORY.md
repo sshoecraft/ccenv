@@ -2,6 +2,7 @@
 - [install-claude-md-component-owned](install-claude-md-component-owned.md) — Top-level install.sh owns only the BASE ~/.claude/CLAUDE.md (in a [CCENV MANAGED] marker region); each component owns/appends its own section.
 - [no-git-checkout-to-undo-own-edits](no-git-checkout-to-undo-own-edits.md) — NEVER run git for ANY reason without explicit direction — including read-only checks (status/diff/log). The ban has no exceptions.
 - [no-per-component-venvs](no-per-component-venvs.md) — ccenv components install via pip3 install --user (pipx as PEP 668 fallback); per-component venvs are explicitly rejected
+- [no-version-history-in-claude-md](no-version-history-in-claude-md.md) — Version history goes in CHANGELOG.md, not CLAUDE.md. CLAUDE.md is for purpose/architecture/conventions, never for changelog content.
 - [one-line-copy-paste-commands](one-line-copy-paste-commands.md) — Copy-paste shell commands in install output MUST be one physical line — never split with backslash continuations
 
 ## project
