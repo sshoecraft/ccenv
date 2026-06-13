@@ -5,7 +5,7 @@
 
 ## project
 - [ccenvmcp-stdlib-mcp-shim](ccenvmcp-stdlib-mcp-shim.md) — ccenvmcp: stdlib-only Python 3.9+ FastMCP-compatible shim replacing the mcp SDK across ccmemory/ccusage/ccteam so the bundle installs on 3.9.
-- [ccmemory-debian-build-unknown-install-layout](ccmemory-debian-build-unknown-install-layout.md) — FIX IMPLEMENTED (pending on-box verify): install.sh now bootstraps a PEP 621-capable toolchain (setuptools>=61) into --user before any pip build.
+- [ccmemory-debian-build-unknown-install-layout](ccmemory-debian-build-unknown-install-layout.md) — RESOLVED + VERIFIED on-box (2026-06-13): install.sh ensure_build_toolchain bootstrap fixed the PEP 621 UNKNOWN/install_layout build crash on Debian 3…
 - [pythonuserbase-banner-platform-gated](pythonuserbase-banner-platform-gated.md) — install.sh's REQUIRED-setup banner is gated on the platform's DEFAULT user-base; silent on Linux, fires on macOS+Homebrew Python
 
 ## reference

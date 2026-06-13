@@ -1,23 +1,16 @@
 ---
 name: ccmemory-debian-build-unknown-install-layout
-description: FIX IMPLEMENTED (pending on-box verify): install.sh now bootstraps a PEP 621-capable toolchain (setuptools>=61) into --user before any pip build.
+description: RESOLVED + VERIFIED on-box (2026-06-13): install.sh ensure_build_toolchain bootstrap fixed the PEP 621 UNKNOWN/install_layout build crash on Debian 3…
 metadata:
   type: project
 ---
 
-On Debian 11 / Raspberry Pi OS (`solardirector`, Python 3.9.2, pip 20.3.4, setuptools ~52) `./install.sh` failed building every PEP 621 package:
+RESOLVED and VERIFIED on the Debian box `serv` (Python 3.9.2, pip 20.3.4, setuptools 52) on 2026-06-13.
 
-```
-Building wheel for UNKNOWN (PEP 517) ... error
-running bdist_wheel -> build -> install -> install_egg_info
-AttributeError: install_layout
-```
+Original failure: `./install.sh` built every PEP 621 package as `UNKNOWN` then tripped `AttributeError: install_layout` — because the build ran under Debian's SYSTEM setuptools 52 (too old for PEP 621), with build isolation effectively bypassed. Independent of the mcp/3.10 issue; affected ALL packages.
 
-**Root cause:** the build ran under Debian's SYSTEM setuptools ~52 (build isolation effectively bypassed). setuptools <61 cannot parse a PEP 621 `[project]` table → name comes out `UNKNOWN` → it takes the legacy `install_egg_info` path → trips Debian's `install_layout` patch. NOT a packaging bug; clean with a modern pip. Independent of the `mcp`/3.10 issue — affects ALL packages in the repo (every one uses `[project]`), including the new `ccenvmcp`.
+FIX (in install.sh): `ensure_build_toolchain()` upgrades pip/setuptools/wheel into ~/.local (PYTHONUSERBASE) when setuptools major < 61; `pip_install_local()` uses `python3 -m pip` so the upgraded user-site toolchain is actually used.
 
-**FIX IMPLEMENTED 2026-06-13** in `install.sh`:
-1. New `ensure_build_toolchain()` — detects setuptools major version via `python3 -c`; if <61, runs `python3 -m pip install --user --upgrade pip setuptools wheel` into ~/.local (PYTHONUSERBASE). No-op when setuptools is already recent; never touches the system interpreter apt depends on. Called once right after `assemble_ccenv_base_claude_md`, before any component install.
-2. `pip_install_local()` switched from the `pip3` SCRIPT to `python3 -m pip` so the upgraded user-site pip/setuptools are actually used (the `pip3` entry-point stays pinned to old system pip; `python3 -m pip` picks up ~/.local which is ahead on sys.path).
-   - ccusage/install.py already used `sys.executable -m pip`, so it inherits the fix automatically.
+VERIFIED on `serv`: bootstrap upgraded setuptools 52→82, pip 20.3.4→26.0.1, wheel→0.47 into ~/.local. Then ALL packages built clean wheels with NO UNKNOWN/install_layout: ccenvmcp 0.1.0, ccmemory 0.8.0, ccusage 0.2.0, ccloop 0.3.4, ccteam 0.3.0. All three MCP servers `claude mcp list` → ✔ Connected on 3.9.2. Confirmed only `mcp` was the 3.9 blocker: nats-py 2.15.0 and watchfiles 1.1.1 both fetched cp39 wheels and installed fine.
 
-**STATUS:** implemented + locally consistent, but NOT yet verified on the actual Pi/Debian box. Next step: run `./install.sh` on `solardirector` and confirm it builds past the ccenvmcp/ccmemory steps. Related: [[ccenvmcp-stdlib-mcp-shim]], [[src-tree-appledouble-sidecars]], [[no-per-component-venvs]], [[pythonuserbase-in-zshenv]].
+Benign warnings seen on that box (NOT caused by ccenv, safe to ignore): "Error parsing dependencies of gpg: Invalid version '1.14.0-unknown'" (broken system python3-gpg metadata), and a pipx 1.0.0 argcomplete/userpath conflict note from pip's resolver (pre-existing system pipx; ccenv uses pip --user, not pipx). Related: [[ccenvmcp-stdlib-mcp-shim]], [[pythonuserbase-in-zshenv]], [[no-per-component-venvs]].

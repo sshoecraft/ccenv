@@ -3,6 +3,8 @@
 #
 # Core components (installed in this order):
 #   ccproject   — three-layer project awareness skill + global CLAUDE.md snippet
+#   gitsync     — SessionStart hook that warns when the repo is out of sync with GitHub
+#   ccenvmcp    — stdlib-only MCP shim (foundation; lets the MCP servers run on Python 3.9)
 #   ccmemory    — persistent memory MCP server + hooks  (MCP name: ccmemory)
 #   ccusage     — context/rate-limit usage MCP + statusline  (MCP name: ccusage)
 #   ccloop     — relay-loop wrapper that hands work between sessions
@@ -397,6 +399,67 @@ fi
 if should_install ccproject; then
     step ccproject "running ccproject/install.sh"
     bash "$SCRIPT_DIR/ccproject/install.sh"
+fi
+
+# ----------------------------------------------------------------------------
+# Core: gitsync — global SessionStart hook that warns (in-session) when the
+# current repo is out of sync with its GitHub/origin remote. Pure-bash,
+# self-gating (silent outside git repos / offline / when in sync), read-only
+# (git ls-remote, no fetch). Catches the "another machine pushed and this one
+# never pulled" trap.
+# ----------------------------------------------------------------------------
+if should_install gitsync; then
+    step gitsync "installing git-sync SessionStart hook"
+    HOOK_DIR="$HOME/.claude/hooks"
+    mkdir -p "$HOOK_DIR"
+    if command -v install >/dev/null 2>&1; then
+        install -m 0755 "$SCRIPT_DIR/check_sync_status.sh" "$HOOK_DIR/check_sync_status.sh"
+    else
+        cp "$SCRIPT_DIR/check_sync_status.sh" "$HOOK_DIR/check_sync_status.sh"
+        chmod +x "$HOOK_DIR/check_sync_status.sh"
+    fi
+    info "installed $HOOK_DIR/check_sync_status.sh"
+
+    # Register (and heal stale path) the SessionStart hook entry. Idempotent.
+    CCENV_SYNC_HOOK_CMD="$HOOK_DIR/check_sync_status.sh" python3 - <<'PY'
+import json, os
+from pathlib import Path
+
+cmd = os.environ["CCENV_SYNC_HOOK_CMD"]
+sp = Path.home() / ".claude" / "settings.json"
+sp.parent.mkdir(parents=True, exist_ok=True)
+
+data = {}
+if sp.exists():
+    try:
+        data = json.loads(sp.read_text() or "{}")
+    except json.JSONDecodeError:
+        data = {}
+
+ss = data.setdefault("hooks", {}).setdefault("SessionStart", [])
+
+def is_ours(c):
+    return isinstance(c, str) and c.rstrip().endswith("check_sync_status.sh")
+
+present = changed = False
+for item in ss:
+    for h in item.get("hooks", []):
+        if h.get("type") == "command" and is_ours(h.get("command", "")):
+            present = True
+            if h["command"] != cmd:
+                h["command"] = cmd
+                changed = True
+
+if not present:
+    ss.append({"hooks": [{"type": "command", "command": cmd}]})
+    changed = True
+
+if changed:
+    sp.write_text(json.dumps(data, indent=2) + "\n")
+    print("  registered/healed SessionStart hook check_sync_status.sh")
+else:
+    print("  SessionStart hook check_sync_status.sh already registered")
+PY
 fi
 
 # ----------------------------------------------------------------------------
