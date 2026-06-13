@@ -771,5 +771,27 @@ if [ "$need_pythonuserbase" = "1" ] || [ "$need_path" = "1" ]; then
     echo "============================================================"
 fi
 
+# ----------------------------------------------------------------------------
+# Record what we just installed.
+#
+# install.sh runs to completion above (set -e exits early on any failure), so
+# at this point the install IS complete on THIS machine. Write the bundle
+# version we just installed to ~/.config/ccenv/installed-version so the
+# cross-machine `instenv.prompt` can tell "what's actually installed here"
+# from "what source code happens to be on disk."
+#
+# Critical when /src is NFS-shared across machines: every machine sees the
+# same /src/ccenv/VERSION the instant any one of them git-pulls or someone
+# edits it on the share, but each machine's actual install state is its own.
+# Without this marker, the prompt would falsely report every NFS-mounted
+# system as "current" the moment ONE of them got installed.
+# ----------------------------------------------------------------------------
+INSTALL_MARKER="$HOME/.config/ccenv/installed-version"
+mkdir -p "$(dirname "$INSTALL_MARKER")"
+if [ -f "$SCRIPT_DIR/VERSION" ]; then
+    cp "$SCRIPT_DIR/VERSION" "$INSTALL_MARKER"
+    info "recorded installed version $(cat "$INSTALL_MARKER" 2>/dev/null | head -1) in $INSTALL_MARKER"
+fi
+
 echo ""
 echo "=== ccenv install complete ==="

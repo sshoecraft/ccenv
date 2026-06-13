@@ -6,6 +6,7 @@
 
 ## project
 - [ccenvmcp-stdlib-mcp-shim](ccenvmcp-stdlib-mcp-shim.md) — ccenvmcp: stdlib-only Python 3.9+ FastMCP-compatible shim replacing the mcp SDK across ccmemory/ccusage/ccteam so the bundle installs on 3.9.
+- [ccloop-stop-hook-return-0-kills-session](ccloop-stop-hook-return-0-kills-session.md) — ccloop Stop hook MUST block, not return 0, to keep the session alive — ccloop's runner relays on session-end. "No-op" semantics differ from pure Clau…
 - [ccmemory-debian-build-unknown-install-layout](ccmemory-debian-build-unknown-install-layout.md) — RESOLVED + VERIFIED on-box (2026-06-13): install.sh ensure_build_toolchain bootstrap fixed the PEP 621 UNKNOWN/install_layout build crash on Debian 3…
 - [pythonuserbase-banner-platform-gated](pythonuserbase-banner-platform-gated.md) — install.sh's REQUIRED-setup banner is gated on the platform's DEFAULT user-base; silent on Linux, fires on macOS+Homebrew Python
 
