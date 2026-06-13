@@ -315,3 +315,135 @@ def test_no_cache_at_all_does_not_fire(monkeypatch, tmp_path):
     payload = json.loads(out)
     assert payload["decision"] == "block"
     assert not (tmp_path / "halt-s1").exists()
+
+
+# ---------------------------------------------------------------------------
+# Background-task gate.
+#
+# When the model stops with a Bash background task still pending (its
+# .output file in the session's /tmp/claude-<uid>/<slug>/<sid>/tasks/ dir),
+# the keepgoing nudge ("you stopped without signaling completion, pick a
+# new angle") is the wrong response — the model is correctly waiting. The
+# Stop hook returns silently: no decision, no systemMessage, no re-feed.
+# The harness wakes the model when the task completes; the next Stop after
+# the file is reaped falls through to the normal keepgoing logic.
+#
+# Detection is by file presence, not a liveness check (no lsof, no
+# subprocess). A "task done but not yet reaped" momentary false positive
+# costs at most one Stop cycle of delayed keepgoing — invisible — and a
+# real liveness check would cost real CPU on every Stop on every machine.
+# ---------------------------------------------------------------------------
+
+def test_pending_background_blocks_with_wait_message(monkeypatch, tmp_path):
+    """With background pending, the hook must BLOCK (not return 0). Returning
+    0 would let ccloop's runner relay-and-lose the task."""
+    resume = tmp_path / "resume.md"
+    resume.write_text("body\n")
+    monkeypatch.setenv("CCLOOP_RUN_ID", "r1")
+    monkeypatch.setenv("CCLOOP_SESSION_ID", "s1")
+    monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 2)
+    rc, out = run(monkeypatch, {"session_id": "s1"})
+    payload = json.loads(out)
+    assert rc == 0
+    assert payload["decision"] == "block"
+    assert "ccloop wait" in payload["systemMessage"]
+    assert "2 background command" in payload["systemMessage"]
+
+
+def test_no_pending_background_runs_keepgoing(monkeypatch, tmp_path):
+    """With nothing pending, the normal keepgoing CONTINUE_MSG fires as before."""
+    resume = tmp_path / "resume.md"
+    resume.write_text("body\n")
+    monkeypatch.setenv("CCLOOP_RUN_ID", "r1")
+    monkeypatch.setenv("CCLOOP_SESSION_ID", "s1")
+    monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 0)
+    rc, out = run(monkeypatch, {"session_id": "s1"})
+    payload = json.loads(out)
+    assert payload["decision"] == "block"
+    assert "DONE" in payload["reason"]
+    assert "re-fed #1" in payload["systemMessage"]
+
+
+def test_pending_background_does_not_bump_keepgoing_counter(monkeypatch, tmp_path):
+    """Two wait re-feeds followed by a real keepgoing cycle should re-feed
+    CONTINUE_MSG as #1, not #3 — wait re-feeds must not consume the cap."""
+    resume = tmp_path / "resume.md"
+    resume.write_text("body\n")
+    monkeypatch.setenv("CCLOOP_RUN_ID", "r1")
+    monkeypatch.setenv("CCLOOP_SESSION_ID", "s1")
+    monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
+
+    # Phase 1: two wait re-feeds while background is pending.
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 1)
+    run(monkeypatch, {"session_id": "s1"})
+    run(monkeypatch, {"session_id": "s1"})
+
+    # Phase 2: nothing pending — first keepgoing re-feed must be #1.
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 0)
+    rc, out = run(monkeypatch, {"session_id": "s1"})
+    assert "re-fed #1" in json.loads(out)["systemMessage"]
+
+
+def test_done_wins_over_pending_background(monkeypatch, tmp_path):
+    """An honest DONE/YES must end the run cleanly even if a background task
+    file is still present — the model decided, trust the model."""
+    resume = tmp_path / "resume.md"
+    resume.write_text("DONE\n")
+    monkeypatch.setenv("CCLOOP_RUN_ID", "r1")
+    monkeypatch.setenv("CCLOOP_SESSION_ID", "s1")
+    monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 1)
+    rc, out = run(monkeypatch, {"session_id": "s1"})
+    assert rc == 0 and out == ""
+
+
+def test_cutoff_wins_over_pending_background(monkeypatch, tmp_path):
+    """CRITICAL ordering test: when the cutoff is hit AND a background task
+    is pending, the cutoff MUST win — write the halt sentinel and allow the
+    stop so ccloop can relay. The original bug was that the wait gate ran
+    BEFORE the cutoff gate, so the session hung at 270k+/250k tokens with
+    stale .output files lying around."""
+    resume = tmp_path / "resume.md"
+    resume.write_text("body\n")
+    (tmp_path / "cutoff").write_text("50000\n")
+    monkeypatch.setenv("CCLOOP_RUN_ID", "r1")
+    monkeypatch.setenv("CCLOOP_SESSION_ID", "s1")
+    monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
+    write_cache("s1", used_percentage=99)   # well over the 50000 cutoff
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 3)
+    rc, out = run(monkeypatch, {"session_id": "s1"})
+    assert rc == 0
+    assert out == ""                          # cutoff allows stop, no JSON
+    assert (tmp_path / "halt-s1").exists()    # halt sentinel was written
+
+
+def test_pending_background_task_count_real_glob(tmp_path, monkeypatch):
+    """End-to-end: simulate a Claude Code tasks dir and confirm the count
+    matches the number of .output files (no liveness check, no subprocess)."""
+    sess = "deadbeef-1234-5678-9abc-def012345678"
+    tasks = tmp_path / f"claude-{os.getuid()}" / "-fake-slug" / sess / "tasks"
+    tasks.mkdir(parents=True)
+
+    # Redirect the /tmp/claude-* glob root under tmp_path.
+    import glob as _glob
+    real_glob = _glob.glob
+    def patched(pattern, *a, **kw):
+        if pattern.startswith(f"/tmp/claude-{os.getuid()}/"):
+            redirect = pattern.replace("/tmp/", str(tmp_path) + "/", 1)
+            return real_glob(redirect, *a, **kw)
+        return real_glob(pattern, *a, **kw)
+    monkeypatch.setattr(keepgoing.glob, "glob", patched)
+
+    # No .output -> 0
+    assert keepgoing._pending_background_task_count(sess) == 0
+
+    # Drop two .output -> 2
+    (tasks / "abc.output").write_text("hello\n")
+    (tasks / "def.output").write_text("world\n")
+    assert keepgoing._pending_background_task_count(sess) == 2
+
+    # Unrelated file is ignored
+    (tasks / "abc.notoutput").write_text("nope\n")
+    assert keepgoing._pending_background_task_count(sess) == 2

@@ -460,6 +460,22 @@ if changed:
 else:
     print("  SessionStart hook check_sync_status.sh already registered")
 PY
+
+    # Pin the ccenv source path so the hook can ALSO check whether the
+    # installed ccenv harness is in sync with its GitHub remote — even when
+    # the user is sitting in some other project's working directory.
+    # ~/.config/ccenv/source.path is a one-line text file holding the
+    # absolute path of the ccenv checkout that ran ./install.sh; the hook
+    # uses it as the second target of its git-sync check. Rewritten on every
+    # install so it tracks the most recent install location.
+    SRC_MARKER="$HOME/.config/ccenv/source.path"
+    mkdir -p "$(dirname "$SRC_MARKER")"
+    if [ ! -f "$SRC_MARKER" ] || [ "$(cat "$SRC_MARKER" 2>/dev/null)" != "$SCRIPT_DIR" ]; then
+        printf '%s\n' "$SCRIPT_DIR" > "$SRC_MARKER"
+        info "recorded ccenv source path in $SRC_MARKER"
+    else
+        info "ccenv source path in $SRC_MARKER is up to date"
+    fi
 fi
 
 # ----------------------------------------------------------------------------

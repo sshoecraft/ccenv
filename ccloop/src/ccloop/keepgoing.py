@@ -33,6 +33,7 @@ model that genuinely cannot make progress eventually gets to exit. The
 counter is kept under the run dir (``<run-dir>/keepgoing-<sess>.count``).
 """
 
+import glob
 import json
 import os
 import sys
@@ -221,6 +222,61 @@ def _emit_block(reason, n):
     }) + "\n")
 
 
+def _emit_wait(n):
+    """Block the stop because background work is pending — without the
+    keepgoing nudge.
+
+    ``return 0`` would NOT work here: ccloop is actively driving the session
+    (relay on session-end), so allowing the stop loses the running task.
+    We must emit ``decision: block`` to keep the session alive. The
+    ``reason`` is intentionally minimal — the model is already correctly
+    waiting; any prose from us pushes toward fresh action, which is wrong.
+
+    A wait re-feed is bounded by external work, not model pathology, so it
+    intentionally does NOT bump the keepgoing counter and is not capped by
+    ``CCLOOP_MAX_CONTINUES``.
+    """
+    sys.stdout.write(json.dumps({
+        "decision": "block",
+        "reason": "Wait. Background command still running.",
+        "systemMessage": f"ccloop wait — {n} background command(s) still running",
+    }) + "\n")
+
+
+def _pending_background_task_count(session_id):
+    """Return how many ``*.output`` files exist in this session's tasks dir.
+
+    Claude Code stores per-session Bash-background output under
+    ``/tmp/claude-<uid>/<slug>/<session-id>/tasks/<task-id>.output``. The
+    harness deletes those files after it consumes the result, so the mere
+    presence of one means there is either a task still running OR a task
+    whose result is queued for the next consumption pass.
+
+    No liveness check (no lsof, no procfs walk): a momentary false positive
+    (a finished task whose .output hasn't been reaped yet) costs at most a
+    few "still waiting" Stop cycles before the harness reaps the file and
+    this gate stops firing. A "real" liveness check would cost real CPU on
+    every Stop on every machine, including weak ones — not worth it.
+
+    Returns 0 on any error or when the dir can't be located.
+    """
+    if not session_id:
+        return 0
+    pattern = f"/tmp/claude-{os.getuid()}/*/{session_id}/tasks"
+    matches = glob.glob(pattern)
+    if len(matches) != 1:
+        return 0
+    tasks_dir = matches[0]
+    n = 0
+    try:
+        for name in os.listdir(tasks_dir):
+            if name.endswith(".output"):
+                n += 1
+    except OSError:
+        pass
+    return n
+
+
 def main(argv=None):
     if not os.environ.get("CCLOOP_RUN_ID"):
         return 0
@@ -260,12 +316,29 @@ def main(argv=None):
     # would halt spuriously at the start of every session. If the cache is
     # absent or belongs to a concurrent session, we let the model keep
     # working.
+    #
+    # MUST run BEFORE the background-work gate: at the cutoff we relay
+    # regardless of pending tasks (losing a task is recoverable; blowing
+    # past the context wall is not).
     cutoff = _read_cutoff(run_dir)
     if cutoff > 0:
         tokens = usage.exact_tokens(own_sid)
         if tokens is not None and tokens >= cutoff:
             _signal_halt(run_dir, own_sid, tokens, cutoff)
             return 0
+
+    # Background-work gate. If the model has a Bash task pending in this
+    # session's tasks dir, block the stop with a minimal-reason re-feed
+    # instead of the keepgoing nudge — the model is correctly waiting for
+    # an async result, and pushing it to "pick a new angle" is wrong. We
+    # cannot `return 0` here: ccloop's runner relays on session-end, so
+    # allowing the stop loses the running task. Block (re-feed) to keep
+    # the session alive. Counter intentionally NOT bumped — wait cycles
+    # are bounded by external work, not the model-pathology cap protects.
+    n_pending = _pending_background_task_count(own_sid)
+    if n_pending:
+        _emit_wait(n_pending)
+        return 0
 
     if criteria is None:
         n = _bump_counter(run_dir, own_sid)
