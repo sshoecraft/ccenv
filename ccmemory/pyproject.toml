@@ -1,6 +1,6 @@
 [project]
 name = "ccmemory"
-version = "0.7.0"
+version = "0.8.0"
 description = "Persistent file-backed memory for Claude Code: markdown of record + SQLite/FTS5 index + enforcement hooks + MCP server"
 readme = {text = "See CLAUDE.md for design notes and architecture.", content-type = "text/plain"}
 requires-python = ">=3.9"

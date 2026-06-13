@@ -143,22 +143,36 @@ Memory is stored as `.md` files with YAML frontmatter in the project's
 memory directory. `MEMORY.md` in that directory is *generated* from each
 file's `description:` field — do not edit it directly (a hook will block
 the write). Do NOT load `MEMORY.md` to browse memory; it's a truncated,
-capped index. Use the search tool instead.
+capped index. Use `memory_list` (everything) or `memory_search` (by
+topic) instead.
 
-## Recalling prior context — search first, get second
+## Recalling prior context — pick the right tool
 
-`memory_search` and `memory_get` are NOT interchangeable:
+Three tools, three different shapes of question. Picking the wrong one
+wastes tokens or returns nothing:
 
-- `memory_search(query)` returns ranked **metadata only** — names,
-  one-line descriptions, ages, paths. Cheap. Use this FIRST whenever you
-  don't have an exact name in hand.
-- `memory_get(name)` returns the **full file body**. Expensive
-  (typically 5-10KB per memory). Use this only AFTER `memory_search` (or
-  the auto-injection hook below) has surfaced the specific name(s) you
-  need the body of.
+- **`memory_list(type?)`** — returns metadata for **every** memory,
+  newest first. Use this when the question is about the *inventory*
+  itself: "what memories do you have", "what's stored for this
+  project", "show me everything", "list all feedback memories", "what
+  do you remember about this project". `memory_search` CANNOT answer
+  these — it's BM25 and silently returns nothing for empty or generic
+  queries. If the user is asking "what" rather than "find X", use list.
+- **`memory_search(query)`** — returns ranked metadata for memories
+  matching specific search terms. Use this when you have an actual
+  topic: "what do we know about XFS double-frees", "any prior lessons
+  on the install path". Requires non-empty, specific terms — generic
+  words like "project" or "all" rank nothing.
+- **`memory_get(name)`** — returns the **full file body** (5-10KB).
+  Expensive. Use this only AFTER `memory_list` or `memory_search` (or
+  the auto-injection hook below) has surfaced the specific name you
+  need to read.
 
-Never guess a memory name and call `memory_get` directly. Search first,
-then fetch only the bodies you actually need.
+Never guess a memory name and call `memory_get` directly. List or search
+first, then fetch only the bodies you actually need.
+
+Quick decision: **"what do you have?" → list. "find X" → search.
+"read Y" → get.**
 
 ## Auto-injection covers many cases without any tool call
 

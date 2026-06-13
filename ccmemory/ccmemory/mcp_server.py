@@ -7,6 +7,7 @@ declares tools and dispatches to the store.
 
 Tools:
   - memory_search(query, n=5)
+  - memory_list(type?)
   - memory_get(name)
   - memory_write(name, type, description, body, tags?)
   - memory_stats()
@@ -74,6 +75,12 @@ def build_app():
             },
             "required": ["query"],
         },
+        "memory_list": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["user", "feedback", "project", "reference"], "description": "optional type filter"},
+            },
+        },
         "memory_get": {
             "type": "object",
             "properties": {"name": {"type": "string"}},
@@ -107,6 +114,13 @@ def build_app():
                 with Store(d) as s:
                     s.reindex()
                     results = s.search(q, limit=n)
+                return _text(json.dumps(results, indent=2, default=str))
+
+            if name == "memory_list":
+                type_filter = arguments.get("type") or None
+                with Store(d) as s:
+                    s.reindex()
+                    results = s.list_all(type_filter=type_filter)
                 return _text(json.dumps(results, indent=2, default=str))
 
             if name == "memory_get":
@@ -159,6 +173,14 @@ def build_app():
     )
     def memory_search(**kwargs):
         return dispatch("memory_search", kwargs)
+
+    @app.tool(
+        name="memory_list",
+        description="List all memories (metadata only — name, type, description, age, path), newest first. Use when you need every memory, not a ranked subset. Optional type filter (user|feedback|project|reference).",
+        schema=SCHEMAS["memory_list"],
+    )
+    def memory_list(**kwargs):
+        return dispatch("memory_list", kwargs)
 
     @app.tool(
         name="memory_get",
