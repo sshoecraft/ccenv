@@ -2,6 +2,34 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.10.0
+
+Memory compaction no longer uses `claude -p`. Anthropic is moving the Agent
+SDK / `claude -p` / Claude Code GitHub Actions off subscription usage onto a
+separate metered monthly credit pool (full API rates, no rollover). The old
+`compile` path shelled out to a headless `claude -p` subprocess, so every run
+would burn that credit. Compaction now runs in the LIVE interactive session,
+which is unaffected by the change.
+
+- New `compile-memories` skill (installed to `~/.claude/skills/compile-memories/`).
+  It reads raw memories via the ccmemory MCP tools (`memory_list`/`search`/
+  `get`), synthesizes one dense deduplicated `compiled-<topic>` article using
+  the same compiler prompt as before, and writes it with `memory_write`.
+  Zero `claude -p`, zero metered credit. Its description carries trigger
+  conditions so it auto-activates when relevant.
+- SessionStart hook now appends a one-line compaction nudge when the
+  *uncompiled backlog* (raw memories newer than the most recent
+  `compiled-*` article) reaches a threshold (`CCMEMORY_COMPILE_THRESHOLD`,
+  default 20). Counting the backlog rather than the total keeps the nudge from
+  firing forever — compiled articles are additive and never delete raw notes.
+  Under threshold it injects nothing.
+- `compile.py` no longer calls any LLM. It exposes `count_backlog()` (for the
+  hook) and `compile_status()` (for the CLI), plus the shared `COMPILER_PROMPT`.
+  `_resolve_claude_bin` / the `subprocess` call / `CCMEMORY_CLAUDE_BIN` are gone.
+- `ccmemory compile` no longer compiles — it reports the backlog, threshold,
+  and candidate input names, and points at the skill. `--dry-run` removed
+  (the command is read-only now).
+
 ## v0.9.0
 
 SessionStart protocol now MANDATES `memory_list()` as the first tool call of

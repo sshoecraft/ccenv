@@ -172,6 +172,9 @@ def _bump_counter(run_dir, session_id):
 
 
 def _read_cutoff(run_dir):
+    # A hand-edited 0 (or any non-positive value) is the explicit "no
+    # cutoff" sentinel — returned as-is so main()'s ``if cutoff > 0`` gate
+    # is skipped and the run keeps going until the session window fills.
     if run_dir is None:
         return DEFAULT_CUTOFF_TOKENS
     p = run_dir / "cutoff"
@@ -179,6 +182,8 @@ def _read_cutoff(run_dir):
         value = int(p.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return DEFAULT_CUTOFF_TOKENS
+    if value <= 0:
+        return 0
     if value < MIN_REASONABLE_CUTOFF_TOKENS:
         return DEFAULT_CUTOFF_TOKENS
     return value

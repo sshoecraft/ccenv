@@ -56,10 +56,12 @@ def _read_stdin_json():
 def _read_cutoff(run_dir):
     """Read ``<run-dir>/cutoff`` as an int token count.
 
-    Returns the default when the file is absent, unparsable, or a value
-    smaller than ``MIN_REASONABLE_CUTOFF_TOKENS`` (a hand-edited "160"
-    expecting thousands would otherwise fire the guard on every tool
-    call).
+    A hand-edited ``0`` (or any non-positive value) is the explicit
+    "no cutoff" sentinel: it is returned as-is so the caller disables the
+    token gate entirely. Returns the default when the file is absent,
+    unparsable, or a positive value smaller than
+    ``MIN_REASONABLE_CUTOFF_TOKENS`` (a hand-edited "160" expecting
+    thousands would otherwise fire the guard on every tool call).
     """
     if run_dir is None:
         return DEFAULT_CUTOFF_TOKENS
@@ -68,6 +70,8 @@ def _read_cutoff(run_dir):
         value = int(p.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return DEFAULT_CUTOFF_TOKENS
+    if value <= 0:
+        return 0
     if value < MIN_REASONABLE_CUTOFF_TOKENS:
         return DEFAULT_CUTOFF_TOKENS
     return value

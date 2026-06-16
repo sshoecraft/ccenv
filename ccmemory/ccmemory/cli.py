@@ -66,9 +66,7 @@ def cmd_compile(args):
     d = paths.resolve_memory_dir()
     if not d:
         sys.exit("error: no memory dir resolvable from cwd (set CCMEMORY_DIR or run inside a project)")
-    result = compile_mod.compile_directory(
-        d, topic=args.topic, max_inputs=args.max, dry_run=args.dry_run,
-    )
+    result = compile_mod.compile_status(d, topic=args.topic, max_inputs=args.max)
     print(json.dumps(result, indent=2, default=str))
 
 
@@ -116,10 +114,9 @@ def build_parser() -> argparse.ArgumentParser:
     psr = sub.add_parser("status", help="show install state")
     psr.set_defaults(func=cmd_status)
 
-    pc = sub.add_parser("compile", help="LLM-compile session lessons into knowledge articles (occasional maintenance)")
+    pc = sub.add_parser("compile", help="report the memory-compaction backlog + candidate inputs (compile via the compile-memories skill — no claude -p)")
     pc.add_argument("--topic")
     pc.add_argument("--max", type=int, default=20)
-    pc.add_argument("--dry-run", action="store_true")
     pc.set_defaults(func=cmd_compile)
 
     pmg = sub.add_parser("migrate", help="copy legacy memory into project-local .ccmemory/ (also runs automatically on MCP boot)")

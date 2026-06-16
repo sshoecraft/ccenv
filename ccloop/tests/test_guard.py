@@ -107,6 +107,18 @@ def test_tiny_cutoff_value_treated_as_typo(monkeypatch, tmp_path):
     assert rc == 0 and out == ""  # default in effect, 50000 well under
 
 
+def test_cutoff_zero_means_no_cutoff(monkeypatch, tmp_path):
+    """A cutoff of 0 disables the gate: the wrap-up never fires, even when
+    usage is far above any positive cutoff."""
+    run_dir, resume = setup_run(tmp_path, cutoff_tokens=0)
+    monkeypatch.setenv("CCLOOP_RUN_ID", "r1")
+    monkeypatch.setenv("CCLOOP_SESSION_ID", "sess-A")
+    monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
+    write_cache("sess-A", 99, window=1000000)  # 990000 tokens — would fire under any positive cutoff
+    rc, out = run_guard(monkeypatch, {})
+    assert rc == 0 and out == ""  # disabled — no wrap-up
+
+
 def test_no_cache_silent(monkeypatch, tmp_path):
     """No ccusage cache → no token data → silent. The transcript
     fallback was removed in 0.3.2: per-turn API token sums over-count

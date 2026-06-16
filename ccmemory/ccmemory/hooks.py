@@ -209,6 +209,28 @@ MEMORY.md automatically at the end of the turn.
 """
 
 
+def _compaction_nudge(memory_dir: Path) -> str:
+    """One-line suggestion to compact memory when the uncompiled backlog is
+    large. Empty string when under threshold. Data-driven so the model is told
+    exactly when the compile-memories skill is worth running — a skill with no
+    trigger never gets invoked. Fail-open: any error → no nudge.
+    """
+    try:
+        from . import compile as compile_mod
+        b = compile_mod.count_backlog(memory_dir)
+        if b["backlog"] < b["threshold"]:
+            return ""
+        return (
+            f"\n\n---\n📦 Memory compaction available: {b['backlog']} uncompiled "
+            f"memories (threshold {b['threshold']}). Consider invoking the "
+            f"`compile-memories` skill to fold related raw notes into a denser "
+            f"`compiled-<topic>` article. It runs in THIS interactive session — "
+            f"no `claude -p`, no metered Agent-SDK credit."
+        )
+    except Exception:
+        return ""
+
+
 def session_handler() -> int:
     """SessionStart: inject the ccmemory protocol as additionalContext.
 
@@ -220,7 +242,8 @@ def session_handler() -> int:
     d = _autodetect_memory_dir()
     if not d:
         return 0
-    out = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": SESSION_PROTOCOL}}
+    context = SESSION_PROTOCOL + _compaction_nudge(d)
+    out = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}
     print(json.dumps(out))
     return 0
 

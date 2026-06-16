@@ -90,21 +90,31 @@ ccloop picks a mode from whether it's attached to a terminal:
 
 - **Interactive** (a TTY — you ran it in your terminal): launches the real
   Claude Code TUI. You see it, type in it, hit Escape, interrupt — exactly
-  like running `claude` yourself. When you exit the session, ccloop asks
+  like running `claude` yourself. This draws on your **subscription** like
+  any normal Claude Code session. When you exit the session, ccloop asks
   whether to relaunch a fresh one carrying the summary forward. A
   background watcher reads your **exact** context % from the ccusage
   statusline cache and, if it crosses the hard threshold, auto-relays to a
   fresh session *before* you hit the context wall.
-- **Headless** (no TTY — piped, redirected, cron, `nohup`, backgrounded):
-  runs `claude -p` and streams parsed output (`→ Read PLAN.md / ok 553
-  lines`). Fully autonomous; sessions hand off automatically. This is what
-  you want for overnight / unattended runs.
+- **Headless** (`claude -p`, parsed output, fully autonomous): for
+  overnight / unattended runs. **Requires explicit opt-in.** Headless usage
+  bills against the metered Agent SDK credit at full API rates (not your
+  subscription — per Anthropic's June 2026 billing change), so ccloop will
+  **never** select it implicitly. You must pass **both** `--headless` and
+  `--accept-api-cost`.
+
+> **No silent fallback.** If ccloop is launched with no TTY (piped,
+> redirected, cron, `nohup`, backgrounded) and you did *not* pass
+> `--headless --accept-api-cost`, it **errors out** instead of quietly
+> running metered `claude -p`. This is deliberate: an unattended job should
+> never start spending API credit without you having said so.
 
 ```sh
-ccloop "task"                  # in a terminal → interactive
-ccloop "task" >run.log 2>&1 &  # backgrounded → headless autonomous
-ccloop -i "task"               # force interactive
-ccloop --headless "task"       # force headless even in a terminal
+ccloop "" "task"                                   # in a terminal → interactive (subscription)
+ccloop -i "" "task"                                # force interactive
+ccloop --headless --accept-api-cost "" "task"      # autonomous, at API cost (both flags required)
+ccloop --headless --accept-api-cost "" "task" >run.log 2>&1 &   # unattended overnight run
+ccloop "" "task" >run.log 2>&1 &                   # no TTY, not authorized → errors out
 ```
 
 In **headless** mode, each session's output streams live and Ctrl-C

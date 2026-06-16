@@ -116,12 +116,47 @@ def test_interactive_flag_forces_true(monkeypatch):
     assert captured["task"] == "do a thing"
 
 
-def test_headless_flag_forces_false(monkeypatch):
+def test_headless_without_accept_errors(monkeypatch, capsys):
+    # --headless alone must NOT run -p — it requires --accept-api-cost too.
     captured = _stub_run(monkeypatch)
     monkeypatch.setattr("sys.stdin", _FakeStream(True))
     monkeypatch.setattr("sys.stdout", _FakeStream(True))
-    cli.main(["--headless", "", "do a thing"])
+    assert cli.main(["--headless", "", "do a thing"]) == 2
+    assert "--accept-api-cost" in capsys.readouterr().err
+    assert "interactive" not in captured  # run never dispatched
+
+
+def test_headless_with_accept_forces_false(monkeypatch):
+    captured = _stub_run(monkeypatch)
+    # Even on a TTY, the two flags together select headless -p.
+    monkeypatch.setattr("sys.stdin", _FakeStream(True))
+    monkeypatch.setattr("sys.stdout", _FakeStream(True))
+    assert cli.main(["--headless", "--accept-api-cost", "", "do a thing"]) == 0
     assert captured["interactive"] is False
+
+
+def test_no_tty_headless_authorized_runs(monkeypatch):
+    captured = _stub_run(monkeypatch)
+    monkeypatch.setattr("sys.stdin", _FakeStream(False))
+    monkeypatch.setattr("sys.stdout", _FakeStream(False))
+    assert cli.main(["--headless", "--accept-api-cost", "", "do a thing"]) == 0
+    assert captured["interactive"] is False
+
+
+def test_interactive_and_headless_mutually_exclusive(monkeypatch, capsys):
+    captured = _stub_run(monkeypatch)
+    assert cli.main(["-i", "--headless", "--accept-api-cost", "", "x"]) == 2
+    assert "mutually exclusive" in capsys.readouterr().err
+    assert "interactive" not in captured
+
+
+def test_accept_api_cost_alone_is_ignored_on_tty(monkeypatch):
+    # --accept-api-cost without --headless does nothing; TTY → interactive.
+    captured = _stub_run(monkeypatch)
+    monkeypatch.setattr("sys.stdin", _FakeStream(True))
+    monkeypatch.setattr("sys.stdout", _FakeStream(True))
+    assert cli.main(["--accept-api-cost", "", "do a thing"]) == 0
+    assert captured["interactive"] is True
 
 
 def test_autodetect_interactive_on_tty(monkeypatch):
@@ -132,16 +167,30 @@ def test_autodetect_interactive_on_tty(monkeypatch):
     assert captured["interactive"] is True
 
 
-def test_autodetect_headless_when_not_tty(monkeypatch):
+def test_no_tty_no_auth_errors(monkeypatch, capsys):
+    # No TTY and no --headless --accept-api-cost → error out, never silent -p.
     captured = _stub_run(monkeypatch)
     monkeypatch.setattr("sys.stdin", _FakeStream(False))
     monkeypatch.setattr("sys.stdout", _FakeStream(False))
-    cli.main(["", "do a thing"])
-    assert captured["interactive"] is False
+    assert cli.main(["", "do a thing"]) == 2
+    assert "no TTY" in capsys.readouterr().err
+    assert "interactive" not in captured  # run never dispatched
+
+
+def test_no_tty_resume_no_auth_errors(monkeypatch, capsys):
+    captured = _stub_resume(monkeypatch)
+    monkeypatch.setattr("sys.stdin", _FakeStream(False))
+    monkeypatch.setattr("sys.stdout", _FakeStream(False))
+    rid = "12345678-1234-1234-1234-123456789abc"
+    assert cli.main(["--resume-run", rid]) == 2
+    assert "no TTY" in capsys.readouterr().err
+    assert "interactive" not in captured
 
 
 def test_criteria_passed_through(monkeypatch):
     captured = _stub_run(monkeypatch)
+    monkeypatch.setattr("sys.stdin", _FakeStream(True))
+    monkeypatch.setattr("sys.stdout", _FakeStream(True))
     cli.main(["all tests pass with zero errors", "fix the bug"])
     assert captured["criteria"] == "all tests pass with zero errors"
     assert captured["task"] == "fix the bug"
@@ -152,19 +201,19 @@ def test_criteria_passed_through(monkeypatch):
 
 def test_cutoff_default_is_none(monkeypatch):
     captured = _stub_run(monkeypatch)
-    cli.main(["", "task"])
+    cli.main(["-i", "", "task"])
     assert captured["cutoff_tokens"] is None
 
 
 def test_cutoff_eq_form_parses(monkeypatch):
     captured = _stub_run(monkeypatch)
-    cli.main(["--cutoff=200", "", "task"])
+    cli.main(["-i", "--cutoff=200", "", "task"])
     assert captured["cutoff_tokens"] == 200000
 
 
 def test_cutoff_space_form_parses(monkeypatch):
     captured = _stub_run(monkeypatch)
-    cli.main(["--cutoff", "50", "", "task"])
+    cli.main(["-i", "--cutoff", "50", "", "task"])
     assert captured["cutoff_tokens"] == 50000
 
 
@@ -178,9 +227,11 @@ def test_cutoff_negative_rejected(capsys):
     assert "--cutoff" in capsys.readouterr().err
 
 
-def test_cutoff_zero_rejected(capsys):
-    assert cli.main(["--cutoff=0", "", "task"]) == 2
-    assert "--cutoff" in capsys.readouterr().err
+def test_cutoff_zero_means_no_cutoff(monkeypatch):
+    # 0 is the explicit "no cutoff" sentinel — accepted, threads through as 0.
+    captured = _stub_run(monkeypatch)
+    cli.main(["-i", "--cutoff=0", "", "task"])
+    assert captured["cutoff_tokens"] == 0
 
 
 def test_cutoff_missing_value_rejected(capsys):
@@ -190,5 +241,5 @@ def test_cutoff_missing_value_rejected(capsys):
 
 def test_cutoff_threads_into_resume(monkeypatch):
     captured = _stub_resume(monkeypatch)
-    cli.main(["--cutoff=80", "--resume-run", "12345678-1234-1234-1234-123456789abc"])
+    cli.main(["-i", "--cutoff=80", "--resume-run", "12345678-1234-1234-1234-123456789abc"])
     assert captured["cutoff_tokens"] == 80000

@@ -120,12 +120,26 @@ surfaces as the `Prompt is too long` guard rather than an argv error.
 
 #### Modes: headless vs interactive
 
-The mode is chosen from `sys.stdout.isatty()`/`sys.stdin.isatty()`
-(overridable with `--headless` / `--interactive` / `-i`):
+The mode is resolved in `cli._resolve_interactive()`. Headless `claude -p`
+is **never** selected implicitly — it bills against the metered Agent SDK
+credit at API rates (Anthropic's June 2026 billing change moved headless /
+Agent SDK usage off the subscription), so it demands an explicit, acknowledged
+opt-in. Resolution order:
 
-- **Headless** (no TTY): `claude -p --output-format stream-json --verbose`,
-  stdout piped and parsed for live output, session in its own process
-  group, SIGINT → killpg. Fully autonomous; the loop relays on each exit.
+1. `--interactive`/`-i` + `--headless` together → usage error.
+2. `--headless` → requires `--accept-api-cost` too, else usage error. Both
+   present → headless.
+3. `--interactive`/`-i` → interactive.
+4. Auto: a real TTY (`sys.stdin.isatty()` **and** `sys.stdout.isatty()`) →
+   interactive. **No TTY → usage error**, never a silent headless fallback —
+   an unattended job must not start spending API credit unasked. Only
+   `cmd_run`/`cmd_resume` resolve the mode; `--list`/`--prune`/`install`/
+   `--help` work with no TTY.
+
+- **Headless** (`--headless --accept-api-cost`): `claude -p --output-format
+  stream-json --verbose`, stdout piped and parsed for live output, session in
+  its own process group, SIGINT → killpg. Fully autonomous; the loop relays
+  on each exit.
 - **Interactive** (TTY): the real `claude` TUI with **inherited** std fds
   (no `-p`, no piping — piping would break the TUI). ccloop waits on the
   child and:
@@ -205,6 +219,16 @@ Honest caveat: a model can lie ("DONE without finishing") to escape the
 hook. The preamble explicitly tells the model only to signal DONE when
 the task is verifiably complete, but this is a behavioral guarantee, not
 a mechanical one.
+
+**Token cutoff** (shared by `keepgoing.py` and `guard.py`): each run
+stores a token threshold in `<run-dir>/cutoff` (set with `--cutoff=N`
+thousands; default 250k). Both hooks read it via `_read_cutoff`, which
+compares the session's exact cache token count against the threshold and
+relays once it's crossed. Special values: a positive value below 1000 is
+treated as a thousands-vs-tokens typo and falls back to the default;
+**`0` (or any non-positive value) is the explicit "no cutoff" sentinel —
+the token gate is disabled and the run keeps going until the session
+window fills.**
 
 ### `guard.py` — PostToolUse hook (`ccloop guard`)
 

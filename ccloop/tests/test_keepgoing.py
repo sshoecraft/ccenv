@@ -302,6 +302,23 @@ def test_tiny_cutoff_value_treated_as_typo(monkeypatch, tmp_path):
     assert not (tmp_path / "halt-s1").exists()
 
 
+def test_cutoff_zero_means_no_cutoff(monkeypatch, tmp_path):
+    """A cutoff of 0 disables the token gate entirely: even far over what
+    any positive cutoff would be, the session keeps going (block/refeed),
+    never halts."""
+    resume = tmp_path / "resume.md"
+    resume.write_text("body\n")
+    (tmp_path / "cutoff").write_text("0\n")
+    write_cache("s1", 99, window=1000000)  # 990000 tokens — would halt under any positive cutoff
+    monkeypatch.setenv("CCLOOP_RUN_ID", "r1")
+    monkeypatch.setenv("CCLOOP_SESSION_ID", "s1")
+    monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
+    rc, out = run(monkeypatch, {"session_id": "s1"})
+    payload = json.loads(out)
+    assert payload["decision"] == "block"  # keep going, never halt
+    assert not (tmp_path / "halt-s1").exists()
+
+
 def test_no_cache_at_all_does_not_fire(monkeypatch, tmp_path):
     """No ccusage cache → no token data → don't halt. We'd rather
     miss a relay than halt spuriously at session start."""

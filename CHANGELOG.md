@@ -2,6 +2,89 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.1.5
+
+ccmemory v0.10.0: memory compaction no longer uses `claude -p`. Anthropic is
+moving the Claude Agent SDK, `claude -p`, and Claude Code GitHub Actions off
+subscription usage onto a separate metered monthly credit pool (full API
+rates, no rollover, capped per plan). The old `ccmemory compile` path shelled
+out to a headless `claude -p` subprocess, so once that change lands every
+compile run would burn metered credit. Compaction now runs in the LIVE
+interactive session, which is unaffected by the billing change — zero
+`claude -p`, zero credit, full LLM-quality synthesis.
+
+What changed in ccmemory:
+
+  - New `compile-memories` skill, installed to
+    `~/.claude/skills/compile-memories/` by `install.sh`. It reads raw
+    memories via the ccmemory MCP tools (`memory_list`/`search`/`get`),
+    synthesizes one dense deduplicated `compiled-<topic>` article using the
+    same compiler prompt as before, and writes it with `memory_write`. Its
+    description carries trigger conditions so it auto-activates when relevant.
+  - SessionStart hook appends a one-line compaction nudge when the
+    *uncompiled backlog* — raw memories newer than the most recent
+    `compiled-*` article — reaches `CCMEMORY_COMPILE_THRESHOLD` (default 20).
+    Counting the backlog rather than the total keeps the nudge from firing
+    forever, since compiled articles are additive and never delete raw notes.
+    A skill with no trigger never gets invoked; this is its active trigger.
+  - `compile.py` no longer calls any LLM. It exposes `count_backlog()` (hook)
+    and `compile_status()` (CLI) plus the shared `COMPILER_PROMPT`. The
+    `claude -p` subprocess, `_resolve_claude_bin`, and `CCMEMORY_CLAUDE_BIN`
+    are gone.
+  - `ccmemory compile` is now read-only: it reports the backlog, threshold,
+    and candidate input names and points at the skill. `--dry-run` removed.
+
+`install.sh` now heals native (compiled) dependencies stranded by a Python
+version bump. Fixes the ccteam MCP failing to connect with
+`ModuleNotFoundError: No module named 'watchfiles._rust_notify'` after the
+system Python moved 3.9 → 3.14.
+
+Root cause: with `PYTHONUSERBASE` set, Homebrew's `osx_framework_user`
+scheme collapses the `--user` site to a SINGLE version-agnostic directory,
+`$PYTHONUSERBASE/lib/python/site-packages`, shared verbatim by every Python
+minor version (`python3 -c 'import site;print(site.getusersitepackages())'`
+returns the same path under 3.13 and 3.14). Pure-Python packages survive a
+Python upgrade there, but compiled extensions are ABI-tagged
+(`watchfiles/_rust_notify.cpython-314-darwin.so`) and only load under the
+matching interpreter. After a bump the old `cpython-39` `.so` lingers; the
+new interpreter can't import it; and pip — seeing the distribution already
+"present" in the shared dir — never refetches the right-ABI wheel.
+
+New `heal_stale_compiled_exts()` runs after all components/overlays install:
+it walks the shared user-site for `.so`/`.pyd`/`.dylib` files whose ABI tag
+doesn't match the running interpreter's `EXT_SUFFIX` (`.abi3.so` and
+untagged files are left alone), maps each stale file back to its owning pip
+distribution via that dist's `RECORD`, and force-reinstalls the EXACT
+installed version (`name==version`, `--force-reinstall --no-deps`, no
+`--upgrade`) so the correct-ABI wheel lands without surprise upgrades of
+packages ccenv doesn't own (the `--user` site is shared with the user's own
+installs). Generic by construction — heals any compiled dep, self-heals an
+already-broken box, near-instant no-op when every extension matches.
+
+Also records the Python ABI cache tag (`sys.implementation.cache_tag`) in
+`~/.config/ccenv/python-tag` so the next install can detect and announce a
+Python bump. The actual heal keys off the on-disk `.so` files, not this
+marker, so it still fixes a fresh checkout (no marker) or a box whose bump
+predates this feature.
+
+ccloop v0.5.0: headless `claude -p` now requires explicit, acknowledged
+opt-in. Same billing driver as the ccmemory change — headless / Agent SDK
+usage is moving onto a metered credit pool at API rates — but ccloop's
+headless mode is intentional (autonomous unattended runs genuinely need
+non-interactive `-p`), so it can't just be removed. Instead it can no longer
+be entered *silently*:
+
+  - `--headless` now requires `--accept-api-cost` as well; passing
+    `--headless` alone is a usage error that explains the billing.
+  - The old TTY auto-detect used to fall back to headless `-p` whenever
+    ccloop ran without a terminal (cron, `nohup`, piped, backgrounded). That
+    silent fallback is gone: no TTY + no `--headless --accept-api-cost` now
+    **errors out** instead of quietly spending API credit. Interactive on a
+    real TTY (subscription-billed) is unchanged and remains the default.
+  - Mode resolution moved into `cli._resolve_interactive()` and is applied
+    only to `run`/`resume`; `--list`/`--prune`/`install`/`--help` still work
+    with no TTY.
+
 ## v0.1.4
 
 `install.sh` auto-appends `PYTHONUSERBASE` (where needed) and a

@@ -321,6 +321,156 @@ ensure_build_toolchain() {
 }
 
 # ----------------------------------------------------------------------------
+# heal_stale_compiled_exts -- force-reinstall native deps stranded by a Python
+# version bump.
+#
+# Why this is needed: with PYTHONUSERBASE set, Homebrew's osx_framework_user
+# scheme collapses the --user site to a SINGLE version-agnostic directory,
+# $PYTHONUSERBASE/lib/python/site-packages — shared verbatim by python3.13,
+# python3.14, ... (verify: `python3 -c 'import site;print(site.getusersitepackages())'`
+# returns the same path for every minor version). Pure-Python packages survive
+# a Python upgrade there, but COMPILED extensions are ABI-tagged
+# (e.g. watchfiles' _rust_notify.cpython-314-darwin.so) and only load under the
+# matching interpreter. After a Python bump the old tagged .so lingers, the new
+# interpreter cannot import it, and pip — seeing the distribution already
+# "present" in the shared dir — never refetches the right-ABI wheel. The
+# observed symptom was ccteam's MCP failing to connect with
+# `ModuleNotFoundError: No module named 'watchfiles._rust_notify'`.
+#
+# Fix: after everything is installed, walk the shared user-site for native
+# extension files whose ABI tag does not match the running interpreter, map each
+# stale file back to its owning pip distribution (via that dist's RECORD), and
+# `pip install --force-reinstall --no-deps` it so the correct-ABI wheel lands.
+# Generic by construction — it heals ANY compiled dep (today only watchfiles via
+# ccteam), self-heals an already-broken box, and is a near-instant no-op when
+# every extension already matches.
+# ----------------------------------------------------------------------------
+heal_stale_compiled_exts() {
+    step "native deps" "checking for stale-ABI compiled extensions in the shared user-site"
+
+    local site
+    site=$(python3 -c 'import site; print(site.getusersitepackages())' 2>/dev/null)
+    if [ -z "$site" ] || [ ! -d "$site" ]; then
+        info "no user-site directory yet — nothing to check"
+        return 0
+    fi
+
+    local cur_ext
+    cur_ext=$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or "")' 2>/dev/null)
+    info "current interpreter ABI: ${cur_ext:-<unknown>}  ($(python3 --version 2>&1))"
+
+    # Detect a Python bump since the last install for an informative message.
+    # The actual fix below is keyed off the on-disk .so files, not this marker,
+    # so it still heals a fresh checkout (no marker) or a box where the bump
+    # predates this feature. The marker is (re)written at the end of install.
+    local cur_tag prev_tag
+    cur_tag=$(python3 -c 'import sys; print(sys.implementation.cache_tag)' 2>/dev/null)
+    PYTHON_TAG_MARKER="$HOME/.config/ccenv/python-tag"
+    prev_tag=$(cat "$PYTHON_TAG_MARKER" 2>/dev/null | head -1)
+    if [ -n "$prev_tag" ] && [ "$prev_tag" != "$cur_tag" ]; then
+        info "Python changed since last install: $prev_tag -> $cur_tag (compiled deps may need rebuilding)"
+    fi
+
+    # Emit one distribution name per line for each stale extension found; emit
+    # "ORPHAN<TAB><relpath>" on stderr for stale files no dist-info claims.
+    local stale_dists
+    stale_dists=$(CCENV_SITE="$site" python3 - <<'PY'
+import os, re, sys, sysconfig
+
+site = os.environ["CCENV_SITE"]
+cur = sysconfig.get_config_var("EXT_SUFFIX") or ""
+
+# A compiled extension is loadable by THIS interpreter only if its filename ends
+# in the interpreter's exact EXT_SUFFIX, the stable-ABI ".abi3.so", or carries
+# no interpreter tag at all. A different "cpythonNN"/"cpNN"/"pypy" tag is stale.
+def is_stale(fn):
+    if fn.endswith(".abi3.so"):
+        return False
+    if not re.search(r"\.(?:cpython-|cp|pypy)\d", fn):
+        return False  # untagged or non-CPython-tagged — leave it alone
+    return not fn.endswith(cur)
+
+stale = []
+for root, dirs, files in os.walk(site):
+    for f in files:
+        if f.endswith((".so", ".pyd", ".dylib")) and is_stale(f):
+            stale.append(os.path.normpath(os.path.relpath(os.path.join(root, f), site)))
+
+if not stale:
+    sys.exit(0)
+
+# Map every RECORD-listed path to its owning *.dist-info directory.
+owner = {}
+for entry in os.listdir(site):
+    if not entry.endswith(".dist-info"):
+        continue
+    record = os.path.join(site, entry, "RECORD")
+    try:
+        with open(record, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                path = line.split(",", 1)[0].strip()
+                if path:
+                    owner[os.path.normpath(path)] = entry
+    except OSError:
+        continue
+
+# Pin the EXACT installed version (name==version) so the reinstall rebuilds the
+# right-ABI wheel of the SAME release — never a surprise upgrade of a package
+# ccenv does not own (the --user site is shared with the user's own installs).
+def name_version(distinfo):
+    name = ver = ""
+    meta = os.path.join(site, distinfo, "METADATA")
+    try:
+        with open(meta, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("Name:") and not name:
+                    name = line.split(":", 1)[1].strip()
+                elif line.startswith("Version:") and not ver:
+                    ver = line.split(":", 1)[1].strip()
+                if name and ver:
+                    break
+    except OSError:
+        pass
+    if not name or not ver:
+        base = distinfo[: -len(".dist-info")]
+        m = re.match(r"(.+?)-(\d.*)$", base)
+        if m:
+            name, ver = name or m.group(1), ver or m.group(2)
+    return name, ver
+
+seen = set()
+for rel in stale:
+    di = owner.get(rel)
+    if di:
+        name, ver = name_version(di)
+        if name and ver and name.lower() not in seen:
+            seen.add(name.lower())
+            print("%s==%s" % (name, ver))
+        elif not (name and ver):
+            print("ORPHAN\t" + rel, file=sys.stderr)
+    else:
+        print("ORPHAN\t" + rel, file=sys.stderr)
+PY
+)
+
+    if [ -z "$stale_dists" ]; then
+        info "no stale-ABI compiled extensions found"
+        return 0
+    fi
+
+    warn "stale-ABI compiled extensions detected (Python changed since they were built) — force-reinstalling the same versions for the current ABI:"
+    local d
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        info "  force-reinstall $d"
+        python3 -m pip install --user --force-reinstall --no-deps "$d" 2>&1 | sed 's/^/    /' \
+            || warn "  force-reinstall of $d failed — its native extension may still be stale"
+    done <<EOF
+$stale_dists
+EOF
+}
+
+# ----------------------------------------------------------------------------
 # Assemble the BASE ~/.claude/CLAUDE.md — FIRST, before any component runs.
 #
 # The top-level installer owns ONLY the base (this repo's bundled rules) plus
@@ -485,6 +635,14 @@ if should_install ccmemory; then
     step ccmemory "pip install --user + register MCP 'ccmemory'"
     pip_install_local "$SCRIPT_DIR/ccmemory"
     register_mcp ccmemory "$(resolve_cmd ccmemory)" mcp
+
+    # Install the compile-memories skill. Compaction runs in the interactive
+    # session (no claude -p / no metered Agent-SDK credit); the skill carries
+    # the procedure and the SessionStart hook nudges when the backlog is high.
+    CCMEM_SKILL_DIR="$HOME/.claude/skills/compile-memories"
+    mkdir -p "$CCMEM_SKILL_DIR"
+    cp "$SCRIPT_DIR/ccmemory/skills/compile-memories/SKILL.md" "$CCMEM_SKILL_DIR/SKILL.md"
+    info "installed $CCMEM_SKILL_DIR/SKILL.md"
 fi
 
 # ----------------------------------------------------------------------------
@@ -632,6 +790,12 @@ if [ "$DO_OVERLAYS" = "1" ]; then
     done
 fi
 
+# Heal native deps stranded by a Python version bump. Runs AFTER every install:
+# components/overlays satisfy their compiled deps from the shared user-site, so
+# pip leaves a stale-ABI .so in place on a Python bump — this re-fetches the
+# right-ABI wheel. Self-heals an already-broken box even with no version change.
+heal_stale_compiled_exts
+
 # NOTE: the base ~/.claude/CLAUDE.md is assembled BEFORE the components run
 # (see assemble_ccenv_base_claude_md, invoked above). Each component installer
 # owns and appends its own section (e.g. ccproject's [AWARENESS PROTOCOL]); the
@@ -771,6 +935,17 @@ mkdir -p "$(dirname "$INSTALL_MARKER")"
 if [ -f "$SCRIPT_DIR/VERSION" ]; then
     cp "$SCRIPT_DIR/VERSION" "$INSTALL_MARKER"
     info "recorded installed version $(cat "$INSTALL_MARKER" 2>/dev/null | head -1) in $INSTALL_MARKER"
+fi
+
+# Record the Python ABI tag this install ran under, so the NEXT install can
+# detect (and announce) a Python version bump and heal stale-ABI native deps.
+# heal_stale_compiled_exts sets PYTHON_TAG_MARKER and reads the prior value.
+if [ -n "${PYTHON_TAG_MARKER:-}" ]; then
+    CUR_TAG=$(python3 -c 'import sys; print(sys.implementation.cache_tag)' 2>/dev/null)
+    if [ -n "$CUR_TAG" ]; then
+        printf '%s\n' "$CUR_TAG" > "$PYTHON_TAG_MARKER"
+        info "recorded Python ABI tag $CUR_TAG in $PYTHON_TAG_MARKER"
+    fi
 fi
 
 echo ""

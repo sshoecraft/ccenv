@@ -33,9 +33,15 @@ Tip: load criteria from a file with shell substitution, e.g.
 Options:
   --no-hook                     skip guard-hook registration for this run
   -i, --interactive             force the interactive Claude TUI (relay on exit)
-  --headless                    force headless mode (autonomous, parsed output)
-                                (default: auto — interactive on a TTY, else headless)
+  --headless                    run autonomously via headless `claude -p`
+                                REQUIRES --accept-api-cost (headless bills the
+                                metered Agent SDK credit at API rates, not your sub)
+  --accept-api-cost             acknowledge headless API billing; required with --headless
+                                (default: interactive TUI on a TTY. With NO TTY and no
+                                --headless --accept-api-cost, ccloop errors out rather
+                                than silently running metered headless `claude -p`.)
   --cutoff=N                    relay cutoff in thousands of tokens (default: 250)
+                                (0 = no cutoff — keep going until the session window fills)
 
 Environment variables:
   CCLOOP_MAX_ITERATIONS    hard cap on sessions per run (default: 0 = unlimited)
@@ -96,9 +102,11 @@ def _extract_cutoff(argv):
         except ValueError:
             error = f"--cutoff: not an integer: {raw!r}"
             return argv, None, error
-        if n <= 0:
-            error = f"--cutoff: must be a positive integer (got {n})"
+        if n < 0:
+            error = f"--cutoff: must be a non-negative integer (got {n})"
             return argv, None, error
+        # 0 is the explicit "no cutoff" sentinel — keep going until the
+        # session window fills. Any positive N is N thousand tokens.
         cutoff_tokens = n * 1000
         i += 1
     return out, cutoff_tokens, None
@@ -166,15 +174,59 @@ def main(argv=None):
         ensure_hook = False
         argv = [a for a in argv if a != "--no-hook"]
 
-    interactive = None  # auto-detect from TTY
+    force_interactive = False
     if "--interactive" in argv or "-i" in argv:
-        interactive = True
+        force_interactive = True
         argv = [a for a in argv if a not in ("--interactive", "-i")]
+    want_headless = False
     if "--headless" in argv:
-        interactive = False
+        want_headless = True
         argv = [a for a in argv if a != "--headless"]
-    if interactive is None:
-        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    accept_api_cost = False
+    if "--accept-api-cost" in argv:
+        accept_api_cost = True
+        argv = [a for a in argv if a != "--accept-api-cost"]
+
+    def _resolve_interactive():
+        """Decide interactive vs headless for a run/resume. Returns
+        ``(interactive_bool, exit_code)``; exit_code is None on success or a
+        usage-error code (2) the caller should return after we've printed why.
+
+        Policy: headless ``claude -p`` is NEVER selected implicitly. It bills
+        against the metered Agent SDK credit at full API rates (the June 2026
+        billing change moved headless / Agent SDK usage off the subscription),
+        so it requires an explicit, acknowledged opt-in: BOTH --headless and
+        --accept-api-cost. Auto-detect picks the interactive TUI on a TTY and
+        REFUSES on no TTY rather than silently falling back to metered -p.
+        """
+        if force_interactive and want_headless:
+            print("ccloop: --interactive and --headless are mutually exclusive",
+                  file=sys.stderr)
+            return None, 2
+        if want_headless:
+            if not accept_api_cost:
+                print(
+                    "ccloop: --headless runs `claude -p`, which bills against the metered\n"
+                    "  Agent SDK credit at API rates (not your subscription). Re-run with\n"
+                    "  BOTH flags to confirm you accept that cost:\n"
+                    "    ccloop --headless --accept-api-cost ...",
+                    file=sys.stderr,
+                )
+                return None, 2
+            return False, None
+        if force_interactive:
+            return True, None
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            return True, None
+        print(
+            "ccloop: no TTY detected, and headless mode was not authorized.\n"
+            "  ccloop no longer silently falls back to headless `claude -p` — that bills\n"
+            "  against the metered Agent SDK credit at API rates. Choose one:\n"
+            "    • run inside a terminal for the interactive TUI (uses your subscription), or\n"
+            "    • pass --headless --accept-api-cost to run autonomously at API cost.",
+            file=sys.stderr,
+        )
+        return None, 2
 
     argv, cutoff_tokens, cutoff_err = _extract_cutoff(argv)
     if cutoff_err:
@@ -210,6 +262,9 @@ def main(argv=None):
                 file=sys.stderr,
             )
             return 2
+        interactive, err = _resolve_interactive()
+        if err is not None:
+            return err
         return _run(runner.cmd_resume, run_id, ensure_hook=ensure_hook,
                     interactive=interactive, cutoff_tokens=cutoff_tokens)
 
@@ -238,6 +293,9 @@ def main(argv=None):
     if not task.strip():
         print("ccloop: task argument is empty", file=sys.stderr)
         return 2
+    interactive, err = _resolve_interactive()
+    if err is not None:
+        return err
     return _run(runner.cmd_run, criteria, task, ensure_hook=ensure_hook,
                 interactive=interactive, cutoff_tokens=cutoff_tokens)
 
