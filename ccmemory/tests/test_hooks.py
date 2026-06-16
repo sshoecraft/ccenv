@@ -39,7 +39,6 @@ def test_guard_allows_other_writes(monkeypatch):
 def test_stop_skips_when_sentinel_present(memory_dir, monkeypatch, capsys):
     write_memory(memory_dir, "foo")
     (memory_dir / hooks.SKIP_REGEN_SENTINEL).write_text("skip\n")
-    monkeypatch.setenv("CCMEMORY_DIR", str(memory_dir))
     _capture(monkeypatch, {})
     rc = hooks.stop_handler()
     assert rc == 0
@@ -48,7 +47,6 @@ def test_stop_skips_when_sentinel_present(memory_dir, monkeypatch, capsys):
 
 def test_stop_regenerates_when_no_sentinel(memory_dir, monkeypatch):
     write_memory(memory_dir, "foo", description="useful description")
-    monkeypatch.setenv("CCMEMORY_DIR", str(memory_dir))
     _capture(monkeypatch, {})
     rc = hooks.stop_handler()
     assert rc == 0
@@ -58,7 +56,6 @@ def test_stop_regenerates_when_no_sentinel(memory_dir, monkeypatch):
 
 def test_session_emits_protocol(memory_dir, monkeypatch):
     write_memory(memory_dir, "foo")
-    monkeypatch.setenv("CCMEMORY_DIR", str(memory_dir))
     out = _capture(monkeypatch, {})
     rc = hooks.session_handler()
     assert rc == 0
@@ -67,9 +64,9 @@ def test_session_emits_protocol(memory_dir, monkeypatch):
     assert "memory_search" in payload["hookSpecificOutput"]["additionalContext"]
 
 
-def test_session_noop_when_no_memory_dir(monkeypatch):
-    monkeypatch.delenv("CCMEMORY_DIR", raising=False)
-    monkeypatch.chdir("/tmp")
+def test_session_noop_when_no_memory_dir(tmp_path, monkeypatch):
+    # A startup dir with no .ccmemory/ (and no legacy store) → nothing to emit.
+    monkeypatch.chdir(tmp_path)
     out = _capture(monkeypatch, {})
     rc = hooks.session_handler()
     assert rc == 0
@@ -78,7 +75,6 @@ def test_session_noop_when_no_memory_dir(monkeypatch):
 
 def test_inject_emits_relevant_hits(memory_dir, monkeypatch):
     write_memory(memory_dir, "xfs_inode_lesson", description="lessons about xfs_inode.c clobber bug")
-    monkeypatch.setenv("CCMEMORY_DIR", str(memory_dir))
     out = _capture(monkeypatch, {"tool_name": "Read", "tool_input": {"file_path": "/src/mxfs/fs/xfs/xfs_inode.c"}})
     rc = hooks.inject_handler()
     assert rc == 0

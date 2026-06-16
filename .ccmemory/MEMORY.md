@@ -1,4 +1,5 @@
 ## feedback
+- [bump-top-level-bundle-version-not-just-subdir](bump-top-level-bundle-version-not-just-subdir.md) — When fixing a component in /src/ccenv, bump the TOP-LEVEL bundle VERSION + CHANGELOG.md — the bundle is what installs, not the component subdir.
 - [install-claude-md-component-owned](install-claude-md-component-owned.md) — Top-level install.sh owns only the BASE ~/.claude/CLAUDE.md (in a [CCENV MANAGED] marker region); each component owns/appends its own section.
 - [no-git-checkout-to-undo-own-edits](no-git-checkout-to-undo-own-edits.md) — NEVER run git for ANY reason without explicit direction — including read-only checks (status/diff/log). The ban has no exceptions.
 - [no-per-component-venvs](no-per-component-venvs.md) — ccenv components install via pip3 install --user (pipx as PEP 668 fallback); per-component venvs are explicitly rejected
@@ -10,6 +11,7 @@
 - [ccenvmcp-stdlib-mcp-shim](ccenvmcp-stdlib-mcp-shim.md) — ccenvmcp: stdlib-only Python 3.9+ FastMCP-compatible shim replacing the mcp SDK across ccmemory/ccusage/ccteam so the bundle installs on 3.9.
 - [ccloop-stop-hook-return-0-kills-session](ccloop-stop-hook-return-0-kills-session.md) — ccloop Stop hook MUST block, not return 0, to keep the session alive — ccloop's runner relays on session-end. "No-op" semantics differ from pure Clau…
 - [ccmemory-debian-build-unknown-install-layout](ccmemory-debian-build-unknown-install-layout.md) — RESOLVED + VERIFIED on-box (2026-06-13): install.sh ensure_build_toolchain bootstrap fixed the PEP 621 UNKNOWN/install_layout build crash on Debian 3…
+- [claude-code-does-not-reap-task-output-files](claude-code-does-not-reap-task-output-files.md) — Claude Code does NOT delete a Bash background task's .output file when the command finishes — it persists for the whole session. Presence != liveness.
 - [pythonuserbase-banner-platform-gated](pythonuserbase-banner-platform-gated.md) — install.sh's REQUIRED-setup banner is gated on the platform's DEFAULT user-base; silent on Linux, fires on macOS+Homebrew Python
 - [shared-userbase-compiled-dep-abi-mismatch](shared-userbase-compiled-dep-abi-mismatch.md) — PYTHONUSERBASE shares ONE version-agnostic site-packages across pythons; a python bump strands stale-ABI .so files. install.sh v0.1.5 auto-heals via…
 

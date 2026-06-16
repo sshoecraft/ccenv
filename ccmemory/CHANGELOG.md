@@ -2,6 +2,41 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.11.0
+
+Memory anchors to the directory Claude Code was started in (CWD) — nothing
+else. `project_root()` no longer walks up the tree and no longer hunts for
+`.git/` or build-system markers.
+
+The old resolver walked up from CWD looking for `.git/`, then for
+`pyproject.toml` / `package.json` / `Makefile` / `Cargo.toml` / `go.mod`, and
+only fell back to CWD if it found none of them. That silently broke the
+autonomous-runner case: a ccloop run dir (e.g. aitrader's `<data_dir>/run`,
+which holds `CLAUDE.md` + `.claude/settings.json` but no `.git` and no build
+files) matched nothing, so the walk ran off the top of `$HOME`,
+`project_root()` returned `None`, and `memory_write` failed with "no memory
+dir resolvable" — never creating `.ccmemory/` anywhere. It also meant a
+session started in a subdirectory had its memory captured by a parent repo
+root instead of staying local to that subdir.
+
+Now the anchor is exactly the directory the session started in:
+
+- A ccloop/autonomous run dir gets its own `.ccmemory/` right where it runs.
+- A session started in a subdirectory keeps its memories local to that subdir;
+  re-launching there later finds them, and they never leak up to a parent.
+- `project_root()` is renamed `startup_dir()` and `project_memory_dir()` is
+  renamed `startup_memory_dir()` — the old names implied the "go find the
+  project" semantics that caused the bug.
+- `PROJECT_MARKERS` and the walk-up loop are gone.
+- **Both directory-relocation env vars are removed entirely:**
+  `CCMEMORY_PROJECT_ROOT` and `CCMEMORY_DIR` no longer exist anywhere in the
+  code. The store location is CWD, period — nothing overrides it. (Behavior
+  toggles `CCMEMORY_NO_AUTOMIGRATE` and `CCMEMORY_COMPILE_THRESHOLD` are
+  unaffected; they don't move the store.)
+- The legacy `~/.claude/projects/<slug>/memory/` read fallback stays as a
+  back-compat source for un-migrated projects (the MCP server still
+  auto-copies it into `<cwd>/.ccmemory/` on first boot).
+
 ## v0.10.0
 
 Memory compaction no longer uses `claude -p`. Anthropic is moving the Agent

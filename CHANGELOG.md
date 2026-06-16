@@ -2,6 +2,59 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.1.7
+
+ccloop v0.5.1: fix the Stop-hook background-work wait gate wedging a session
+forever.
+
+The gate (`keepgoing._pending_background_task_count`) decided "a background
+command is still running" by counting `*.output` files in the session's
+`/tmp/claude-<uid>/<slug>/<sid>/tasks/` dir, on the assumption that the harness
+deletes each file once it consumes the result. It does not — Claude Code never
+reaps `tasks/*.output`; the files persist for the whole session (and beyond).
+So once any background command had ever run, its orphaned `.output` re-fired
+the gate on every subsequent Stop: the session could neither relay nor exit,
+emitting "N background command(s) still running" until the context wall.
+
+The gate now requires writer *liveness*, not file presence: an `.output`
+counts only when a live process holds it open, read from `/proc/<pid>/fd`
+(no subprocess, only on Stop, short-circuited once all paths match). Platforms
+without procfs (macOS) fall back to an mtime freshness window
+(`STALE_OUTPUT_SECONDS=90`) so a stale file can never fire the gate
+indefinitely. Verified against the real wedged session: 5 leftover files
+present → 0 counted.
+
+## v0.1.6
+
+ccmemory v0.11.0: memory anchors to the directory Claude Code was started in
+(CWD) — nothing else. `project_root()` no longer walks up the tree and no
+longer hunts for `.git/` or build-system markers (`pyproject.toml` /
+`package.json` / `Makefile` / `Cargo.toml` / `go.mod`).
+
+The old resolver walked up from CWD for those markers and only fell back to
+CWD if it found none. That silently broke the autonomous-runner case: a ccloop
+run dir (e.g. aitrader's `<data_dir>/run`, which holds `CLAUDE.md` +
+`.claude/settings.json` but no `.git` and no build files) matched nothing, so
+the walk ran off the top of `$HOME`, `project_root()` returned `None`, and
+`memory_write` failed with "no memory dir resolvable" — never creating
+`.ccmemory/` anywhere. It also meant a session started in a subdirectory had
+its memory captured by a parent repo root instead of staying local.
+
+What changed in ccmemory:
+
+  - The anchor is now just CWD. A ccloop/autonomous run dir gets its own
+    `.ccmemory/` right where it runs; a session started in a subdirectory keeps
+    its memories local to that subdir (re-launching there finds them, and they
+    never leak up to a parent). `project_root()`/`project_memory_dir()` are
+    renamed `startup_dir()`/`startup_memory_dir()` to kill the misleading
+    "go find the project" framing.
+  - `PROJECT_MARKERS` and the walk-up loop are gone.
+  - Both directory-relocation env vars — `CCMEMORY_PROJECT_ROOT` and
+    `CCMEMORY_DIR` — are removed entirely. The store location is CWD, period;
+    nothing overrides it. (`CCMEMORY_NO_AUTOMIGRATE` /
+    `CCMEMORY_COMPILE_THRESHOLD` are behavior toggles, not store relocation,
+    and are unaffected.)
+
 ## v0.1.5
 
 ccmemory v0.10.0: memory compaction no longer uses `claude -p`. Anthropic is

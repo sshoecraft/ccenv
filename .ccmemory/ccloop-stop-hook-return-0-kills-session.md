@@ -24,7 +24,7 @@ This bit us when the "background-work wait gate" was implemented as `return 0` o
 
 - In ccloop's `keepgoing.py`, any gate that wants to "do nothing" while keeping the session alive MUST emit `decision: block` (re-feed), NOT `return 0`.
 - Order matters: cutoff MUST come BEFORE the wait gate, so cutoff always fires when context is exhausted regardless of pending task state. Losing a task to relay is recoverable; blowing past the context wall is not.
-- File-presence is fine as the trigger for the wait gate; false positives (stale `.output` not yet reaped) are recoverable because the block→model-turn→stop cycle continues until the harness reaps the file (typically seconds), at which point keepgoing/cutoff resume normally.
+- ~~File-presence is fine as the trigger for the wait gate; false positives (stale `.output` not yet reaped) are recoverable because the harness reaps the file in seconds.~~ **WRONG — corrected 2026-06-16.** Claude Code NEVER reaps `tasks/*.output`; they persist for the whole session, so presence-based detection wedged sessions PERMANENTLY (gate re-fired on dead tasks forever). The wait gate must check writer *liveness* (procfs fd holder / mtime), not presence. See [[claude-code-does-not-reap-task-output-files]].
 - Wait re-feeds intentionally do NOT bump the keepgoing counter or count toward `CCLOOP_MAX_CONTINUES` — that cap exists to break model-pathology spin loops, not external-work waits.
 - The reason text in the wait re-feed should be MINIMAL ("Wait. Background command still running."), not the keepgoing CONTINUE_MSG. The keepgoing nudge pushes the model toward "pick a new angle," which is the opposite of what waiting requires.
 

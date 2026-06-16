@@ -30,12 +30,10 @@ log = logging.getLogger("ccmemory-mcp")
 
 
 def _resolve_dir() -> Path:
-    # For memory_write we want to create the project-local dir if it
-    # doesn't exist yet (must_exist=False). For read tools the caller
-    # will get an empty index, which is the correct behavior.
+    # For memory_write we create the startup-dir store if it doesn't exist yet
+    # (must_exist=False). For read tools the caller gets an empty index, which
+    # is the correct behavior. The anchor is just CWD, so this always resolves.
     d = paths.resolve_memory_dir(must_exist=False)
-    if not d:
-        raise RuntimeError("no memory dir resolvable (set CCMEMORY_DIR or run inside a project)")
     d.mkdir(parents=True, exist_ok=True)
     # Self-heal the store's .gitignore so the derived index + macOS ._*
     # sidecars never leak into git. Runs on every project ccmemory touches,

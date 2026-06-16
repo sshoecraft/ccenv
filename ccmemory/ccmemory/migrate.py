@@ -70,18 +70,12 @@ def migrate(
     """Copy .md files source → target with hash verification.
 
     When source/target are None, auto-resolve: source = legacy dir for cwd,
-    target = ``<project_root>/.ccmemory/``.
+    target = ``<startup_dir>/.ccmemory/``.
     """
     if source is None:
         source = paths.legacy_memory_dir()
     if target is None:
-        target = paths.project_memory_dir()
-
-    if target is None:
-        return MigrationResult(
-            status="no-target",
-            reason="no project root resolvable from cwd; pass --to or set CCMEMORY_PROJECT_ROOT",
-        )
+        target = paths.startup_memory_dir()
 
     if source is None or not source.exists():
         return MigrationResult(
@@ -169,8 +163,7 @@ def automigrate_quiet() -> MigrationResult | None:
 
     Fires only when:
       - CCMEMORY_NO_AUTOMIGRATE is unset
-      - project root resolves
-      - <project_root>/.ccmemory/ does not yet exist (or is empty)
+      - <startup_dir>/.ccmemory/ does not yet exist (or is empty)
       - legacy dir exists and has .md files
 
     Always copy, never move. Logs one line to stderr on success.
@@ -178,9 +171,7 @@ def automigrate_quiet() -> MigrationResult | None:
     if os.environ.get("CCMEMORY_NO_AUTOMIGRATE"):
         return None
 
-    target = paths.project_memory_dir()
-    if not target:
-        return None
+    target = paths.startup_memory_dir()
 
     # Already migrated (or user has populated .ccmemory/ themselves) — skip.
     if target.exists() and _list_md_files(target):

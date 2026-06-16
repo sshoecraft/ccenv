@@ -55,8 +55,8 @@ Escape hatches:
 
 ## Memory location: it travels with the repo
 
-Memory is stored in `<project_root>/.ccmemory/` — inside the project, NOT
-in `~/.claude`. This means:
+Memory is stored in `<cwd>/.ccmemory/` — inside the directory Claude Code was
+started in, NOT in `~/.claude`. This means:
 
 - Cloning the repo brings the memory with it
 - Multiple machines / collaborators see the same memory
@@ -66,14 +66,19 @@ in `~/.claude`. This means:
   store's `.gitignore` automatically (also covering macOS `._*` sidecars),
   so no per-project setup is needed on any machine.
 
+The anchor is the directory Claude Code was started in (CWD) — full stop.
+ccmemory does **not** walk up the tree, does **not** hunt for `.git/` or
+build-system markers, and reads **no** environment variable to relocate the
+store. So an autonomous ccloop run dir gets its own store right where it runs,
+and a session started in a subdirectory keeps its memories local to that subdir
+(re-launching there finds them; they never leak up to a parent).
+
 ccmemory resolves the memory dir in this order:
 
-1. `CCMEMORY_DIR` env var (explicit override)
-2. `<project_root>/.ccmemory/` — discovered by walking up from CWD looking
-   for `.git/`, then `pyproject.toml` / `package.json` / `Makefile` /
-   `Cargo.toml` / `go.mod`
-3. Legacy `~/.claude/projects/<slug>/memory/` — Claude Code's per-project
-   path, used as fallback for un-migrated projects
+1. `<cwd>/.ccmemory/` — the directory Claude Code was started in
+2. Legacy `~/.claude/projects/<slug>/memory/` — Claude Code's per-project
+   path, a read-only fallback for un-migrated projects (the source the MCP
+   server auto-copies into `.ccmemory/` on first boot)
 
 The first time the MCP server boots in a project with legacy memory and
 no `.ccmemory/`, ccmemory auto-migrates: copies the `.md` files, verifies

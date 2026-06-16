@@ -65,7 +65,8 @@ def cmd_compile(args):
     import json
     d = paths.resolve_memory_dir()
     if not d:
-        sys.exit("error: no memory dir resolvable from cwd (set CCMEMORY_DIR or run inside a project)")
+        sys.exit("error: no memory yet in this directory (nothing in "
+                 f"{paths.startup_memory_dir()} and no legacy store to read)")
     result = compile_mod.compile_status(d, topic=args.topic, max_inputs=args.max)
     print(json.dumps(result, indent=2, default=str))
 
@@ -85,8 +86,8 @@ def cmd_migrate(args):
 
 
 def cmd_where(args):
-    print(f"project_root:   {paths.project_root()}")
-    print(f"project_dir:    {paths.project_memory_dir()}")
+    print(f"startup_dir:    {paths.startup_dir()}")
+    print(f"startup_dir/.ccmemory: {paths.startup_memory_dir()}")
     print(f"legacy_dir:     {paths.legacy_memory_dir()}")
     print(f"resolved (use): {paths.resolve_memory_dir()}")
 
@@ -121,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pmg = sub.add_parser("migrate", help="copy legacy memory into project-local .ccmemory/ (also runs automatically on MCP boot)")
     pmg.add_argument("--from", dest="from_", help="source dir (default: legacy ~/.claude/projects/<slug>/memory)")
-    pmg.add_argument("--to", help="target dir (default: <project_root>/.ccmemory/)")
+    pmg.add_argument("--to", help="target dir (default: <startup_dir>/.ccmemory/)")
     pmg.add_argument("--dry-run", action="store_true")
     pmg.add_argument("--overwrite", action="store_true", help="replace existing .ccmemory/ content")
     pmg.set_defaults(func=cmd_migrate)

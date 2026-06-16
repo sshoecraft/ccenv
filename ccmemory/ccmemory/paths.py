@@ -1,34 +1,33 @@
-"""Project root + memory dir resolution.
+"""Startup dir + memory dir resolution.
 
 Single resolver shared by store, hooks, MCP server, and CLI so behavior is
 identical everywhere. Replaces the scattered `_autodetect_memory_dir` /
 `_default_memory_dir` functions that used to live in cli.py and hooks.py.
 
-Resolution priorities for project root:
-  1. ``CCMEMORY_PROJECT_ROOT`` env var (explicit override)
-  2. Walk up from CWD looking for ``.git/``
-  3. Walk up from CWD looking for ``pyproject.toml``,
-     ``package.json``, ``Makefile``, ``Cargo.toml``, ``go.mod``
-  4. Fall back to CWD itself
+The anchor is the directory Claude Code was started in (CWD) — full stop.
+ccmemory NEVER walks up the tree, NEVER hunts for ``.git/`` or build-system
+markers, and reads NO environment variables to relocate the store. Memory
+belongs to the exact directory the session started in. So an autonomous
+ccloop run dir (no ``.git``, no build files) gets its own store right where it
+runs, and a session started in a subdirectory keeps its memories local to that
+subdirectory — re-launching there later finds them, and they never leak up to
+a parent they don't belong to.
 
-Resolution priorities for memory dir:
-  1. ``CCMEMORY_DIR`` env var (explicit override)
-  2. ``<project_root>/.ccmemory/`` — project-local, travels with the repo
-  3. ``~/.claude/projects/<cwd-slug>/memory/`` — legacy Claude Code location,
-     for back-compat with un-migrated projects
-  4. None (caller must handle)
+Startup dir:
+  - CWD. Nothing else.
+
+Memory dir:
+  1. ``<startup_dir>/.ccmemory/`` — i.e. ``<cwd>/.ccmemory/``, travels with the dir
+  2. ``~/.claude/projects/<cwd-slug>/memory/`` — legacy Claude Code location,
+     read-only fallback for un-migrated projects (the source the MCP server
+     auto-copies into ``.ccmemory/`` on first boot)
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 PROJECT_LOCAL_DIRNAME = ".ccmemory"
-
-# Project markers checked when there's no .git/. Order matters only insofar
-# as the first match wins per directory level.
-PROJECT_MARKERS = ("pyproject.toml", "package.json", "Makefile", "Cargo.toml", "go.mod")
 
 # .gitignore dropped inside every .ccmemory/ store. The .md files are the
 # git-friendly source of truth; the SQLite index is a derived cache and must
@@ -92,34 +91,21 @@ def ensure_gitignore(memory_dir: Path) -> bool:
     return True
 
 
-def project_root(start: Path | None = None) -> Path | None:
-    """Find the project root by walking up from start (default CWD).
+def startup_dir(start: Path | None = None) -> Path:
+    """The directory Claude Code was started in (CWD) — full stop.
 
-    Returns None only if no marker is found anywhere up to /.
+    ccmemory does NOT walk up the tree, does NOT hunt for ``.git/`` or
+    build-system markers, and reads NO environment variable to relocate the
+    anchor. It is exactly the directory the session started in, so a
+    ccloop/autonomous run dir gets its own ``.ccmemory/`` where it runs, and a
+    subdirectory session keeps its memories local to that subdir.
     """
-    env = os.environ.get("CCMEMORY_PROJECT_ROOT")
-    if env:
-        p = Path(env).resolve()
-        return p if p.exists() else None
-
-    cur = (start or Path.cwd()).resolve()
-    while True:
-        if (cur / ".git").exists():
-            return cur
-        for marker in PROJECT_MARKERS:
-            if (cur / marker).exists():
-                return cur
-        if cur.parent == cur:
-            return None
-        cur = cur.parent
+    return (start or Path.cwd()).resolve()
 
 
-def project_memory_dir(start: Path | None = None) -> Path | None:
-    """``<project_root>/.ccmemory/`` if a project root resolves, else None."""
-    root = project_root(start)
-    if not root:
-        return None
-    return root / PROJECT_LOCAL_DIRNAME
+def startup_memory_dir(start: Path | None = None) -> Path:
+    """``<startup_dir>/.ccmemory/`` — the store for the dir CC was started in."""
+    return startup_dir(start) / PROJECT_LOCAL_DIRNAME
 
 
 def legacy_memory_dir(start: Path | None = None) -> Path | None:
@@ -135,31 +121,24 @@ def legacy_memory_dir(start: Path | None = None) -> Path | None:
 
 
 def resolve_memory_dir(start: Path | None = None, must_exist: bool = True) -> Path | None:
-    """The canonical memory dir for this cwd.
+    """The canonical memory dir for the startup (CWD) directory.
 
     Order:
-      1. CCMEMORY_DIR env var
-      2. Project-local .ccmemory/ if it exists
-      3. Legacy ~/.claude/projects/<slug>/memory/ if it exists
-      4. None (or the project-local path if must_exist=False)
+      1. ``<startup_dir>/.ccmemory/`` if it exists
+      2. Legacy ``~/.claude/projects/<slug>/memory/`` if it exists (read-only
+         back-compat for un-migrated projects)
+      3. With ``must_exist=False``, the ``<startup_dir>/.ccmemory/`` path so
+         callers (memory_write, migrate) have somewhere to create; else None.
     """
-    env = os.environ.get("CCMEMORY_DIR")
-    if env:
-        p = Path(env)
-        if not must_exist or p.exists():
-            return p
-
-    proj = project_memory_dir(start)
-    if proj and proj.exists():
-        return proj
+    store = startup_memory_dir(start)
+    if store.exists():
+        return store
 
     legacy = legacy_memory_dir(start)
     if legacy and legacy.exists():
         return legacy
 
-    # When must_exist=False, return the *preferred* future location so
-    # callers (e.g. migrate, memory_write into a fresh project) have
-    # something to create.
-    if not must_exist and proj:
-        return proj
+    # must_exist=False: hand back the preferred location to create.
+    if not must_exist:
+        return store
     return None

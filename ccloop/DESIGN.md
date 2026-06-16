@@ -230,6 +230,29 @@ treated as a thousands-vs-tokens typo and falls back to the default;
 the token gate is disabled and the run keeps going until the session
 window fills.**
 
+**Background-work wait gate** (`_pending_background_task_count`): a Bash
+background command can still be running when the model ends its turn. If
+the Stop hook relayed then, the running task would be lost (the fresh
+session has no handle on it). So when a task is live the hook blocks with
+a *minimal* reason (`"Wait. Background command still running."`) — not the
+keepgoing nudge, which would wrongly push the model to "pick a new angle"
+instead of waiting — and does **not** bump the keepgoing counter (wait
+cycles are bounded by external work, not model pathology). This gate runs
+*after* the cutoff gate: at the context wall we relay regardless of
+pending tasks (losing a task is recoverable; blowing past the wall is not).
+
+Liveness, not presence: Claude Code stores each task's output at
+`/tmp/claude-<uid>/<slug>/<sid>/tasks/<task-id>.output` and does **not**
+delete it when the command finishes — the file lingers for the whole
+session. Counting bare presence therefore wedged sessions permanently:
+once any background command had ever run, its orphaned `.output` re-fired
+the gate on every subsequent Stop, so the run could neither relay nor
+exit (it just emitted "N background command(s) still running" until the
+context wall). The gate now counts an `.output` only when a **live process
+holds it open** — read from `/proc/<pid>/fd` (no subprocess, only on Stop),
+with an mtime freshness window (`STALE_OUTPUT_SECONDS`) as the non-procfs
+(e.g. macOS) fallback so a stale file can never fire the gate indefinitely.
+
 ### `guard.py` — PostToolUse hook (`ccloop guard`)
 
 Fires after every tool call. Steps:

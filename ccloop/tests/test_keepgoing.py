@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import time
 
 import pytest
 
@@ -345,10 +346,12 @@ def test_no_cache_at_all_does_not_fire(monkeypatch, tmp_path):
 # The harness wakes the model when the task completes; the next Stop after
 # the file is reaped falls through to the normal keepgoing logic.
 #
-# Detection is by file presence, not a liveness check (no lsof, no
-# subprocess). A "task done but not yet reaped" momentary false positive
-# costs at most one Stop cycle of delayed keepgoing — invisible — and a
-# real liveness check would cost real CPU on every Stop on every machine.
+# Detection requires LIVENESS, not bare file presence. Claude Code does NOT
+# reap an .output file when its background command finishes — it lingers for
+# the whole session — so counting presence wedges ccloop forever once any
+# task has run. Only an .output held open by a live process counts (procfs
+# /proc/<pid>/fd scan, no subprocess); platforms without procfs fall back to
+# an mtime freshness window so a stale file can't fire the gate indefinitely.
 # ---------------------------------------------------------------------------
 
 def test_pending_background_blocks_with_wait_message(monkeypatch, tmp_path):
@@ -436,14 +439,8 @@ def test_cutoff_wins_over_pending_background(monkeypatch, tmp_path):
     assert (tmp_path / "halt-s1").exists()    # halt sentinel was written
 
 
-def test_pending_background_task_count_real_glob(tmp_path, monkeypatch):
-    """End-to-end: simulate a Claude Code tasks dir and confirm the count
-    matches the number of .output files (no liveness check, no subprocess)."""
-    sess = "deadbeef-1234-5678-9abc-def012345678"
-    tasks = tmp_path / f"claude-{os.getuid()}" / "-fake-slug" / sess / "tasks"
-    tasks.mkdir(parents=True)
-
-    # Redirect the /tmp/claude-* glob root under tmp_path.
+def _redirect_tmp_glob(monkeypatch, tmp_path):
+    """Point keepgoing's /tmp/claude-* glob root under tmp_path."""
     import glob as _glob
     real_glob = _glob.glob
     def patched(pattern, *a, **kw):
@@ -453,14 +450,58 @@ def test_pending_background_task_count_real_glob(tmp_path, monkeypatch):
         return real_glob(pattern, *a, **kw)
     monkeypatch.setattr(keepgoing.glob, "glob", patched)
 
-    # No .output -> 0
+
+@pytest.mark.skipif(not os.path.isdir("/proc"),
+                    reason="procfs liveness check requires /proc")
+def test_pending_counts_only_outputs_with_live_writer(tmp_path, monkeypatch):
+    """The regression that wedged a session: a finished task's .output lingers
+    on disk with no process holding it open (the harness never reaps it), so
+    it must NOT count. Only an .output held open by a live process counts."""
+    sess = "deadbeef-1234-5678-9abc-def012345678"
+    tasks = tmp_path / f"claude-{os.getuid()}" / "-fake-slug" / sess / "tasks"
+    tasks.mkdir(parents=True)
+    _redirect_tmp_glob(monkeypatch, tmp_path)
+
+    stale = tasks / "dead.output"
+    stale.write_text("finished long ago\n")
+    live = tasks / "running.output"
+    live.write_text("")
+
+    # A present-but-orphaned .output (no live writer) does not count.
     assert keepgoing._pending_background_task_count(sess) == 0
 
-    # Drop two .output -> 2
-    (tasks / "abc.output").write_text("hello\n")
-    (tasks / "def.output").write_text("world\n")
-    assert keepgoing._pending_background_task_count(sess) == 2
+    # Hold one open the way a still-running background command would.
+    fh = open(live, "a")
+    try:
+        assert keepgoing._pending_background_task_count(sess) == 1
+    finally:
+        fh.close()
 
-    # Unrelated file is ignored
+    # Once the writer is gone, presence alone no longer fires the gate.
+    assert keepgoing._pending_background_task_count(sess) == 0
+
+    # Unrelated files are ignored regardless.
     (tasks / "abc.notoutput").write_text("nope\n")
-    assert keepgoing._pending_background_task_count(sess) == 2
+    assert keepgoing._pending_background_task_count(sess) == 0
+
+
+def test_pending_falls_back_to_mtime_without_procfs(tmp_path, monkeypatch):
+    """On platforms without procfs, liveness is approximated by an mtime
+    window: a freshly-written .output counts, a stale one does not — so a
+    leftover file can never wedge the loop indefinitely."""
+    sess = "deadbeef-1234-5678-9abc-def012345678"
+    tasks = tmp_path / f"claude-{os.getuid()}" / "-fake-slug" / sess / "tasks"
+    tasks.mkdir(parents=True)
+    _redirect_tmp_glob(monkeypatch, tmp_path)
+
+    # Force the no-procfs path.
+    monkeypatch.setattr(keepgoing, "_outputs_with_live_writer", lambda paths: None)
+
+    fresh = tasks / "fresh.output"
+    fresh.write_text("x")
+    stale = tasks / "stale.output"
+    stale.write_text("x")
+    old = time.time() - keepgoing.STALE_OUTPUT_SECONDS - 60
+    os.utime(stale, (old, old))
+
+    assert keepgoing._pending_background_task_count(sess) == 1

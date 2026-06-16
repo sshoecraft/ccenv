@@ -248,20 +248,86 @@ def _emit_wait(n):
     }) + "\n")
 
 
+PROC_ROOT = "/proc"
+
+# Non-procfs (e.g. macOS) fallback: an .output file modified within this
+# many seconds is treated as a still-running task. Bounds the false positive
+# to this window instead of forever; a procfs-equipped host never uses it.
+STALE_OUTPUT_SECONDS = 90
+
+
+def _outputs_with_live_writer(output_paths):
+    """Subset of ``output_paths`` currently held open by a live process.
+
+    A still-running Bash background command keeps its ``.output`` open for
+    writing; the harness does NOT reap the file when the command finishes —
+    it lingers on disk for the rest of the session (and beyond). So file
+    *presence* is not *liveness*. On Linux we read liveness straight from
+    procfs: which of these paths is the target of some ``/proc/<pid>/fd/<n>``
+    symlink. No subprocess, no lsof — just readlink, short-circuited once
+    every path is accounted for, and only on Stop.
+
+    Returns the set of live paths, or ``None`` when procfs is unavailable
+    (the caller then falls back to an mtime window).
+    """
+    targets = set(output_paths)
+    try:
+        pids = os.listdir(PROC_ROOT)
+    except OSError:
+        return None  # no procfs on this platform
+    live = set()
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        fd_dir = os.path.join(PROC_ROOT, pid, "fd")
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue  # process exited mid-scan, or not ours to read
+        for fd in fds:
+            try:
+                target = os.readlink(os.path.join(fd_dir, fd))
+            except OSError:
+                continue
+            if target in targets:
+                live.add(target)
+        if len(live) == len(targets):
+            break
+    return live
+
+
+def _recently_modified(output_paths, now):
+    """Subset of ``output_paths`` modified within ``STALE_OUTPUT_SECONDS``.
+
+    The non-procfs liveness approximation: a genuinely-running task writes
+    (or at least was created) recently, while a leftover .output from a
+    long-finished task is stale and must not keep the gate firing forever.
+    """
+    fresh = set()
+    for p in output_paths:
+        try:
+            mtime = os.stat(p).st_mtime
+        except OSError:
+            continue
+        if now - mtime <= STALE_OUTPUT_SECONDS:
+            fresh.add(p)
+    return fresh
+
+
 def _pending_background_task_count(session_id):
-    """Return how many ``*.output`` files exist in this session's tasks dir.
+    """Return how many of this session's ``*.output`` files belong to a
+    background command that is STILL RUNNING.
 
     Claude Code stores per-session Bash-background output under
-    ``/tmp/claude-<uid>/<slug>/<session-id>/tasks/<task-id>.output``. The
-    harness deletes those files after it consumes the result, so the mere
-    presence of one means there is either a task still running OR a task
-    whose result is queued for the next consumption pass.
-
-    No liveness check (no lsof, no procfs walk): a momentary false positive
-    (a finished task whose .output hasn't been reaped yet) costs at most a
-    few "still waiting" Stop cycles before the harness reaps the file and
-    this gate stops firing. A "real" liveness check would cost real CPU on
-    every Stop on every machine, including weak ones — not worth it.
+    ``/tmp/claude-<uid>/<slug>/<session-id>/tasks/<task-id>.output`` and does
+    NOT delete the file when the command completes — it persists for the life
+    of the session. Counting bare presence therefore wedges ccloop: once any
+    background command has ever run, its orphaned .output makes this gate
+    re-fire on every subsequent Stop forever, so the session can never relay
+    or exit (it just emits "N background command(s) still running" until the
+    context wall). The fix is a liveness check — only an .output held open by
+    a live process counts (procfs), with an mtime window as the non-procfs
+    fallback.
 
     Returns 0 on any error or when the dir can't be located.
     """
@@ -272,14 +338,20 @@ def _pending_background_task_count(session_id):
     if len(matches) != 1:
         return 0
     tasks_dir = matches[0]
-    n = 0
     try:
-        for name in os.listdir(tasks_dir):
-            if name.endswith(".output"):
-                n += 1
+        outputs = [
+            os.path.join(tasks_dir, name)
+            for name in os.listdir(tasks_dir)
+            if name.endswith(".output")
+        ]
     except OSError:
-        pass
-    return n
+        return 0
+    if not outputs:
+        return 0
+    live = _outputs_with_live_writer(outputs)
+    if live is None:
+        live = _recently_modified(outputs, time.time())
+    return len(live)
 
 
 def main(argv=None):

@@ -7,9 +7,19 @@ import pytest
 
 
 @pytest.fixture
-def memory_dir(tmp_path):
-    """Empty memory dir with one or more sample .md files written by the test."""
-    return tmp_path
+def memory_dir(tmp_path, monkeypatch):
+    """The ``.ccmemory/`` store for the directory Claude Code was 'started in'.
+
+    Resolution is CWD-only (no env vars), so we chdir into a startup dir and
+    hand back its ``.ccmemory/``. Code under test (hooks, MCP server, store)
+    resolves to exactly this path with no further setup. Tests write sample
+    .md files into it.
+    """
+    startup_dir = tmp_path
+    monkeypatch.chdir(startup_dir)
+    store = startup_dir / ".ccmemory"
+    store.mkdir()
+    return store
 
 
 def write_memory(memory_dir: Path, name: str, *, type: str = "project",
