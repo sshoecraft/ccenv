@@ -6,20 +6,20 @@ injects a friendly wrap-up suggestion via ``additionalContext`` so the
 next assistant turn sees it. It is a no-op outside a ccloop run
 (``CCLOOP_RUN_ID`` unset).
 
-Token usage is read exclusively from the ccusage statusline cache
-(``$TMPDIR/ccusage-<uid>.json``). That cache carries the exact
-``used_percentage`` and ``context_window_size`` Claude Code itself
-computes, scaled to a token count. It is only trusted when its
-``session_id`` matches this session — a concurrent Claude Code session's
-cache write is ignored, otherwise the guard would fire on the wrong run.
+Token usage is read from the ccusage statusline's PER-SESSION cache
+(``$XDG_STATE_HOME/ccusage/<session-id>.json``, default
+``~/.local/state/ccusage/``; see ``usage.py``). That cache carries the
+exact ``used_percentage`` and ``context_window_size`` Claude Code itself
+computes, scaled to a token count. The per-session file means a concurrent
+Claude Code session can no longer clobber this session's reading (the old
+single per-UID ``/tmp`` file did, which silently disabled the guard).
 
-There is intentionally no transcript-based fallback. The transcript's
-per-turn API token counts (input + cache_creation + cache_read) do not
-match Claude Code's live context indicator on Opus 4.8 / 1 M-context
-sessions with heavy system prompts: the first turn's raw input alone
-routinely exceeds the cutoff. Trusting the cache and skipping the check
-when it's unavailable is safer than firing on inflated transcript
-numbers.
+This guard is only an *advisory* wrap-up nudge for the early ``cutoff``. It
+is NOT the safety mechanism: the hard guarantee that a full context relays
+rather than wedging on the wall lives in ``runner`` /
+``transcript.hit_context_wall``, which react to Claude Code's real
+"Prompt is too long" event. So when the cache is unavailable here, skipping
+the nudge is harmless.
 """
 
 import json

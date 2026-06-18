@@ -2,6 +2,55 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.2.0
+
+ccloop v0.6.0 + ccusage v0.3.0: make "relay when the context fills" an actual
+guarantee, and stop concurrent sessions from clobbering each other's usage
+cache.
+
+**The bug.** ccloop's entire reason for existing is that when a session's
+context fills, it summarizes and restarts in a fresh session. In practice a
+run could sail straight into Claude Code's hard wall ("Context limit reached ·
+/compact or /clear to continue") and wedge there — in interactive mode with no
+human to type `/compact`, forever. Two independent, each-sufficient causes,
+both confirmed in a real wedged run:
+
+1. The relay was driven *only* by a token `cutoff` compared against a usage
+   reading. The cutoff is an absolute token count with no relationship to the
+   model's real context window — set it at/above the window (or to a 1M-window
+   default on a 200K model, or disable it) and `tokens >= cutoff` can never
+   trip before the wall. Nothing clamped it.
+2. The usage reading came from a single shared per-UID cache
+   (`/tmp/ccusage-<uid>.json`). Any concurrent same-UID Claude Code session
+   clobbered it, so a reader saw a foreign `session_id` and silently skipped
+   the gate (fail-open) — no relay at all.
+
+**The fix — react to the real wall event, not a predicted threshold.** When
+the window fills with auto-compact disabled (ccloop always sets
+`DISABLE_AUTO_COMPACT=1`), Claude Code injects a synthetic assistant turn into
+the transcript flagged `isApiErrorMessage` with the text `Prompt is too long`.
+That deterministic event is now what triggers the relay:
+
+- Interactive: the watcher tails the transcript (`transcript.hit_context_wall`)
+  and relays the moment that event appears — it previously watched only the
+  hook's halt sentinel and could not see the wall at all.
+- Headless `-p`: "Prompt is too long" *after* real work now relays (summarize +
+  fresh session) instead of fatally aborting; it still aborts only when the fed
+  handoff prompt itself is too big to start (no real assistant turn).
+- Synthetic error turns are excluded from `assistant_turns` / `last_text` /
+  `context_tokens` so they can't read as work or zero out the token figure.
+
+The `cutoff` remains as a knob to relay *early*; it is no longer the only thing
+standing between a session and the wall.
+
+**Cache redesign (ccusage v0.3.0).** The statusline now writes a *per-session*
+cache, `$XDG_STATE_HOME/ccusage/<session-id>.json` (default
+`~/.local/state/ccusage/`), pruned after 2 days. Concurrent sessions can no
+longer clobber each other; a reader keyed by its own `session_id` always finds
+its own data. The MCP server reads the most-recently-written file. ccloop reads
+its own session's file, with the legacy `/tmp/ccusage-<uid>.json` honored as a
+transition fallback for sessions already in flight across the upgrade.
+
 ## v0.1.7
 
 ccloop v0.5.1: fix the Stop-hook background-work wait gate wedging a session

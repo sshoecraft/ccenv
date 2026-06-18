@@ -6,17 +6,23 @@ rate-limit usage with reset countdown, 7-day rate-limit usage with reset
 countdown. Usage that's over the time-elapsed threshold is colored red.
 """
 
+from __future__ import annotations
+
 import json
 import math
 import os
 import sys
 import time
 
-from paths import cache_path
+from paths import cache_path, state_dir
 
 
 RED = "\033[31m"
 RST = "\033[0m"
+
+# Per-session cache files accumulate (one per session ever run). Prune any
+# not written within this window so the state dir stays bounded.
+RETENTION_SECONDS = 2 * 86400
 
 
 def fmt_num(n: int) -> str:
@@ -27,12 +33,13 @@ def fmt_num(n: int) -> str:
     return str(n)
 
 
-def write_cache(raw: str) -> None:
-    """Atomic per-UID cache write. Best-effort: caching errors are silent so
-    the statusline still renders even if /tmp is unwritable."""
-    cp = cache_path()
+def write_cache(raw: str, session_id: str | None = None) -> None:
+    """Atomic per-session cache write. Best-effort: caching errors are silent
+    so the statusline still renders even if the state dir is unwritable."""
+    cp = cache_path(session_id)
     tmp = cp.with_name(f".{cp.name}.{os.getpid()}")
     try:
+        cp.parent.mkdir(parents=True, exist_ok=True)
         old_umask = os.umask(0o077)
         try:
             tmp.write_text(raw)
@@ -42,6 +49,23 @@ def write_cache(raw: str) -> None:
     except OSError:
         try:
             tmp.unlink()
+        except OSError:
+            pass
+
+
+def prune_stale(now: float | None = None) -> None:
+    """Best-effort removal of per-session cache files older than the
+    retention window, so the state dir doesn't grow one file per session
+    forever."""
+    cutoff = (time.time() if now is None else now) - RETENTION_SECONDS
+    try:
+        files = list(state_dir().glob("*.json"))
+    except OSError:
+        return
+    for p in files:
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
         except OSError:
             pass
 
@@ -97,11 +121,16 @@ def render(data: dict) -> str:
 
 def main() -> int:
     raw = sys.stdin.read()
-    write_cache(raw)
+    # Parse first so the cache can be keyed by this session's id. If the
+    # payload isn't JSON we still cache it (under the per-UID fallback name)
+    # so a reader has something, then bail before rendering.
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
+        write_cache(raw)
         return 0
+    write_cache(raw, data.get("session_id"))
+    prune_stale()
     line = render(data)
     if line:
         sys.stdout.write(line)

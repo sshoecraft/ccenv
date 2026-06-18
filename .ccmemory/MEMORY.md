@@ -9,6 +9,7 @@
 ## project
 - [ccenv-installed-vs-source-version](ccenv-installed-vs-source-version.md) — "Installed ccenv version" lives in ~/.config/ccenv/installed-version, NOT /src/ccenv/VERSION. NFS-shared /src makes the source VERSION useless as an…
 - [ccenvmcp-stdlib-mcp-shim](ccenvmcp-stdlib-mcp-shim.md) — ccenvmcp: stdlib-only Python 3.9+ FastMCP-compatible shim replacing the mcp SDK across ccmemory/ccusage/ccteam so the bundle installs on 3.9.
+- [ccloop-relay-not-cutoff-dependent](ccloop-relay-not-cutoff-dependent.md) — ccloop's context-full relay is event-driven (the wall event), NOT the token cutoff; cutoff is only an early-relay knob and must never be the sole gua…
 - [ccloop-stop-hook-return-0-kills-session](ccloop-stop-hook-return-0-kills-session.md) — ccloop Stop hook MUST block, not return 0, to keep the session alive — ccloop's runner relays on session-end. "No-op" semantics differ from pure Clau…
 - [ccmemory-debian-build-unknown-install-layout](ccmemory-debian-build-unknown-install-layout.md) — RESOLVED + VERIFIED on-box (2026-06-13): install.sh ensure_build_toolchain bootstrap fixed the PEP 621 UNKNOWN/install_layout build crash on Debian 3…
 - [claude-code-does-not-reap-task-output-files](claude-code-does-not-reap-task-output-files.md) — Claude Code does NOT delete a Bash background task's .output file when the command finishes — it persists for the whole session. Presence != liveness.
@@ -17,6 +18,7 @@
 
 ## reference
 - [ccloop-install-heals-own-hooks](ccloop-install-heals-own-hooks.md) — Top-level install.sh runs `ccloop install` after pip-installing ccloop so it self-heals stale PostToolUse/Stop hook paths
+- [context-wall-deterministic-signal](context-wall-deterministic-signal.md) — Claude Code's context-wall signal in the transcript: a synthetic isApiErrorMessage assistant turn with text "Prompt is too long".
 - [mcp-heal-stale-command-pattern](mcp-heal-stale-command-pattern.md) — install.sh's register_mcp() compares stored Command+Args to the desired command and re-registers when stale — never simplify it away
 - [pythonuserbase-in-zshenv](pythonuserbase-in-zshenv.md) — PYTHONUSERBASE must be exported in ~/.zshenv (not ~/.zshrc) or Claude hooks/statusLine/MCP fail with ModuleNotFoundError
 - [src-tree-appledouble-sidecars](src-tree-appledouble-sidecars.md) — /src tree is on an xattr-less FS that spawns macOS ._* AppleDouble sidecars on every write; corrupts pip wheels — build from clean /tmp stage

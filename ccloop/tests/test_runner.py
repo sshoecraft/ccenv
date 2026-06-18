@@ -128,10 +128,43 @@ def test_loop_converges_on_done(project, isolated_home, fake_claude, monkeypatch
 
 
 def test_prompt_too_long_aborts(project, isolated_home, fake_claude, monkeypatch):
+    """Wall on the very first turn with no work done = the handoff prompt is
+    too big. Relaying it again would just fail, so abort."""
     monkeypatch.setenv("FAKE_MODE", "toolong")
     with pytest.raises(runner.CcloopError) as exc:
         runner.cmd_run("", "do the thing", ensure_hook=False)
     assert "Prompt is too long" in str(exc.value)
+
+
+def test_prompt_too_long_after_work_relays(project, isolated_home, fake_claude, monkeypatch):
+    """Wall AFTER real work = the window filled mid-session. The run must
+    relay to a fresh session (the whole point of ccloop), NOT abort."""
+    monkeypatch.setenv("FAKE_MODE", "wall")
+    monkeypatch.setenv("CCLOOP_MAX_ITERATIONS", "2")
+    rc = runner.cmd_run("", "do the thing", ensure_hook=False)  # must not raise
+    assert rc == 1  # capped by max-iterations, i.e. it kept relaying
+    run = next((project / ".ccloop" / "runs").iterdir())
+    assert run.joinpath("sessions.log").read_text().count("\n") == 2
+
+
+def test_interactive_watcher_relays_on_context_wall(fake_claude, tmp_path, monkeypatch):
+    """The watcher must relay when the transcript shows the context-wall
+    marker, even though no halt sentinel was ever written."""
+    import json
+    monkeypatch.setenv("FAKE_MODE", "sleep")
+    monkeypatch.setenv("FAKE_SLEEP", "30")
+    halt = tmp_path / "halt-watch-sess"  # never created
+    wall_t = tmp_path / "transcript.jsonl"
+    wall_t.write_text(json.dumps({
+        "type": "assistant", "isApiErrorMessage": True,
+        "message": {"content": [{"type": "text", "text": "Prompt is too long"}]},
+    }) + "\n", encoding="utf-8")
+
+    exit_code, relayed = runner.run_session_interactive(
+        [str(fake_claude)], dict(os.environ), "watch-sess",
+        halt_file=halt, transcript_file=wall_t, poll=0.2,
+    )
+    assert relayed is True
 
 
 def test_stuck_aborts(project, isolated_home, fake_claude, monkeypatch):

@@ -357,15 +357,22 @@ def run_session(cmd, env, out_path, timeout):
     return proc.returncode, fmt
 
 
-def run_session_interactive(cmd, env, session_id, halt_file, poll=3.0):
+def run_session_interactive(cmd, env, session_id, halt_file, transcript_file=None, poll=3.0):
     """Run the real Claude TUI with inherited terminal; return (exit, relayed).
 
-    A background thread polls for ``halt_file``. The ``keepgoing`` Stop
-    hook writes that sentinel when Claude finishes a turn with context at
-    or above the run's cutoff; the watcher then terminates the TUI so the
-    loop can relay to a fresh session. The decision to relay is made at
-    a natural turn boundary by the hook — the watcher never kills mid-turn
-    based on its own context reading.
+    A background thread relays the session to a fresh one when EITHER of two
+    signals appears:
+
+    - ``halt_file`` — the ``keepgoing`` Stop hook writes this sentinel when a
+      turn ends with context at or above the run's cutoff (an *early* relay
+      knob; the hook decides at a natural turn boundary).
+    - the context wall — Claude Code injects a synthetic ``Prompt is too
+      long`` turn into the transcript when the window fills (auto-compact is
+      disabled), then idles forever waiting for ``/compact``. The wrapper
+      can't see the TUI screen, but it can see that transcript event, so the
+      watcher polls ``transcript_file`` for it. This is the deterministic
+      guarantee that a misconfigured/absent cutoff can never wedge the run
+      against the hard wall.
     """
     import termios
 
@@ -377,9 +384,18 @@ def run_session_interactive(cmd, env, session_id, halt_file, poll=3.0):
 
     def watcher():
         while not stop.wait(poll):
-            if halt_file.exists():
+            wall = (
+                transcript_file is not None
+                and Path(transcript_file).is_file()
+                and tx.hit_context_wall(transcript_file)
+            )
+            if halt_file.exists() or wall:
                 relayed["flag"] = True
-                log("context-stop signalled by hook — relaying to a fresh session")
+                why = (
+                    "context wall hit ('Prompt is too long')"
+                    if wall else "context-stop signalled by hook"
+                )
+                log(f"{why} — relaying to a fresh session")
                 try:
                     proc.terminate()
                 except ProcessLookupError:
@@ -558,6 +574,7 @@ def loop(run_id, run_dir, ensure_hook=True, interactive=False):
             if interactive:
                 exit_code, relayed = run_session_interactive(
                     cmd, env, session_id, halt_file,
+                    transcript_file=transcript_file,
                     poll=cfg["watch_interval"],
                 )
             else:
@@ -565,14 +582,29 @@ def loop(run_id, run_dir, ensure_hook=True, interactive=False):
                     cmd, env, run_dir / f"session-{iteration}.out",
                     cfg["session_timeout"],
                 )
-                # Death-loop guard 1: the fed prompt exceeded the model window.
+                # "Prompt is too long" = the context window is full. Two cases,
+                # distinguished by whether this session did any real work:
+                #   - real assistant turns > 0  → the window filled MID-session
+                #     (the wall). Relay to a fresh session; summarize() hands off
+                #     what was done. This is the whole point of ccloop.
+                #   - zero real turns           → the FED prompt itself was too
+                #     big to even start. Relaying the same oversized handoff would
+                #     just fail again, so abort with guidance instead.
                 if fmt.saw_prompt_too_long:
-                    raise CcloopError(
-                        "session prompt exceeds the model context window "
-                        "('Prompt is too long'). The resume file is too large to "
-                        f"hand off. Inspect/trim {resume_file} or narrow the task, "
-                        "then resume with: ccloop --resume-run " + run_id
+                    did_work = (
+                        transcript_file.is_file()
+                        and tx.assistant_turns(transcript_file) >= 1
                     )
+                    if did_work:
+                        log("context wall hit ('Prompt is too long') — "
+                            "relaying to a fresh session")
+                    else:
+                        raise CcloopError(
+                            "session prompt exceeds the model context window "
+                            "('Prompt is too long'). The resume file is too large to "
+                            f"hand off. Inspect/trim {resume_file} or narrow the task, "
+                            "then resume with: ccloop --resume-run " + run_id
+                        )
             duration = time.time() - start
             log(f"session {iteration} ended exit={exit_code} duration={duration:.0f}s")
 

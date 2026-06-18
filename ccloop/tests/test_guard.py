@@ -8,9 +8,12 @@ from ccloop import guard
 
 @pytest.fixture(autouse=True)
 def isolate_cache(tmp_path, monkeypatch):
-    """Point the ccusage cache lookup at an empty temp dir by default."""
+    """Point the ccusage cache lookups (per-session XDG + legacy /tmp) at
+    empty temp dirs so a reader can't pick up a real home-dir file."""
     monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
     (tmp_path / "tmp").mkdir()
+    (tmp_path / "state" / "ccusage").mkdir(parents=True)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
 
 
 def write_transcript(path, tokens):
@@ -25,8 +28,9 @@ def write_transcript(path, tokens):
 
 def write_cache(session_id, used_percentage, window=1000000):
     import os
-    cache = os.path.join(os.environ["TMPDIR"], f"ccusage-{os.getuid()}.json")
-    with open(cache, "w") as fh:
+    d = os.path.join(os.environ["XDG_STATE_HOME"], "ccusage")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, f"{session_id}.json"), "w") as fh:
         json.dump({"session_id": session_id,
                    "context_window": {"used_percentage": used_percentage,
                                        "context_window_size": window}}, fh)

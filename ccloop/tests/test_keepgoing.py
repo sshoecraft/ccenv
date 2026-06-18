@@ -10,17 +10,23 @@ from ccloop import keepgoing
 
 @pytest.fixture(autouse=True)
 def isolate_cache(tmp_path, monkeypatch):
-    """Empty TMPDIR so usage cache lookups return None unless a test writes one."""
+    """Empty cache locations so usage lookups return None unless a test writes
+    one. Both the per-session XDG dir and the legacy /tmp file are isolated so
+    a reader can't pick up a real file from the developer's home dir."""
     d = tmp_path / "_tmp_for_cache"
     d.mkdir()
     monkeypatch.setenv("TMPDIR", str(d))
+    state = tmp_path / "_state"
+    (state / "ccusage").mkdir(parents=True)
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
 
 
 def write_cache(session_id, used_percentage, window=1000000):
-    """Drop a ccusage statusline cache entry. The keepgoing cutoff gate
-    reads exclusively from this — see keepgoing._signal_halt context."""
-    cache = os.path.join(os.environ["TMPDIR"], f"ccusage-{os.getuid()}.json")
-    with open(cache, "w") as fh:
+    """Drop a per-session ccusage cache entry. The keepgoing cutoff gate
+    reads this for the session's exact token count — see _signal_halt."""
+    d = os.path.join(os.environ["XDG_STATE_HOME"], "ccusage")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, f"{session_id}.json"), "w") as fh:
         json.dump({"session_id": session_id,
                    "context_window": {"used_percentage": used_percentage,
                                        "context_window_size": window}}, fh)

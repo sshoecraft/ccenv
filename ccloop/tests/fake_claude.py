@@ -58,6 +58,18 @@ def main():
     resume = os.environ.get("CCLOOP_RESUME_FILE")
 
     if mode == "toolong":
+        # Wall hit with NO prior work in this session = the fed prompt itself
+        # is too big to start. No transcript written → runner aborts.
+        sys.stdout.write("Prompt is too long\n")
+        sys.stdout.flush()
+        return 1
+
+    if mode == "wall":
+        # Wall hit AFTER real work = the context window filled mid-session.
+        # A real assistant turn IS written, so the runner must RELAY (summarize
+        # + fresh session), not abort.
+        if transcript:
+            write_transcript(transcript, assistant_turns=1)
         sys.stdout.write("Prompt is too long\n")
         sys.stdout.flush()
         return 1

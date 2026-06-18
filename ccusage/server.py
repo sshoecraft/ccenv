@@ -10,9 +10,9 @@ import time
 
 from ccenvmcp import FastMCP
 
-from paths import cache_path
+from paths import latest_cache_path, state_dir
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 mcp = FastMCP("ccusage")
 
@@ -36,11 +36,11 @@ def fmt_duration(seconds):
 
 
 def load_cache():
-    cp = cache_path()
-    if not cp.exists():
+    cp = latest_cache_path()
+    if cp is None or not cp.exists():
         raise FileNotFoundError(
-            f"No cache file at {cp}. The statusline must run at least "
-            "once per session to populate it."
+            f"No ccusage cache yet in {state_dir()}. The statusline must run "
+            "at least once this session to populate it."
         )
     age = time.time() - cp.stat().st_mtime
     data = json.loads(cp.read_text())

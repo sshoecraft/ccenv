@@ -54,7 +54,10 @@ into the top of it instead — same effect:
 import json, os, sys
 from pathlib import Path
 raw = sys.stdin.read()
-cache = Path(os.environ.get("TMPDIR", "/tmp")) / f"ccusage-{os.getuid()}.json"
+sid = (json.loads(raw).get("session_id") if raw.strip() else None) or f"uid-{os.getuid()}"
+base = os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
+cache = Path(base) / "ccusage" / f"{sid}.json"
+cache.parent.mkdir(parents=True, exist_ok=True)
 tmp = cache.with_name(f".{cache.name}.{os.getpid()}")
 old = os.umask(0o077)
 try:
@@ -82,10 +85,10 @@ Claude Code turn ends
 ccusage-statusline  (receives JSON on stdin from Claude Code)
       |
       |--> writes status line to stdout
-      |--> writes JSON to ${TMPDIR:-/tmp}/ccusage-$UID.json (atomic, 0600)
+      |--> writes JSON to $XDG_STATE_HOME/ccusage/<session-id>.json (atomic, 0600)
                                   ^
                                   |
-ccusage-mcp server (stdio)  ------+
+ccusage-mcp server (stdio)  ------+   (reads the most-recently-written file)
       |
       v
 get_context_usage  ->  formatted string returned to Claude
@@ -93,8 +96,10 @@ get_context_usage  ->  formatted string returned to Claude
 
 The MCP server never receives the context JSON directly — Claude Code only
 pipes that to the statusline. So the statusline acts as the data source: it
-writes the JSON atomically to a per-UID cache file (mode 0600), and the
-server reads that cache on each tool call.
+writes the JSON atomically to a **per-session** cache file (mode 0600), keyed
+by Claude Code's `session_id`. The server doesn't know its own session id, so
+it reads the most-recently-written file. ccloop's hooks, which DO know their
+session id, read their own session's file directly.
 
 Cache freshness ≈ "time since the last statusline render", which is roughly
 once per turn. The cache file's mtime is reported as `cache age` in the tool
@@ -112,14 +117,23 @@ output so Claude can judge staleness.
 
 ## Cache file path
 
-`${TMPDIR:-/tmp}/ccusage-$UID.json` — single per-UID file, mode 0600, written
-atomically (tmpfile in same dir + `mv`). Works on Linux and macOS (no tmpfs
-assumption). Originally considered `/dev/shm` for RAM-backing, but that's
-Linux-only and the file is tiny enough that page cache makes the distinction
-irrelevant.
+`$XDG_STATE_HOME/ccusage/<session-id>.json` (default
+`~/.local/state/ccusage/`) — one file **per session**, mode 0600, written
+atomically (tmpfile in same dir + `mv`). Files not written within 2 days are
+pruned on the next statusline render so the dir stays bounded.
+
+Previously this was a single per-UID file in `/tmp`. That was clobbered by any
+concurrent same-UID Claude Code session — whichever rendered its statusline
+last owned the file, so every other session's reader saw a foreign
+`session_id` and silently bailed. The per-session file removes that race.
 
 ## Versions
 
+- **0.3.0** — Cache moved from a single per-UID `/tmp` file to a per-session
+  file under `$XDG_STATE_HOME/ccusage/<session-id>.json` (default
+  `~/.local/state/ccusage/`), pruned after 2 days. Concurrent same-UID
+  sessions no longer clobber each other's usage. The MCP server reads the
+  most-recently-written file; the statusline keys the file by `session_id`.
 - **0.1.1** — `install.py` stages the source into a local tmpdir before
   invoking pip, so the wheel build never runs on NFS/SMB/AFP mounts where
   macOS auto-creates `._*` AppleDouble sidecars (fixes "multiple .dist-info
@@ -137,6 +151,11 @@ irrelevant.
   brand-new session may need to wait one turn.
 - Bound to the statusline data shape Claude Code provides. If Anthropic
   renames `context_window.used_percentage` etc., the formatter needs updating.
+- The MCP server is not told its own `session_id`, so it reports the
+  most-recently-written per-session cache. With a single active session that is
+  that session; with several concurrent sessions under the same UID it is
+  whichever rendered its statusline most recently. (ccloop's hooks are not
+  affected — they read their own session's file by id.)
 
 ## License
 

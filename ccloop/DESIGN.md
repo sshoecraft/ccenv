@@ -179,16 +179,43 @@ and assistant-turn count. Tolerant of malformed/truncated lines.
 
 Stateful translator fed one stdout line at a time. Pairs tool calls with
 results, surfaces assistant text, prints a final cost/turns/duration
-line, and sets `saw_prompt_too_long` when the context wall is hit.
+line, and sets `saw_prompt_too_long` when the context wall is hit (headless
+`-p`).
 
-### `usage.py` — ccusage cache reader
+### Context-wall relay — the actual "context full → restart" guarantee
 
-Shared by the guard hook and the interactive watcher. Reads
-`$TMPDIR/ccusage-<uid>.json` (written by Claude Code's statusline every
-turn) and exposes `exact_pct(session_id)` (the exact
-`context_window.used_percentage`, returned only when the cache's
-`session_id` matches) and `window_size()`. Single source of truth so the
-exact percentage is never re-estimated.
+ccloop's reason for existing is that a full context relays to a fresh
+session rather than wedging. That guarantee is **event-driven**, not a
+predicted token threshold: with auto-compact disabled (ccloop always sets
+`DISABLE_AUTO_COMPACT=1`), Claude Code injects a synthetic assistant turn
+into the transcript flagged `isApiErrorMessage` whose text is exactly
+`Prompt is too long`, then idles on "Context limit reached · /compact or
+/clear". `transcript.hit_context_wall` detects that event (tail-scan, cheap
+to poll), and:
+
+- **Interactive**: the watcher in `run_session_interactive` polls the
+  transcript and relays the moment the event appears (it also still relays
+  on the hook's halt sentinel). The wrapper can't read the TUI screen, but
+  it can read the transcript — so the wall is no longer invisible.
+- **Headless `-p`**: `saw_prompt_too_long` *after* ≥1 real assistant turn
+  relays (summarize + fresh session); with zero real turns it means the fed
+  handoff prompt was too big to even start, so it aborts with guidance.
+
+This works regardless of the token `cutoff` — a cutoff at/above the window,
+or disabled, can no longer ride into the wall. The `cutoff` is now purely an
+*early* relay knob.
+
+### `usage.py` — ccusage cache reader (early cutoff only)
+
+Reads the ccusage statusline's **per-session** cache,
+`$XDG_STATE_HOME/ccusage/<session-id>.json` (default
+`~/.local/state/ccusage/`), and exposes `exact_pct(session_id)` /
+`exact_tokens(session_id)` / `window_size(session_id)`. A legacy
+`/tmp/ccusage-<uid>.json` is read as a transition fallback (trusted only
+when its `session_id` matches). This feeds the *early* `cutoff` relay; the
+hard wall guarantee above does not depend on it. The per-session file
+replaces the old single per-UID file, which any concurrent same-UID session
+clobbered — making readers see a foreign `session_id` and skip the gate.
 
 ### `keepgoing.py` — Stop hook (`ccloop keepgoing`)
 
@@ -224,11 +251,16 @@ a mechanical one.
 stores a token threshold in `<run-dir>/cutoff` (set with `--cutoff=N`
 thousands; default 250k). Both hooks read it via `_read_cutoff`, which
 compares the session's exact cache token count against the threshold and
-relays once it's crossed. Special values: a positive value below 1000 is
-treated as a thousands-vs-tokens typo and falls back to the default;
-**`0` (or any non-positive value) is the explicit "no cutoff" sentinel —
-the token gate is disabled and the run keeps going until the session
-window fills.**
+relays *early* once it's crossed. Special values: a positive value below
+1000 is treated as a thousands-vs-tokens typo and falls back to the
+default; **`0` (or any non-positive value) disables the early gate.**
+
+The cutoff is only an *early* relay knob — it is NOT what keeps a run off
+the context wall. Because it is an absolute token count with no relation to
+the model's real window, a cutoff set at/above the window (or disabled, or
+defaulted to a 1M-window value on a 200K model) can never trip before the
+wall. The deterministic wall-event relay (see "Context-wall relay" above)
+is the actual guarantee; the cutoff just lets a run hand off sooner.
 
 **Background-work wait gate** (`_pending_background_task_count`): a Bash
 background command can still be running when the model ends its turn. If
@@ -260,27 +292,19 @@ Fires after every tool call. Steps:
 1. No-op immediately if `CCLOOP_RUN_ID` is unset.
 2. Read the hook JSON from stdin for `transcript_path` (falls back to
    `CCLOOP_TRANSCRIPT_PATH`).
-3. Get context %:
-   - **Exact**: the ccusage statusline cache
-     (`$TMPDIR/ccusage-<uid>.json`) carries
-     `context_window.used_percentage` — the number Claude Code itself
-     computes — plus the real `context_window_size`. Used only when its
-     `session_id` matches this session, so a concurrent session's cache is
-     never trusted.
-   - **Fallback** (statusline hasn't run for this session, e.g. headless
-     `-p`): estimate from the transcript's summed usage tokens over the
-     window size (from the cache if present, else
-     `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, else 200000).
-4. If % ≥ `CCLOOP_THRESHOLD_SOFT`, emit a collaborative wrap-up via
+3. Get the session's exact token count from the ccusage statusline's
+   per-session cache (`$XDG_STATE_HOME/ccusage/<session-id>.json`), trusted
+   only when its `session_id` matches this session. There is no transcript
+   estimate — when the cache is unavailable the guard simply stays silent.
+4. If usage ≥ the run's `cutoff`, emit a collaborative wrap-up via
    `hookSpecificOutput.additionalContext`; else exit silently.
 
-Using the cache's exact value matters: on a 1M-token model, estimating
-against a hard-coded 200k window would report ~5× the true percentage and
-fire the guard constantly. The `session_id` field is what makes the
-per-UID cache safe to prefer.
-
-The injection is **best-effort, not load-bearing** (see Empirical
-findings). The transcript is recoverable whether or not it is honored.
+The per-session cache file is what makes this safe under concurrency: a
+second same-UID session can no longer clobber the reading. This injection
+is **best-effort and advisory, not load-bearing** — it nudges an early
+wrap-up near the cutoff. The hard "context full → relay" guarantee is the
+wall-event path (see "Context-wall relay"), not this guard; the transcript
+is recoverable whether or not the nudge is honored.
 
 ### `install.py` — settings.json hook registration
 

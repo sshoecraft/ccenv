@@ -91,13 +91,15 @@ class CCUsageServerTests(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="ccusage-test-")
         self.env = os.environ.copy()
-        self.env["TMPDIR"] = self.tmpdir
-        self.cache_file = Path(self.tmpdir) / f"ccusage-{os.getuid()}.json"
+        self.env["XDG_STATE_HOME"] = self.tmpdir
+        self.cache_dir = Path(self.tmpdir) / "ccusage"
+        self.cache_file = self.cache_dir / "sess-A.json"
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _write_cache(self, payload):
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_file.write_text(json.dumps(payload))
 
     def _client(self):
@@ -173,7 +175,7 @@ class CCUsageServerTests(unittest.TestCase):
             resp = c.call_tool("get_context_usage")
             self.assertTrue(resp["result"]["isError"])
             err_text = resp["result"]["content"][0]["text"]
-            self.assertIn("No cache file", err_text)
+            self.assertIn("No ccusage cache", err_text)
         finally:
             c.close()
 

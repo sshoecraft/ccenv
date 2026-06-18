@@ -21,10 +21,13 @@ class StatuslineTests(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="ccusage-stl-test-")
         self.env = os.environ.copy()
-        self.env["TMPDIR"] = self.tmpdir
+        self.env["XDG_STATE_HOME"] = self.tmpdir
         # Run statusline.py without TERM tricks; ANSI codes are still emitted
         # but tests strip them when needed.
-        self.cache_file = Path(self.tmpdir) / f"ccusage-{os.getuid()}.json"
+        self.cache_dir = Path(self.tmpdir) / "ccusage"
+
+    def cache_file_for(self, session_id):
+        return self.cache_dir / f"{session_id}.json"
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -42,15 +45,29 @@ class StatuslineTests(unittest.TestCase):
         return proc.stdout
 
     def test_writes_cache_atomically(self):
-        payload = {"context_window": {"context_window_size": 1_000, "used_percentage": 1}}
+        payload = {"session_id": "sess-A",
+                   "context_window": {"context_window_size": 1_000, "used_percentage": 1}}
         self._run(payload)
-        self.assertTrue(self.cache_file.exists())
-        self.assertEqual(json.loads(self.cache_file.read_text()), payload)
+        cf = self.cache_file_for("sess-A")
+        self.assertTrue(cf.exists())
+        self.assertEqual(json.loads(cf.read_text()), payload)
 
     def test_cache_file_is_mode_0600(self):
-        self._run({"x": 1})
-        mode = self.cache_file.stat().st_mode & 0o777
+        self._run({"session_id": "sess-A", "x": 1})
+        mode = self.cache_file_for("sess-A").stat().st_mode & 0o777
         self.assertEqual(mode, 0o600)
+
+    def test_per_session_files_do_not_clobber(self):
+        """Two concurrent sessions get distinct cache files — the clobber
+        that made readers see a foreign session_id is gone."""
+        a = {"session_id": "sess-A",
+             "context_window": {"context_window_size": 1_000, "used_percentage": 10}}
+        b = {"session_id": "sess-B",
+             "context_window": {"context_window_size": 1_000, "used_percentage": 90}}
+        self._run(a)
+        self._run(b)
+        self.assertEqual(json.loads(self.cache_file_for("sess-A").read_text()), a)
+        self.assertEqual(json.loads(self.cache_file_for("sess-B").read_text()), b)
 
     def test_renders_context_only(self):
         payload = {

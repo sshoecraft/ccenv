@@ -41,9 +41,59 @@ def iter_events(path):
 
 
 def _assistant_content(event):
-    if event.get("type") != "assistant":
+    # Synthetic API-error turns (e.g. the "Prompt is too long" context-wall
+    # marker Claude Code injects when the window fills) are not real assistant
+    # output — skip them so summaries, edit lists and turn counts never treat
+    # them as work.
+    if event.get("type") != "assistant" or event.get("isApiErrorMessage"):
         return []
     return event.get("message", {}).get("content") or []
+
+
+CONTEXT_WALL_TEXT = "Prompt is too long"
+
+
+def hit_context_wall(path, tail_bytes=131072):
+    """True if the session hit Claude Code's hard context wall.
+
+    When the window fills with auto-compact disabled (ccloop always sets
+    ``DISABLE_AUTO_COMPACT=1``), Claude Code injects a synthetic assistant
+    turn flagged ``isApiErrorMessage`` whose only text is exactly
+    ``Prompt is too long``, then idles on "Context limit reached · /compact
+    or /clear". That event — not any token estimate — is the deterministic
+    signal that the session can make no further progress and must be relayed.
+
+    Only the tail is scanned (the marker is always among the last events) so
+    the interactive watcher can poll this cheaply on a large transcript.
+    """
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - tail_bytes))
+            chunk = fh.read()
+    except OSError:
+        return False
+    text = chunk.decode("utf-8", "replace")
+    if size > tail_bytes:
+        # Drop the partial first line left by seeking into the middle.
+        nl = text.find("\n")
+        text = text[nl + 1:] if nl != -1 else ""
+    for line in text.splitlines():
+        line = line.strip()
+        # Cheap pre-filter so we only JSON-parse candidate lines.
+        if not line or '"isApiErrorMessage"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "assistant" or not event.get("isApiErrorMessage"):
+            continue
+        for block in (event.get("message", {}) or {}).get("content") or []:
+            if block.get("type") == "text" and CONTEXT_WALL_TEXT in (block.get("text") or ""):
+                return True
+    return False
 
 
 def context_tokens(path):
@@ -51,11 +101,13 @@ def context_tokens(path):
 
     Sum of input + cache-creation + cache-read tokens, which is how Claude
     Code accounts for the live context window. Returns ``None`` if no usage
-    data is present.
+    data is present. Synthetic API-error turns (the context-wall marker
+    carries an all-zero usage block) are skipped so they can't zero out the
+    real figure.
     """
     total = None
     for event in iter_events(path):
-        if event.get("type") != "assistant":
+        if event.get("type") != "assistant" or event.get("isApiErrorMessage"):
             continue
         usage = event.get("message", {}).get("usage")
         if not usage:
@@ -119,5 +171,13 @@ def tool_counts(path):
 
 
 def assistant_turns(path):
-    """Number of assistant events in the transcript (a rough progress signal)."""
-    return sum(1 for e in iter_events(path) if e.get("type") == "assistant")
+    """Number of real assistant turns (a rough progress signal).
+
+    Synthetic API-error turns (the context-wall marker) are excluded so a
+    session that produced nothing but a "Prompt is too long" error does not
+    read as having done work.
+    """
+    return sum(
+        1 for e in iter_events(path)
+        if e.get("type") == "assistant" and not e.get("isApiErrorMessage")
+    )

@@ -82,3 +82,50 @@ def test_cwd_slug_replaces_specials():
     assert tx.cwd_slug("/a/b_c.d") == tx.cwd_slug("/a/b_c.d")
     slug = tx.cwd_slug("/Users/x/some_dir")
     assert "/" not in slug and "_" not in slug
+
+
+# ── context-wall detection (the deterministic relay signal) ──────────────
+
+WALL_EVENT = {
+    "type": "assistant",
+    "isApiErrorMessage": True,
+    "message": {"role": "assistant", "model": "<synthetic>",
+                "content": [{"type": "text", "text": "Prompt is too long"}],
+                "usage": {"input_tokens": 0, "cache_creation_input_tokens": 0,
+                          "cache_read_input_tokens": 0, "output_tokens": 0}},
+}
+
+
+def test_hit_context_wall_detects_marker(tmp_path):
+    t = tmp_path / "t.jsonl"
+    write_transcript(t, sample_events() + [WALL_EVENT])
+    assert tx.hit_context_wall(t) is True
+
+
+def test_hit_context_wall_false_without_marker(tmp_path):
+    t = tmp_path / "t.jsonl"
+    write_transcript(t, sample_events())
+    assert tx.hit_context_wall(t) is False
+
+
+def test_hit_context_wall_ignores_normal_error_text(tmp_path):
+    """A real assistant turn that merely mentions the phrase must not trip
+    the detector — only the synthetic isApiErrorMessage turn counts."""
+    t = tmp_path / "t.jsonl"
+    write_transcript(t, [{"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "the user said Prompt is too long once"}]}}])
+    assert tx.hit_context_wall(t) is False
+
+
+def test_hit_context_wall_missing_file_safe(tmp_path):
+    assert tx.hit_context_wall(tmp_path / "nope.jsonl") is False
+
+
+def test_synthetic_error_turn_excluded_from_work_signals(tmp_path):
+    """The synthetic wall turn must not count as a real assistant turn, must
+    not appear in summarized text, and must not zero out context_tokens."""
+    t = tmp_path / "t.jsonl"
+    write_transcript(t, sample_events() + [WALL_EVENT])
+    assert tx.assistant_turns(t) == 2            # not 3
+    assert tx.context_tokens(t) == 300           # last REAL turn, not the 0-usage error
+    assert "Prompt is too long" not in tx.last_text(t)
