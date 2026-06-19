@@ -2,6 +2,17 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.2.1
+
+ccusage statusline: render the context-window size in whichever unit reads
+cleanly. Local-model windows are powers-of-two multiples (262144 = 256*1024)
+and were showing as the decimal "262.1k"; they now render in binary units as
+"256k" (trailing ".0" stripped). Windows that aren't 1024-aligned — the
+Anthropic 200000 / 1000000 windows — stay decimal so they read "200.0k" /
+"1.0M" rather than an ugly binary "195.3k". The `used` token counter is
+unchanged (still decimal). New `fmt_window()` in `ccusage/statusline.py`,
+covered by `WindowFormatTests`.
+
 ## v0.2.0
 
 ccloop v0.6.0 + ccusage v0.3.0: make "relay when the context fills" an actual

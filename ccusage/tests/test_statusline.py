@@ -15,6 +15,21 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATUSLINE = REPO_ROOT / "statusline.py"
+sys.path.insert(0, str(REPO_ROOT))
+import statusline  # noqa: E402
+
+
+class WindowFormatTests(unittest.TestCase):
+    def test_binary_aligned_windows_render_binary(self):
+        # 1024-aligned (local-model) windows -> clean binary units, no '.0'.
+        self.assertEqual(statusline.fmt_window(262_144), "256k")
+        self.assertEqual(statusline.fmt_window(131_072), "128k")
+        self.assertEqual(statusline.fmt_window(1_048_576), "1.0M")
+
+    def test_non_aligned_windows_render_decimal(self):
+        # Anthropic windows aren't 1024-aligned -> stay decimal, not '195.3k'.
+        self.assertEqual(statusline.fmt_window(200_000), "200.0k")
+        self.assertEqual(statusline.fmt_window(1_000_000), "1.0M")
 
 
 class StatuslineTests(unittest.TestCase):
@@ -71,15 +86,16 @@ class StatuslineTests(unittest.TestCase):
 
     def test_renders_context_only(self):
         payload = {
-            "context_window": {"context_window_size": 1_000_000, "used_percentage": 12.5},
+            "context_window": {"context_window_size": 262_144, "used_percentage": 12.5},
         }
         out = self._run(payload)
-        self.assertEqual(out, "125.0k/1.0M tokens (12%)")
+        # Window size is rendered in binary units: 262144 -> 256k (not 262.1k).
+        self.assertEqual(out, "32.8k/256k tokens (12%)")
 
     def test_renders_with_rate_limits(self):
         now = int(time.time())
         payload = {
-            "context_window": {"context_window_size": 1_000_000, "used_percentage": 12.5},
+            "context_window": {"context_window_size": 262_144, "used_percentage": 12.5},
             "rate_limits": {
                 "five_hour": {"used_percentage": 20, "resets_at": now + 3600},
                 "seven_day": {"used_percentage": 15, "resets_at": now + 86400},
@@ -88,7 +104,7 @@ class StatuslineTests(unittest.TestCase):
         out = self._run(payload)
         # Strip ANSI escapes for stable comparison; threshold colors depend on elapsed time.
         clean = out.replace("\033[31m", "").replace("\033[0m", "")
-        self.assertEqual(clean, "125.0k/1.0M tokens (12%) | 20%/80% (60m) | 15%/86% (24h)")
+        self.assertEqual(clean, "32.8k/256k tokens (12%) | 20%/80% (60m) | 15%/86% (24h)")
 
     def test_threshold_color_when_over(self):
         now = int(time.time())

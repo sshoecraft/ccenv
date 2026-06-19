@@ -33,6 +33,24 @@ def fmt_num(n: int) -> str:
     return str(n)
 
 
+def fmt_window(n: int) -> str:
+    """Render a context-window size in whichever unit reads cleanly.
+
+    Local-model windows are powers-of-two multiples (262144 = 256*1024), so
+    those are shown in binary units -> '256k' (not the decimal '262.1k'), with
+    a trailing '.0' stripped. Windows that aren't 1024-aligned (the Anthropic
+    200000 / 1000000 windows) stay decimal so they read '200.0k' / '1.0M'
+    instead of an ugly binary '195.3k'."""
+    if n % 1024 == 0:
+        if n >= 1024 * 1024:
+            return f"{n / (1024 * 1024):.1f}M"
+        s = f"{n / 1024:.1f}"
+        if s.endswith(".0"):
+            s = s[:-2]
+        return f"{s}k"
+    return fmt_num(n)
+
+
 def write_cache(raw: str, session_id: str | None = None) -> None:
     """Atomic per-session cache write. Best-effort: caching errors are silent
     so the statusline still renders even if the state dir is unwritable."""
@@ -106,7 +124,7 @@ def render(data: dict) -> str:
         return ""
 
     used = int(pct * total / 100)
-    out = f"{fmt_num(used)}/{fmt_num(total)} tokens ({round(pct)}%)"
+    out = f"{fmt_num(used)}/{fmt_window(total)} tokens ({round(pct)}%)"
 
     rl = data.get("rate_limits") or {}
     five = render_rate_limit(rl.get("five_hour") or {}, 18_000, "m")
