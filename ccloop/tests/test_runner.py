@@ -175,6 +175,40 @@ def test_stuck_aborts(project, isolated_home, fake_claude, monkeypatch):
     assert "no progress" in str(exc.value)
 
 
+def test_launch_failure_retries_then_aborts(project, isolated_home, fake_claude, monkeypatch):
+    """A child that dies at startup with no transcript (model endpoint down)
+    is a transient LAUNCH failure, NOT no-progress: ccloop retries with backoff
+    and aborts only once CCLOOP_LAUNCH_RETRY_LIMIT is hit — never via the
+    no-progress path, never inflating the session count."""
+    monkeypatch.setenv("FAKE_MODE", "launchfail")  # always fail
+    monkeypatch.setenv("CCLOOP_LAUNCH_RETRY_LIMIT", "3")
+    monkeypatch.setenv("CCLOOP_STUCK_LIMIT", "1")  # would trip first if misrouted
+    with pytest.raises(runner.CcloopError) as exc:
+        runner.cmd_run("", "do the thing", ensure_hook=False)
+    msg = str(exc.value)
+    assert "failed to launch" in msg
+    assert "no progress" not in msg
+    run = next((project / ".ccloop" / "runs").iterdir())
+    # No session ever ran → nothing logged, iteration never advanced.
+    assert run.joinpath("sessions.log").read_text().count("\n") == 0
+
+
+def test_launch_failure_recovers_and_continues(project, isolated_home, fake_claude, monkeypatch):
+    """Once the endpoint recovers, the retried session runs and converges. The
+    absorbed launch failures stay within one session number, so the count
+    reflects only real sessions."""
+    monkeypatch.setenv("FAKE_MODE", "launchfail")
+    monkeypatch.setenv("FAKE_LAUNCHFAIL_TIMES", "2")  # fail twice, then recover
+    monkeypatch.setenv("FAKE_LAUNCHFAIL_COUNTER", str(project / "lfcounter"))
+    monkeypatch.setenv("FAKE_COUNTER", str(project / "counter"))
+    monkeypatch.setenv("FAKE_DONE_AFTER", "1")
+    rc = runner.cmd_run("", "do the thing", ensure_hook=False)
+    assert rc == 0
+    run = next((project / ".ccloop" / "runs").iterdir())
+    # Two failed launches + one real session, but only the real one counts.
+    assert run.joinpath("sessions.log").read_text().count("\n") == 1
+
+
 def test_max_iterations_cap(project, isolated_home, fake_claude, monkeypatch):
     # work mode that never converges; cap stops it.
     monkeypatch.setenv("FAKE_COUNTER", str(project / "counter"))

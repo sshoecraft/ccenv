@@ -48,6 +48,10 @@ Environment variables:
   CCLOOP_SESSION_TIMEOUT   SIGTERM a session after N seconds (default: 0 = none)
   CCLOOP_WATCH_INTERVAL    interactive halt-sentinel poll seconds (default: 3)
   CCLOOP_STUCK_LIMIT       consecutive no-progress sessions before abort (default: 3)
+  CCLOOP_LAUNCH_RETRY_LIMIT  cap retries when a session never starts, no transcript
+                             (default: 0 = retry forever until the endpoint returns)
+  CCLOOP_LAUNCH_BACKOFF      first launch-retry wait, seconds; doubles each try (default: 5)
+  CCLOOP_LAUNCH_BACKOFF_MAX  ceiling on the launch-retry wait, seconds (default: 120)
   CCLOOP_MAX_CONTINUES     cap keepgoing re-feeds per session (default: 0 = unlimited)
   CCLOOP_STOP_HOOK_BLOCK_CAP  override Claude Code's Stop hook cap (default: -1 = unlimited)
   CCLOOP_PERMISSION_MODE   default: bypassPermissions

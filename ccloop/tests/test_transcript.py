@@ -129,3 +129,56 @@ def test_synthetic_error_turn_excluded_from_work_signals(tmp_path):
     assert tx.assistant_turns(t) == 2            # not 3
     assert tx.context_tokens(t) == 300           # last REAL turn, not the 0-usage error
     assert "Prompt is too long" not in tx.last_text(t)
+
+
+# ── non-wall API-error wedge detection (the third relay signal) ───────────
+
+TIMEOUT_ERROR_EVENT = {
+    "type": "assistant",
+    "isApiErrorMessage": True,
+    "message": {"role": "assistant", "model": "<synthetic>",
+                "content": [{"type": "text", "text": "API Error: The operation timed out."}]},
+}
+
+
+def test_last_api_error_detects_timeout_tail(tmp_path):
+    t = tmp_path / "t.jsonl"
+    write_transcript(t, sample_events() + [TIMEOUT_ERROR_EVENT])
+    assert tx.last_api_error(t) == "API Error: The operation timed out."
+
+
+def test_last_api_error_none_for_context_wall(tmp_path):
+    """The wall is owned by hit_context_wall — last_api_error must not also
+    fire on it, or both signals would race."""
+    t = tmp_path / "t.jsonl"
+    write_transcript(t, sample_events() + [WALL_EVENT])
+    assert tx.last_api_error(t) is None
+
+
+def test_last_api_error_none_when_recovered(tmp_path):
+    """An error Claude Code retried past (a newer real turn exists) must yield
+    None so the watcher never relays a session that recovered on its own."""
+    t = tmp_path / "t.jsonl"
+    write_transcript(t, sample_events() + [TIMEOUT_ERROR_EVENT,
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "z", "content": "ok"}]}}])
+    assert tx.last_api_error(t) is None
+
+
+def test_last_api_error_none_without_error(tmp_path):
+    t = tmp_path / "t.jsonl"
+    write_transcript(t, sample_events())
+    assert tx.last_api_error(t) is None
+
+
+def test_last_api_error_ignores_aux_records_after_error(tmp_path):
+    """mode/permission-mode/last-prompt records are not real turns; an error
+    still at the tail behind them must still be detected."""
+    t = tmp_path / "t.jsonl"
+    write_transcript(t, sample_events() + [TIMEOUT_ERROR_EVENT,
+        {"type": "permission-mode"}, {"type": "last-prompt"}])
+    assert tx.last_api_error(t) == "API Error: The operation timed out."
+
+
+def test_last_api_error_missing_file_safe(tmp_path):
+    assert tx.last_api_error(tmp_path / "nope.jsonl") is None

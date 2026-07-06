@@ -51,6 +51,14 @@ def _config():
         "extra_args": os.environ.get("CCLOOP_CLAUDE_EXTRA_ARGS", ""),
         "stuck_limit": _env_int("CCLOOP_STUCK_LIMIT", 3),
         "watch_interval": _env_int("CCLOOP_WATCH_INTERVAL", 3),
+        "api_error_grace": _env_int("CCLOOP_API_ERROR_GRACE", 60),
+        # Transient LAUNCH-failure backoff: the child died at startup without
+        # ever producing a transcript (model endpoint/gateway not ready). Retry
+        # forever by default (limit 0 = unlimited), waiting launch_backoff
+        # seconds, doubling each attempt, capped at launch_backoff_max.
+        "launch_retry_limit": _env_int("CCLOOP_LAUNCH_RETRY_LIMIT", 0),
+        "launch_backoff": _env_int("CCLOOP_LAUNCH_BACKOFF", 5),
+        "launch_backoff_max": _env_int("CCLOOP_LAUNCH_BACKOFF_MAX", 120),
     }
 
 
@@ -357,10 +365,11 @@ def run_session(cmd, env, out_path, timeout):
     return proc.returncode, fmt
 
 
-def run_session_interactive(cmd, env, session_id, halt_file, transcript_file=None, poll=3.0):
+def run_session_interactive(cmd, env, session_id, halt_file, transcript_file=None,
+                            poll=3.0, api_error_grace=60):
     """Run the real Claude TUI with inherited terminal; return (exit, relayed).
 
-    A background thread relays the session to a fresh one when EITHER of two
+    A background thread relays the session to a fresh one when ANY of three
     signals appears:
 
     - ``halt_file`` — the ``keepgoing`` Stop hook writes this sentinel when a
@@ -373,28 +382,53 @@ def run_session_interactive(cmd, env, session_id, halt_file, transcript_file=Non
       watcher polls ``transcript_file`` for it. This is the deterministic
       guarantee that a misconfigured/absent cutoff can never wedge the run
       against the hard wall.
+    - an API-error wedge — a turn that aborts on a transport/API error commits
+      a non-wall ``isApiErrorMessage`` turn and then idles at the prompt
+      (no relay, no Stop event). The watcher detects it via
+      ``tx.last_api_error`` and relays once the same error has sat at the tail
+      for ``api_error_grace`` seconds (0 disables), letting Claude Code's own
+      retry go first. Recovery is the proven relay path: ``_build_prompt``
+      reads ``resume.md`` with no model call, so a fresh session restarts from
+      last-good state + broker/journal reconcile even mid-outage.
     """
     import termios
 
     relayed = {"flag": False}
     stop = threading.Event()
+    # Tracks an unchanged, non-wall API-error turn sitting at the transcript
+    # tail and how long it has been there. We relay only once it has persisted
+    # ``api_error_grace`` seconds, so a blip Claude Code retries past resets
+    # this and never triggers a relay.
+    api_err = {"text": None, "since": None}
 
     proc = subprocess.Popen(cmd, env=env)  # inherits this process's std fds
     pid = proc.pid
 
     def watcher():
         while not stop.wait(poll):
-            wall = (
-                transcript_file is not None
-                and Path(transcript_file).is_file()
-                and tx.hit_context_wall(transcript_file)
-            )
-            if halt_file.exists() or wall:
+            have_tx = transcript_file is not None and Path(transcript_file).is_file()
+            wall = have_tx and tx.hit_context_wall(transcript_file)
+
+            wedged = False
+            if api_error_grace > 0 and have_tx and not wall:
+                err = tx.last_api_error(transcript_file)
+                if err is None:
+                    api_err["text"] = None
+                    api_err["since"] = None
+                else:
+                    if err != api_err["text"]:
+                        api_err["text"] = err
+                        api_err["since"] = time.time()
+                    wedged = (time.time() - api_err["since"]) >= api_error_grace
+
+            if halt_file.exists() or wall or wedged:
                 relayed["flag"] = True
-                why = (
-                    "context wall hit ('Prompt is too long')"
-                    if wall else "context-stop signalled by hook"
-                )
+                if wall:
+                    why = "context wall hit ('Prompt is too long')"
+                elif wedged:
+                    why = f"API-error wedge ({(api_err['text'] or '')[:60]!r})"
+                else:
+                    why = "context-stop signalled by hook"
                 log(f"{why} — relaying to a fresh session")
                 try:
                     proc.terminate()
@@ -551,80 +585,126 @@ def loop(run_id, run_dir, ensure_hook=True, interactive=False):
                 log(f"converged: {reason} (after {iteration - 1} sessions)")
                 return 0
 
-            session_id = _gen_uuid()
-            transcript_file = tx.transcript_path(session_id)
-
-            log(f"── session {iteration} ── id={session_id}")
-            with open(sessions_log, "a", encoding="utf-8") as fh:
-                fh.write(session_id + "\n")
-
+            # The handoff prompt is built once per session number; it does not
+            # change across launch-failure retries (resume.md is untouched).
             prompt_text = _build_prompt(resume_file, iteration)
             prompt_file = run_dir / f"session-{iteration}.prompt"
             prompt_file.write_text(prompt_text, encoding="utf-8")
-            cmd = _build_command(
-                cfg, session_id,
-                prompt_file=prompt_file,
-                interactive=interactive,
-            )
-            env = _session_env(cfg, run_id, session_id, resume_file, transcript_file)
-            halt_file = run_dir / f"halt-{session_id}"
 
-            start = time.time()
-            relayed = False
-            if interactive:
-                exit_code, relayed = run_session_interactive(
-                    cmd, env, session_id, halt_file,
-                    transcript_file=transcript_file,
-                    poll=cfg["watch_interval"],
+            # Spawn session `iteration`, retrying transient LAUNCH failures with
+            # increasing backoff. A launch failure = the child exits nonzero
+            # WITHOUT ever producing a transcript: it never reached the model
+            # (endpoint/gateway down, connection refused, an auth blip at
+            # connect). That is transient infrastructure, not the agent failing
+            # to make progress — so ccloop waits and retries autonomously
+            # instead of burning a no-progress strike or (interactive) stopping
+            # to ask a human. Retries stay WITHIN this session number: only a
+            # session that actually ran advances the count and is summarized.
+            launch_fails = 0
+            while True:
+                session_id = _gen_uuid()
+                transcript_file = tx.transcript_path(session_id)
+                cmd = _build_command(
+                    cfg, session_id,
+                    prompt_file=prompt_file,
+                    interactive=interactive,
                 )
-            else:
-                exit_code, fmt = run_session(
-                    cmd, env, run_dir / f"session-{iteration}.out",
-                    cfg["session_timeout"],
-                )
-                # "Prompt is too long" = the context window is full. Two cases,
-                # distinguished by whether this session did any real work:
-                #   - real assistant turns > 0  → the window filled MID-session
-                #     (the wall). Relay to a fresh session; summarize() hands off
-                #     what was done. This is the whole point of ccloop.
-                #   - zero real turns           → the FED prompt itself was too
-                #     big to even start. Relaying the same oversized handoff would
-                #     just fail again, so abort with guidance instead.
-                if fmt.saw_prompt_too_long:
-                    did_work = (
-                        transcript_file.is_file()
-                        and tx.assistant_turns(transcript_file) >= 1
+                env = _session_env(cfg, run_id, session_id, resume_file, transcript_file)
+                halt_file = run_dir / f"halt-{session_id}"
+
+                log(f"── session {iteration} ── id={session_id}")
+                start = time.time()
+                relayed = False
+                if interactive:
+                    exit_code, relayed = run_session_interactive(
+                        cmd, env, session_id, halt_file,
+                        transcript_file=transcript_file,
+                        poll=cfg["watch_interval"],
+                        api_error_grace=cfg["api_error_grace"],
                     )
-                    if did_work:
-                        log("context wall hit ('Prompt is too long') — "
-                            "relaying to a fresh session")
-                    else:
-                        raise CcloopError(
-                            "session prompt exceeds the model context window "
-                            "('Prompt is too long'). The resume file is too large to "
-                            f"hand off. Inspect/trim {resume_file} or narrow the task, "
-                            "then resume with: ccloop --resume-run " + run_id
+                else:
+                    exit_code, fmt = run_session(
+                        cmd, env, run_dir / f"session-{iteration}.out",
+                        cfg["session_timeout"],
+                    )
+                    # "Prompt is too long" = the context window is full. Two
+                    # cases, distinguished by whether this session did any real
+                    # work:
+                    #   - real assistant turns > 0  → the window filled
+                    #     MID-session (the wall). Relay to a fresh session;
+                    #     summarize() hands off what was done — the whole point
+                    #     of ccloop.
+                    #   - zero real turns           → the FED prompt itself was
+                    #     too big to even start. Relaying the same oversized
+                    #     handoff would just fail again, so abort with guidance.
+                    if fmt.saw_prompt_too_long:
+                        did_work = (
+                            transcript_file.is_file()
+                            and tx.assistant_turns(transcript_file) >= 1
                         )
-            duration = time.time() - start
-            log(f"session {iteration} ended exit={exit_code} duration={duration:.0f}s")
+                        if did_work:
+                            log("context wall hit ('Prompt is too long') — "
+                                "relaying to a fresh session")
+                        else:
+                            raise CcloopError(
+                                "session prompt exceeds the model context window "
+                                "('Prompt is too long'). The resume file is too large to "
+                                f"hand off. Inspect/trim {resume_file} or narrow the task, "
+                                "then resume with: ccloop --resume-run " + run_id
+                            )
+                duration = time.time() - start
+                log(f"session {iteration} ended exit={exit_code} duration={duration:.0f}s")
 
-            try:
-                halt_file.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
+                try:
+                    halt_file.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
 
-            have_transcript = transcript_file.is_file()
+                have_transcript = transcript_file.is_file()
+
+                # Launch failure: nonzero exit, no transcript, and NOT an
+                # intentional watcher relay (a relay always leaves a transcript).
+                # The session never started — back off and retry rather than
+                # mislabel it no-progress or stop to ask a human.
+                if exit_code != 0 and not have_transcript and not relayed:
+                    launch_fails += 1
+                    limit = cfg["launch_retry_limit"]
+                    if limit and launch_fails >= limit:
+                        raise CcloopError(
+                            f"session {iteration} failed to launch {launch_fails} "
+                            f"times without ever starting (exit={exit_code}, no "
+                            f"transcript). The claude binary ({cfg['claude_bin']}) "
+                            "or its model endpoint looks unreachable — check "
+                            f"{run_dir}/session-{iteration}.out, then resume with: "
+                            f"ccloop --resume-run {run_id}"
+                        )
+                    delay = min(
+                        cfg["launch_backoff"] * (2 ** (launch_fails - 1)),
+                        cfg["launch_backoff_max"],
+                    )
+                    log(
+                        f"session {iteration} never started (exit={exit_code}, no "
+                        "transcript) — the claude binary or its model endpoint "
+                        f"isn't ready. Retry {launch_fails} in {delay}s "
+                        "(Ctrl-C to stop)"
+                    )
+                    time.sleep(delay)
+                    continue
+
+                break
+
+            # One sessions.log line per session that ACTUALLY ran — the line
+            # count drives resume numbering, so absorbed launch-failure retries
+            # must never inflate it.
+            with open(sessions_log, "a", encoding="utf-8") as fh:
+                fh.write(session_id + "\n")
+
             if have_transcript:
                 _link_transcript(transcript_file, transcripts_dir, iteration)
             else:
                 log(f"WARNING: no transcript at {transcript_file}")
-                if iteration == 1 and duration < 10 and exit_code != 0:
-                    raise CcloopError(
-                        "session 1 failed before producing a transcript — "
-                        f"aborting. Check {run_dir}/session-1.out"
-                    )
 
             # Did Claude write a convergence signal during the session?
             reason = converged_reason(resume_file)

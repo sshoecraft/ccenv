@@ -4,10 +4,13 @@
 It honors the env vars ccloop sets (CCLOOP_TRANSCRIPT_PATH,
 CCLOOP_RESUME_FILE) and is steered by extra test-only env vars:
 
-  FAKE_MODE        work (default) | toolong | noprogress
+  FAKE_MODE        work (default) | toolong | wall | sleep | noprogress | launchfail
   FAKE_COUNTER     path to an invocation-counter file
   FAKE_DONE_AFTER  in 'work' mode, write DONE to the resume file once the
                    invocation count reaches this value (converges the loop)
+  FAKE_LAUNCHFAIL_TIMES    in 'launchfail' mode, fail this many launches then
+                           recover into 'work' (0 = always fail)
+  FAKE_LAUNCHFAIL_COUNTER  counter file backing FAKE_LAUNCHFAIL_TIMES
 """
 
 import json
@@ -90,6 +93,30 @@ def main():
         emit({"type": "result", "total_cost_usd": 0.0,
               "num_turns": 0, "duration_ms": 5, "subtype": "success"})
         return 0
+
+    if mode == "launchfail":
+        # Simulate the model endpoint/gateway being unreachable at startup:
+        # exit nonzero WITHOUT writing a transcript, exactly like the child
+        # dying before it can open a session. Optionally recover after
+        # FAKE_LAUNCHFAIL_TIMES failures (counted in FAKE_LAUNCHFAIL_COUNTER)
+        # so a test can exercise retry-then-succeed.
+        times = int(os.environ.get("FAKE_LAUNCHFAIL_TIMES", "0"))  # 0 = always fail
+        lf_counter = os.environ.get("FAKE_LAUNCHFAIL_COUNTER")
+        n = 1
+        if lf_counter:
+            try:
+                n = int(Path(lf_counter).read_text()) + 1
+            except (OSError, ValueError):
+                n = 1
+            Path(lf_counter).write_text(str(n))
+        if times <= 0 or n <= times:
+            sys.stderr.write(
+                "fake-claude: failed to reach model endpoint (connection refused)\n"
+            )
+            sys.stderr.flush()
+            return 1
+        # Recovered — fall through to normal 'work' behavior below.
+        mode = "work"
 
     # mode == "work"
     count = 1

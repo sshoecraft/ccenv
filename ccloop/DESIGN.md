@@ -201,9 +201,53 @@ to poll), and:
   relays (summarize + fresh session); with zero real turns it means the fed
   handoff prompt was too big to even start, so it aborts with guidance.
 
+### API-error wedge relay (the third interactive signal)
+
+The context wall is one way Claude Code commits an `isApiErrorMessage` turn
+and then idles. A transient **transport/API error** (e.g. `API Error: The
+operation timed out.`, an overload, a 5xx — common when `claude` points at a
+flaky or local model endpoint) is another: the turn aborts, Claude Code
+commits a *non-wall* `isApiErrorMessage` turn, and the TUI sits at the prompt.
+This relays neither (the wall detector matches only `Prompt is too long`) nor
+fires the Stop hook (the turn *aborted*, it did not *end*), so the session
+wedges until a human nudges it.
+
+`transcript.last_api_error` detects this: it returns the error text only when
+a non-wall `isApiErrorMessage` turn is the **last real turn** (no newer
+assistant/user/tool event — so an error Claude Code already retried past is
+ignored). The interactive watcher tracks how long the *same* error has sat at
+the tail and relays once it persists `CCLOOP_API_ERROR_GRACE` seconds
+(default 60; 0 disables), letting Claude Code's own retry go first. Recovery
+reuses the proven relay path — `_build_prompt` reads `resume.md` with no model
+call — so a fresh session restarts from last-good state + broker/journal
+reconcile even while the model endpoint is still degraded (it then cycles,
+recovering, rather than dead-wedging).
+
 This works regardless of the token `cutoff` — a cutoff at/above the window,
 or disabled, can no longer ride into the wall. The `cutoff` is now purely an
 *early* relay knob.
+
+### Launch-failure backoff (endpoint not ready)
+
+The wall and API-error relays both watch the transcript — they assume a session
+that *started*. When `claude` (or a `CCLOOP_CLAUDE_BIN` gateway) cannot reach its
+model **at launch** — `failed to fetch model list … Connection refused`, a model
+server still booting, an auth blip — the child dies in ~0s **before writing any
+transcript**. There is nothing to watch and nothing to summarize.
+
+ccloop treats that as its own class, distinct from no-progress: a launch failure
+is `exit≠0` **and** no transcript **and** no watcher relay. Rather than count it
+toward `CCLOOP_STUCK_LIMIT`, or (interactive) drop to a blocking `Relaunch?
+[Y/n]` prompt — neither of which is autonomous — the runner retries the **same**
+session number with exponential backoff: `CCLOOP_LAUNCH_BACKOFF` seconds
+(default 5), doubling each attempt, capped at `CCLOOP_LAUNCH_BACKOFF_MAX`
+(default 120), **forever by default** (`CCLOOP_LAUNCH_RETRY_LIMIT` = 0; set it to
+bound the retries). A watching human can Ctrl-C during any wait; the run
+self-heals the instant the endpoint returns. Absorbed retries never advance the
+session count — only a session that actually ran is appended to `sessions.log`,
+so resume numbering stays honest. This subsumes the old "session 1 died fast →
+abort" guard: a cold endpoint at the very start of a run is now waited out, not
+fatal.
 
 ### `usage.py` — ccusage cache reader (early cutoff only)
 
@@ -348,9 +392,13 @@ non-progress and abort rather than spin:
   with guidance to trim `resume.md` or narrow the task, then
   `--resume-run`. This cannot be auto-fixed safely (the partial transcript
   contains no new work).
-- **Stuck.** A session is "no-progress" if it produced no transcript or
-  zero assistant turns. After `CCLOOP_STUCK_LIMIT` (default 3) consecutive
-  no-progress sessions, ccloop aborts.
+- **Stuck.** A session that *ran* but did no work — a transcript with zero
+  assistant turns, or a clean (exit 0) exit with no transcript — is
+  "no-progress." After `CCLOOP_STUCK_LIMIT` (default 3) consecutive
+  no-progress sessions, ccloop aborts. A session that never *started*
+  (nonzero exit, no transcript) is a **launch failure**, not no-progress: it
+  is retried with backoff (see "Launch-failure backoff"), so a flaky endpoint
+  can't burn the stuck budget.
 
 Optional caps remain available: `CCLOOP_MAX_ITERATIONS` and
 `CCLOOP_SESSION_TIMEOUT` (both default 0 = off). User Ctrl-C always works.
@@ -395,6 +443,7 @@ earlier design probes):
 | Hook injection ignored mid-loop | Transcript is recoverable regardless; wrapper synthesizes resume even from a failed session |
 | Resume prompt exceeds model window | Detected (`Prompt is too long`) and aborted with guidance, not looped |
 | Infinite no-progress loop | `CCLOOP_STUCK_LIMIT` aborts after N empty sessions; Ctrl-C always works |
+| Model endpoint down at session launch | Retried with increasing backoff (`CCLOOP_LAUNCH_BACKOFF*`), forever by default; never counted as no-progress, never prompts |
 | Claude keeps inventing work | Optional `CCLOOP_MAX_ITERATIONS` cap (off by default) |
 | Single session hangs | Optional `CCLOOP_SESSION_TIMEOUT` watchdog (off by default) |
 | Orphaned child processes on interrupt | Session runs in its own process group; SIGINT kills the group (SIGKILL on second Ctrl-C) |
@@ -440,7 +489,8 @@ install/self-heal/uninstall (including legacy-bash migration), the guard
 hook (gating, thresholds, custom window), the stream formatter, CLI
 dispatch, and the full relay loop driven against a fake stream-json
 `claude` binary (DONE convergence, `Prompt is too long` abort, stuck
-abort, iteration cap, resume numbering). No real `claude` is required;
+abort, iteration cap, resume numbering, and launch-failure backoff —
+retry-then-abort and retry-then-recover). No real `claude` is required;
 the suite runs offline and deterministically.
 
 ## Non-goals

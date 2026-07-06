@@ -2,6 +2,64 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.4.0
+
+ccloop v0.8.0: keep an autonomous run alive across a model endpoint that isn't
+ready yet — retry a failed **session launch** with increasing backoff instead
+of stopping to ask.
+
+**The bug.** ccloop's resilience work so far (v0.2.0 context wall, v0.3.0
+API-error wedge) all watches the transcript, which assumes a session that
+*started*. But when `claude` (or a `CCLOOP_CLAUDE_BIN` gateway) can't reach its
+model **at launch** — `failed to fetch model list from … Connection refused`, a
+local model server still booting, an auth blip — the child dies in ~0s **before
+writing any transcript**. There is nothing to watch. ccloop mislabeled that as a
+*no-progress* session: it burned one of `CCLOOP_STUCK_LIMIT` (default 3) strikes
+and, in interactive mode, dropped to a blocking `Relaunch a fresh session? [Y/n]`
+prompt — the opposite of autonomous. Three quick endpoint blips aborted the whole
+run.
+
+**The fix.** A launch failure is now its own class — `exit≠0` **and** no
+transcript **and** no watcher relay — handled by retrying the *same* session
+number with exponential backoff: `CCLOOP_LAUNCH_BACKOFF` seconds (default 5),
+doubling, capped at `CCLOOP_LAUNCH_BACKOFF_MAX` (default 120), forever by default
+(`CCLOOP_LAUNCH_RETRY_LIMIT` = 0). It never counts toward the no-progress limit
+and never prompts; a watching human can Ctrl-C, and the run self-heals the moment
+the endpoint returns. Absorbed retries don't advance the session count — only a
+session that actually ran is logged — and the old "session 1 died fast → abort"
+special case is subsumed (a cold endpoint at the start of a run is now waited out,
+not fatal). New `launchfail` mode in the fake-claude test harness with
+retry-then-abort and retry-then-recover tests; documented in ccloop `README.md`
+and `DESIGN.md`.
+
+## v0.3.0
+
+ccloop v0.7.0: extend the "relay instead of wedge" guarantee from the context
+wall to **transient API-error wedges**.
+
+**The bug.** v0.2.0 made a full context window relay deterministically instead
+of wedging at Claude Code's hard wall. But that wall is only *one* way a turn
+ends in a committed `isApiErrorMessage` turn that then idles at the prompt. A
+transient transport/API error — `API Error: The operation timed out.`, an
+overload, a 5xx (common when `claude` points at a flaky or local model
+endpoint) — aborts the turn, commits a *non-wall* `isApiErrorMessage` turn, and
+sits there. It relayed neither (the wall detector matches only `Prompt is too
+long`) nor fired the keepgoing Stop hook (the turn *aborted*, it did not
+*end*). Confirmed in a real run: an interactive session wedged 21 minutes after
+a model-endpoint timeout until a human typed into the TUI.
+
+**The fix.** New `transcript.last_api_error()` returns the error text only when
+a non-wall `isApiErrorMessage` turn is the *last real turn* (a newer
+assistant/user/tool turn ⇒ ignored, so an error Claude Code retried past never
+triggers a relay). The `run_session_interactive` watcher tracks how long the
+same error has persisted at the tail and relays once it exceeds
+`CCLOOP_API_ERROR_GRACE` seconds (default 60; 0 disables), giving Claude Code's
+own retry first crack. Recovery reuses the proven relay path — `_build_prompt`
+reads the resume file with no model call — so a fresh session restarts from
+last-good state even while the endpoint is still degraded (it cycles and
+recovers rather than dead-wedging). New tests in `tests/test_transcript.py`;
+documented in ccloop `README.md` + `DESIGN.md`.
+
 ## v0.2.1
 
 ccusage statusline: render the context-window size in whichever unit reads

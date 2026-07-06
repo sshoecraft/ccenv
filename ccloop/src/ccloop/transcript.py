@@ -96,6 +96,63 @@ def hit_context_wall(path, tail_bytes=131072):
     return False
 
 
+def last_api_error(path, tail_bytes=131072):
+    """The text of a terminal API-error turn IF it is the last real turn.
+
+    When a turn aborts on a transport/API error (e.g. "API Error: The
+    operation timed out.", an overload, or a 5xx), Claude Code commits a
+    synthetic assistant turn flagged ``isApiErrorMessage`` and then idles at
+    the prompt. Unlike the context wall it does NOT relay, and unlike a normal
+    turn-end it does NOT emit a Stop event (the turn aborted, it did not end),
+    so the ``keepgoing`` hook never fires either — the session simply wedges
+    until a human nudges it.
+
+    Returns the error text when that API-error turn is the *last* real turn
+    (no newer assistant/user/tool event) and is NOT the context wall
+    (``CONTEXT_WALL_TEXT``, owned by ``hit_context_wall``); otherwise ``None``.
+    The "last real turn" guard means an error Claude Code already retried past
+    (a newer turn exists) yields ``None`` — so this never flags a session that
+    recovered on its own. Auxiliary records (``mode``/``permission-mode``/
+    ``last-prompt``) are not real turns and are ignored.
+
+    Only the tail is scanned so the interactive watcher can poll this cheaply.
+    """
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - tail_bytes))
+            chunk = fh.read()
+    except OSError:
+        return None
+    text = chunk.decode("utf-8", "replace")
+    if size > tail_bytes:
+        # Drop the partial first line left by seeking into the middle.
+        nl = text.find("\n")
+        text = text[nl + 1:] if nl != -1 else ""
+    last = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or '"type"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        # Real turns only. Tool results arrive as user-role messages, so a tool
+        # call after the error correctly counts as a newer turn.
+        if event.get("type") in ("assistant", "user"):
+            last = event
+    if (last is None or last.get("type") != "assistant"
+            or not last.get("isApiErrorMessage")):
+        return None
+    for block in (last.get("message", {}) or {}).get("content") or []:
+        if block.get("type") == "text":
+            txt = block.get("text") or ""
+            return None if CONTEXT_WALL_TEXT in txt else txt
+    return None
+
+
 def context_tokens(path):
     """Total context tokens at the last assistant turn that reported usage.
 

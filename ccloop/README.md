@@ -163,12 +163,26 @@ ccloop will abort with a clear message rather than spin forever if:
 - a session fails with **`Prompt is too long`** — the resume prompt has
   outgrown the model's context window; trim it or narrow the task, then
   `--resume-run`.
-- **`CCLOOP_STUCK_LIMIT`** consecutive sessions make no progress (no
-  transcript / no assistant turns).
+- **`CCLOOP_STUCK_LIMIT`** consecutive sessions **run but make no progress**
+  (a transcript with no assistant turns).
 
 By default there is **no** iteration cap and **no** session timeout — a
 run continues until it converges, you interrupt it, or a guard trips. Set
 `CCLOOP_MAX_ITERATIONS` / `CCLOOP_SESSION_TIMEOUT` if you want them.
+
+### When the model endpoint isn't ready
+
+If a session can't even **start** — `claude` (or your `CCLOOP_CLAUDE_BIN`
+gateway) can't reach its model, e.g. `Connection refused` while a local model
+server is still booting — the child exits immediately without writing a
+transcript. That's transient infrastructure, not the agent giving up, so ccloop
+does **not** count it against `CCLOOP_STUCK_LIMIT` and (interactive) does **not**
+stop to ask. It retries the same session with **increasing backoff** —
+`CCLOOP_LAUNCH_BACKOFF` seconds (default 5), doubling each try, capped at
+`CCLOOP_LAUNCH_BACKOFF_MAX` (default 120) — **forever by default**, so a run left
+overnight rides out a server restart and picks up the moment the endpoint
+returns. Ctrl-C stops it if you want out; set `CCLOOP_LAUNCH_RETRY_LIMIT=N` to
+abort after N failed launches instead.
 
 ### Configuration
 
@@ -177,9 +191,13 @@ run continues until it converges, you interrupt it, or a guard trips. Set
 | `CCLOOP_MAX_ITERATIONS` | 0 (unlimited) | Hard cap on sessions per run; 0 disables |
 | `CCLOOP_SESSION_TIMEOUT` | 0 (none) | SIGTERM a session after N seconds; 0 disables |
 | `CCLOOP_STUCK_LIMIT` | 3 | Consecutive no-progress sessions before abort |
+| `CCLOOP_LAUNCH_RETRY_LIMIT` | 0 (unlimited) | Max retries when a session never starts (nonzero exit, no transcript); 0 = retry until the endpoint returns |
+| `CCLOOP_LAUNCH_BACKOFF` | 5 | First launch-retry wait (sec); doubles each attempt |
+| `CCLOOP_LAUNCH_BACKOFF_MAX` | 120 | Ceiling on the launch-retry wait (sec) |
 | `CCLOOP_THRESHOLD_SOFT` | 70 | Guard hook injection threshold % |
 | `CCLOOP_THRESHOLD_HARD` | 85 | Interactive auto-relay threshold %; 0 disables the watcher |
 | `CCLOOP_WATCH_INTERVAL` | 3 | Interactive context-poll interval (sec) |
+| `CCLOOP_API_ERROR_GRACE` | 60 | Interactive: relay to a fresh session when a non-wall API-error turn (e.g. a timeout/overload) has sat idle at the transcript tail this many seconds; 0 disables |
 | `CCLOOP_MAX_CONTINUES` | 0 (unlimited) | Cap on `keepgoing` re-feeds per session; 0 disables the cap |
 | `CCLOOP_STOP_HOOK_BLOCK_CAP` | -1 (unlimited) | Overrides Claude Code's `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` (default 9) so the keepgoing hook can re-feed indefinitely; -1 means never cap |
 | `CCLOOP_PERMISSION_MODE` | `bypassPermissions` | Passed to `claude --permission-mode` |
