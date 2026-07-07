@@ -2,7 +2,7 @@
 - [bump-top-level-bundle-version-not-just-subdir](bump-top-level-bundle-version-not-just-subdir.md) — When fixing a component in /src/ccenv, bump the TOP-LEVEL bundle VERSION + CHANGELOG.md — the bundle is what installs, not the component subdir.
 - [install-claude-md-component-owned](install-claude-md-component-owned.md) — Top-level install.sh owns only the BASE ~/.claude/CLAUDE.md (in a [CCENV MANAGED] marker region); each component owns/appends its own section.
 - [no-git-checkout-to-undo-own-edits](no-git-checkout-to-undo-own-edits.md) — NEVER run git for ANY reason without explicit direction — including read-only checks (status/diff/log). The ban has no exceptions.
-- [no-per-component-venvs](no-per-component-venvs.md) — ccenv components install via pip3 install --user (pipx as PEP 668 fallback); per-component venvs are explicitly rejected
+- [no-per-component-venvs](no-per-component-venvs.md) — ccenv installs via pip3 install --user; pipx is the PEP668 fallback for MANUAL per-component installs, but install.sh itself uses --break-system-pack…
 - [no-version-history-in-claude-md](no-version-history-in-claude-md.md) — Version history goes in CHANGELOG.md, not CLAUDE.md. CLAUDE.md is for purpose/architecture/conventions, never for changelog content.
 - [one-line-copy-paste-commands](one-line-copy-paste-commands.md) — Copy-paste shell commands in install output MUST be one physical line — never split with backslash continuations
 
