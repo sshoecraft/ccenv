@@ -181,6 +181,27 @@ command -v pip3    >/dev/null || { echo "ERROR: pip3 required"; exit 1; }
 info "python3: $(python3 --version 2>&1)"
 info "pip3:    $(pip3 --version 2>&1 | awk '{print $1, $2}')"
 
+# PEP 668 (Debian 12+, Ubuntu 23.04+, Fedora 38+, Arch, Homebrew Python): these
+# ship an EXTERNALLY-MANAGED marker beside the stdlib that makes pip refuse to
+# install — INCLUDING `pip install --user` — with
+# "error: externally-managed-environment", which trips this script's `set -e`
+# before anything installs. Overriding it is safe HERE: ccenv installs
+# exclusively with --user into ~/.local and never touches the system
+# site-packages the marker protects. We do NOT fall back to pipx (the usual
+# PEP 668 answer) because all five components share ONE --user site so the
+# ccenvmcp shim is importable across them — pipx's per-app venvs would break
+# that. Enable the override only when the marker is actually present AND this
+# pip knows the flag (added in the same pip 23.x that enforces PEP 668), so an
+# older pip is never handed an option it doesn't understand. Exported here so
+# EVERY `pip install --user` below inherits it (component installs, the PEP 621
+# toolchain upgrade, native-ext force-reinstalls) with no per-call edits.
+EXTERNALLY_MANAGED=$(python3 -c 'import os, sysconfig; print(os.path.join(sysconfig.get_path("stdlib"), "EXTERNALLY-MANAGED"))' 2>/dev/null || true)
+if [ -n "$EXTERNALLY_MANAGED" ] && [ -f "$EXTERNALLY_MANAGED" ] \
+   && python3 -m pip install --help 2>/dev/null | grep -q -- '--break-system-packages'; then
+    export PIP_BREAK_SYSTEM_PACKAGES=1
+    info "PEP 668 externally-managed environment — enabling --break-system-packages for --user installs"
+fi
+
 # Force pip's `--user` installs to land under ~/.local on every platform.
 #
 # Without this, pip obeys Python's `sysconfig` user scheme, which on macOS

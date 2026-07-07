@@ -2,6 +2,26 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.4.1
+
+install.sh: handle PEP 668 "externally-managed-environment" (Debian 12+, Ubuntu
+23.04+, Fedora 38+, Arch, Homebrew Python). Those distros drop an
+EXTERNALLY-MANAGED marker beside the stdlib that makes `pip install` refuse —
+including `pip install --user` — so the installer aborted on `set -e` with
+`error: externally-managed-environment` before installing anything.
+
+The installer now probes for that marker and, only when it is present AND this
+pip supports the flag (pip 23.x+, the same pip that enforces PEP 668), exports
+`PIP_BREAK_SYSTEM_PACKAGES=1` for its own subshell — so every `pip install
+--user` call (component installs, the PEP 621 toolchain upgrade, native-ext
+force-reinstalls) proceeds. Overriding the marker is safe here because ccenv
+installs exclusively with `--user` into `~/.local` and never writes to the
+system site-packages the marker protects. pipx (the usual PEP 668 fallback) is
+deliberately NOT used: all five components share one `--user` site so the
+`ccenvmcp` shim is importable across them, which pipx's per-app venvs would
+break. Older pip (no marker, no enforcement) is untouched and never sees the
+flag.
+
 ## v0.4.0
 
 ccloop v0.8.0: keep an autonomous run alive across a model endpoint that isn't
