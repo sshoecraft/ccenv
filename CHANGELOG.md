@@ -2,6 +2,23 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.5.0
+
+ccloop v0.9.0: `--model=NAME` flag. The model for a run's spawned claude
+sessions could previously only be set via the `CCLOOP_MODEL` env var; the
+natural `ccloop --model=opus ...` invocation failed with `unknown option`.
+The flag takes an alias (`opus`, `sonnet`, `haiku`) or a full model id,
+accepts both `--model=NAME` and `--model NAME` forms, works with
+`--resume-run` too, and wins over `CCLOOP_MODEL` when both are set. Like the
+env var, it applies to the ccloop invocation at hand — a resume does not
+remember the model the run was started with.
+
+Internals: `--cutoff` and `--model` now share one generic value-flag
+extractor in `cli.py`; the model threads `cli → cmd_run/cmd_resume → loop`
+as an explicit parameter (no env mutation). The `fake_claude` test shim
+gained `FAKE_ARGS_FILE`, which records each invocation's argv so tests can
+assert what actually reaches the claude command line.
+
 ## v0.4.1
 
 install.sh: handle PEP 668 "externally-managed-environment" (Debian 12+, Ubuntu

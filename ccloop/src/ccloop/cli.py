@@ -42,6 +42,9 @@ Options:
                                 than silently running metered headless `claude -p`.)
   --cutoff=N                    relay cutoff in thousands of tokens (default: 250)
                                 (0 = no cutoff — keep going until the session window fills)
+  --model=NAME                  model for the spawned claude sessions — an alias
+                                (opus, sonnet, haiku) or a full model id; passed
+                                to `claude --model`, overrides CCLOOP_MODEL
 
 Environment variables:
   CCLOOP_MAX_ITERATIONS    hard cap on sessions per run (default: 0 = unlimited)
@@ -55,7 +58,7 @@ Environment variables:
   CCLOOP_MAX_CONTINUES     cap keepgoing re-feeds per session (default: 0 = unlimited)
   CCLOOP_STOP_HOOK_BLOCK_CAP  override Claude Code's Stop hook cap (default: -1 = unlimited)
   CCLOOP_PERMISSION_MODE   default: bypassPermissions
-  CCLOOP_MODEL             override model
+  CCLOOP_MODEL             override model (--model flag wins over this)
   CCLOOP_EFFORT            override effort level
   CCLOOP_SETTINGS          path/JSON for claude --settings
   CCLOOP_MAX_BUDGET_USD    per-session cost cap
@@ -75,6 +78,32 @@ def _run(fn, *args, **kwargs):
         return 1
 
 
+def _extract_value_flag(argv, flag, what):
+    """Pop ``<flag>=V`` / ``<flag> V`` from argv.
+
+    Returns ``(new_argv, value, error)``. ``value`` is the raw string, or
+    None when the flag was not given (last occurrence wins). ``error`` is
+    a usage-error message string when the value is missing; the caller
+    should print it and return 2.
+    """
+    out = []
+    value = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith(flag + "="):
+            value = a.split("=", 1)[1]
+        elif a == flag:
+            if i + 1 >= len(argv):
+                return argv, None, f"{flag} requires a value ({what})"
+            i += 1
+            value = argv[i]
+        else:
+            out.append(a)
+        i += 1
+    return out, value, None
+
+
 def _extract_cutoff(argv):
     """Pop ``--cutoff=N`` / ``--cutoff N`` from argv.
 
@@ -83,37 +112,31 @@ def _extract_cutoff(argv):
     given. ``error`` is a usage-error message string when N is missing or
     not a positive int; the caller should print it and return 2.
     """
-    out = []
-    cutoff_tokens = None
-    error = None
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        if a.startswith("--cutoff="):
-            raw = a.split("=", 1)[1]
-        elif a == "--cutoff":
-            if i + 1 >= len(argv):
-                error = "--cutoff requires a value (thousands of tokens)"
-                return argv, None, error
-            i += 1
-            raw = argv[i]
-        else:
-            out.append(a)
-            i += 1
-            continue
-        try:
-            n = int(raw)
-        except ValueError:
-            error = f"--cutoff: not an integer: {raw!r}"
-            return argv, None, error
-        if n < 0:
-            error = f"--cutoff: must be a non-negative integer (got {n})"
-            return argv, None, error
-        # 0 is the explicit "no cutoff" sentinel — keep going until the
-        # session window fills. Any positive N is N thousand tokens.
-        cutoff_tokens = n * 1000
-        i += 1
-    return out, cutoff_tokens, None
+    argv, raw, error = _extract_value_flag(argv, "--cutoff", "thousands of tokens")
+    if error or raw is None:
+        return argv, None, error
+    try:
+        n = int(raw)
+    except ValueError:
+        return argv, None, f"--cutoff: not an integer: {raw!r}"
+    if n < 0:
+        return argv, None, f"--cutoff: must be a non-negative integer (got {n})"
+    # 0 is the explicit "no cutoff" sentinel — keep going until the
+    # session window fills. Any positive N is N thousand tokens.
+    return argv, n * 1000, None
+
+
+def _extract_model(argv):
+    """Pop ``--model=NAME`` / ``--model NAME`` from argv.
+
+    Returns ``(new_argv, model, error)``. ``model`` is the name/alias to
+    pass through to ``claude --model`` (it wins over CCLOOP_MODEL), or
+    None when the flag was not given.
+    """
+    argv, model, error = _extract_value_flag(argv, "--model", "model name or alias")
+    if error is None and model is not None and not model.strip():
+        return argv, None, "--model requires a value (model name or alias)"
+    return argv, model, error
 
 
 def _cmd_install(args):
@@ -237,6 +260,11 @@ def main(argv=None):
         print(f"ccloop: {cutoff_err}", file=sys.stderr)
         return 2
 
+    argv, model, model_err = _extract_model(argv)
+    if model_err:
+        print(f"ccloop: {model_err}", file=sys.stderr)
+        return 2
+
     if argv and argv[0] == "install":
         return _cmd_install(argv[1:])
 
@@ -270,7 +298,8 @@ def main(argv=None):
         if err is not None:
             return err
         return _run(runner.cmd_resume, run_id, ensure_hook=ensure_hook,
-                    interactive=interactive, cutoff_tokens=cutoff_tokens)
+                    interactive=interactive, cutoff_tokens=cutoff_tokens,
+                    model=model)
 
     if argv[0].startswith("-"):
         print(f"ccloop: unknown option: {argv[0]}", file=sys.stderr)
@@ -301,7 +330,8 @@ def main(argv=None):
     if err is not None:
         return err
     return _run(runner.cmd_run, criteria, task, ensure_hook=ensure_hook,
-                interactive=interactive, cutoff_tokens=cutoff_tokens)
+                interactive=interactive, cutoff_tokens=cutoff_tokens,
+                model=model)
 
 
 if __name__ == "__main__":

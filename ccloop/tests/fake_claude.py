@@ -6,6 +6,8 @@ CCLOOP_RESUME_FILE) and is steered by extra test-only env vars:
 
   FAKE_MODE        work (default) | toolong | wall | sleep | noprogress | launchfail
   FAKE_COUNTER     path to an invocation-counter file
+  FAKE_ARGS_FILE   append each invocation's argv as a JSON line, so tests
+                   can assert what reached the claude command line
   FAKE_DONE_AFTER  in 'work' mode, write DONE to the resume file once the
                    invocation count reaches this value (converges the loop)
   FAKE_LAUNCHFAIL_TIMES    in 'launchfail' mode, fail this many launches then
@@ -56,6 +58,11 @@ def write_transcript(path, assistant_turns=1):
 
 
 def main():
+    args_file = os.environ.get("FAKE_ARGS_FILE")
+    if args_file:
+        with open(args_file, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(sys.argv[1:]) + "\n")
+
     mode = os.environ.get("FAKE_MODE", "work")
     transcript = os.environ.get("CCLOOP_TRANSCRIPT_PATH")
     resume = os.environ.get("CCLOOP_RESUME_FILE")

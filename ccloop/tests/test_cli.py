@@ -87,11 +87,13 @@ class _FakeStream:
 def _stub_run(monkeypatch):
     from ccloop import runner
     captured = {}
-    def fake(criteria, task, ensure_hook=True, interactive=False, cutoff_tokens=None):
+    def fake(criteria, task, ensure_hook=True, interactive=False, cutoff_tokens=None,
+             model=None):
         captured["criteria"] = criteria
         captured["task"] = task
         captured["interactive"] = interactive
         captured["cutoff_tokens"] = cutoff_tokens
+        captured["model"] = model
         return 0
     monkeypatch.setattr(runner, "cmd_run", fake)
     return captured
@@ -100,10 +102,12 @@ def _stub_run(monkeypatch):
 def _stub_resume(monkeypatch):
     from ccloop import runner
     captured = {}
-    def fake(run_id, ensure_hook=True, interactive=False, cutoff_tokens=None):
+    def fake(run_id, ensure_hook=True, interactive=False, cutoff_tokens=None,
+             model=None):
         captured["run_id"] = run_id
         captured["interactive"] = interactive
         captured["cutoff_tokens"] = cutoff_tokens
+        captured["model"] = model
         return 0
     monkeypatch.setattr(runner, "cmd_resume", fake)
     return captured
@@ -243,3 +247,48 @@ def test_cutoff_threads_into_resume(monkeypatch):
     captured = _stub_resume(monkeypatch)
     cli.main(["-i", "--cutoff=80", "--resume-run", "12345678-1234-1234-1234-123456789abc"])
     assert captured["cutoff_tokens"] == 80000
+
+
+# ── --model parsing ─────────────────────────────────────────────────────
+
+
+def test_model_default_is_none(monkeypatch):
+    captured = _stub_run(monkeypatch)
+    cli.main(["-i", "", "task"])
+    assert captured["model"] is None
+
+
+def test_model_eq_form_parses(monkeypatch):
+    captured = _stub_run(monkeypatch)
+    cli.main(["-i", "--model=opus", "", "task"])
+    assert captured["model"] == "opus"
+
+
+def test_model_space_form_parses(monkeypatch):
+    captured = _stub_run(monkeypatch)
+    cli.main(["-i", "--model", "claude-opus-4-8", "", "task"])
+    assert captured["model"] == "claude-opus-4-8"
+
+
+def test_model_missing_value_rejected(capsys):
+    assert cli.main(["--model"]) == 2
+    assert "--model" in capsys.readouterr().err
+
+
+def test_model_empty_value_rejected(capsys):
+    assert cli.main(["--model=", "", "task"]) == 2
+    assert "--model" in capsys.readouterr().err
+
+
+def test_model_threads_into_resume(monkeypatch):
+    captured = _stub_resume(monkeypatch)
+    cli.main(["-i", "--model=opus", "--resume-run", "12345678-1234-1234-1234-123456789abc"])
+    assert captured["model"] == "opus"
+
+
+def test_model_combines_with_cutoff(monkeypatch):
+    captured = _stub_run(monkeypatch)
+    cli.main(["-i", "--model=opus", "--cutoff=500", "", "task"])
+    assert captured["model"] == "opus"
+    assert captured["cutoff_tokens"] == 500000
+    assert captured["task"] == "task"

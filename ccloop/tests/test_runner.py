@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -37,6 +38,44 @@ def test_build_command_headless_has_streamjson(tmp_path):
     assert "the prompt" not in cmd
     assert "--append-system-prompt-file" in cmd
     assert str(prompt_file) in cmd
+
+
+def test_build_command_model_passthrough(tmp_path, monkeypatch):
+    monkeypatch.delenv("CCLOOP_MODEL", raising=False)
+    cfg = runner._config()
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("the prompt")
+    cmd = runner._build_command(cfg, "sid", prompt_file=prompt_file, interactive=True)
+    assert "--model" not in cmd
+    cfg["model"] = "opus"
+    cmd = runner._build_command(cfg, "sid", prompt_file=prompt_file, interactive=True)
+    assert cmd[cmd.index("--model") + 1] == "opus"
+
+
+def _spawned_argv(args_file):
+    return json.loads(args_file.read_text().splitlines()[0])
+
+
+def test_model_flag_wins_over_env(project, isolated_home, fake_claude, monkeypatch):
+    monkeypatch.setenv("CCLOOP_MODEL", "sonnet")
+    monkeypatch.setenv("FAKE_COUNTER", str(project / "counter"))
+    monkeypatch.setenv("FAKE_DONE_AFTER", "1")
+    args_file = project / "argv.jsonl"
+    monkeypatch.setenv("FAKE_ARGS_FILE", str(args_file))
+    assert runner.cmd_run("", "task", ensure_hook=False, model="opus") == 0
+    argv = _spawned_argv(args_file)
+    assert argv[argv.index("--model") + 1] == "opus"
+
+
+def test_model_env_used_without_flag(project, isolated_home, fake_claude, monkeypatch):
+    monkeypatch.setenv("CCLOOP_MODEL", "sonnet")
+    monkeypatch.setenv("FAKE_COUNTER", str(project / "counter"))
+    monkeypatch.setenv("FAKE_DONE_AFTER", "1")
+    args_file = project / "argv.jsonl"
+    monkeypatch.setenv("FAKE_ARGS_FILE", str(args_file))
+    assert runner.cmd_run("", "task", ensure_hook=False) == 0
+    argv = _spawned_argv(args_file)
+    assert argv[argv.index("--model") + 1] == "sonnet"
 
 
 def test_interactive_watcher_relays_when_halt_sentinel_appears(fake_claude, tmp_path, monkeypatch):

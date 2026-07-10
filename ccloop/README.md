@@ -201,7 +201,7 @@ abort after N failed launches instead.
 | `CCLOOP_MAX_CONTINUES` | 0 (unlimited) | Cap on `keepgoing` re-feeds per session; 0 disables the cap |
 | `CCLOOP_STOP_HOOK_BLOCK_CAP` | -1 (unlimited) | Overrides Claude Code's `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` (default 9) so the keepgoing hook can re-feed indefinitely; -1 means never cap |
 | `CCLOOP_PERMISSION_MODE` | `bypassPermissions` | Passed to `claude --permission-mode` |
-| `CCLOOP_MODEL` | (unset) | Passed to `claude --model` |
+| `CCLOOP_MODEL` | (unset) | Passed to `claude --model`; the `--model=NAME` flag overrides it |
 | `CCLOOP_EFFORT` | (unset) | Passed to `claude --effort` |
 | `CCLOOP_SETTINGS` | (unset) | Passed to `claude --settings` |
 | `CCLOOP_MAX_BUDGET_USD` | (unset) | Passed to `claude --max-budget-usd` |

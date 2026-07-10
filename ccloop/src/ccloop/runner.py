@@ -547,8 +547,11 @@ def _setup_resume(run_id, cutoff_tokens=None):
     return run_id, run_dir
 
 
-def loop(run_id, run_dir, ensure_hook=True, interactive=False):
+def loop(run_id, run_dir, ensure_hook=True, interactive=False, model=None):
     cfg = _config()
+    if model:
+        # --model flag wins over the CCLOOP_MODEL env var.
+        cfg["model"] = model
     run_dir = Path(run_dir)
     resume_file = run_dir / "resume.md"
     task_file = run_dir / "task.md"
@@ -771,14 +774,18 @@ def _ensure_hook():
 # ── run / resume / list / prune entry points ─────────────────────────────
 
 
-def cmd_run(criteria, task, ensure_hook=True, interactive=False, cutoff_tokens=None):
+def cmd_run(criteria, task, ensure_hook=True, interactive=False, cutoff_tokens=None,
+            model=None):
     run_id, run_dir = _setup_new_run(task, criteria=criteria, cutoff_tokens=cutoff_tokens)
-    return loop(run_id, run_dir, ensure_hook=ensure_hook, interactive=interactive)
+    return loop(run_id, run_dir, ensure_hook=ensure_hook, interactive=interactive,
+                model=model)
 
 
-def cmd_resume(run_id, ensure_hook=True, interactive=False, cutoff_tokens=None):
+def cmd_resume(run_id, ensure_hook=True, interactive=False, cutoff_tokens=None,
+               model=None):
     run_id, run_dir = _setup_resume(run_id, cutoff_tokens=cutoff_tokens)
-    return loop(run_id, run_dir, ensure_hook=ensure_hook, interactive=interactive)
+    return loop(run_id, run_dir, ensure_hook=ensure_hook, interactive=interactive,
+                model=model)
 
 
 def _status_of(run_dir):
