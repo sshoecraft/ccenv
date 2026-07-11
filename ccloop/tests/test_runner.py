@@ -1,5 +1,9 @@
 import json
 import os
+import subprocess
+import sys
+import time
+from pathlib import Path
 
 import pytest
 
@@ -103,6 +107,56 @@ def test_interactive_no_relay_when_no_halt_sentinel(fake_claude, tmp_path, monke
         halt_file=halt, poll=0.2,
     )
     assert relayed is False
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="PDEATHSIG relies on /proc + Linux prctl")
+def test_interactive_child_dies_if_ccloop_process_itself_is_killed(tmp_path):
+    """Regression: if ccloop's own process dies abnormally (crash, `kill -9`,
+    OOM) -- NOT via its own graceful relay/interrupt handling -- the claude
+    child it spawned with inherited (non-piped) std fds must not be left
+    running as an orphan. This is the actual mechanism behind real-world
+    orphaned `claude ... begin` processes with PPID 1; the in-run relay path
+    (halt sentinel / context wall -> proc.terminate()) already cleans up its
+    own child correctly and is covered by the other interactive tests above.
+
+    Exercises `runner._pdeathsig_preexec` through two REAL separate OS
+    processes (a fork/exec pair, not threads) since PR_SET_PDEATHSIG is
+    inherently about actual process death, not anything mockable in-process.
+    """
+    src_dir = str(Path(runner.__file__).resolve().parent.parent)
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import subprocess, sys, time\n"
+        f"sys.path.insert(0, {src_dir!r})\n"
+        "from ccloop.runner import _pdeathsig_preexec\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],\n"
+        "                     preexec_fn=_pdeathsig_preexec)\n"
+        "print(p.pid, flush=True)\n"
+        "time.sleep(120)\n"
+    )
+
+    driver_proc = subprocess.Popen(
+        [sys.executable, str(driver)], stdout=subprocess.PIPE, text=True
+    )
+    try:
+        line = driver_proc.stdout.readline()
+        child_pid = int(line.strip())
+        assert Path(f"/proc/{child_pid}").is_dir(), "child never started"
+
+        driver_proc.kill()  # SIGKILL only the driver ("ccloop"), not the child
+        driver_proc.wait(timeout=5)
+
+        for _ in range(30):
+            if not Path(f"/proc/{child_pid}").is_dir():
+                break
+            time.sleep(0.1)
+        assert not Path(f"/proc/{child_pid}").is_dir(), (
+            "claude child survived ccloop's own death -- orphaned to init"
+        )
+    finally:
+        if driver_proc.poll() is None:
+            driver_proc.kill()
+            driver_proc.wait()
 
 
 def test_write_cutoff_new_run_writes_default(tmp_path):

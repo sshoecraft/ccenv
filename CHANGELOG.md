@@ -2,6 +2,26 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.6.1
+
+ccloop 0.9.1: fixed orphaned `claude` processes surviving after ccloop
+itself dies.
+
+The `claude` child that `run_session()`/`run_session_interactive()` spawn
+now sets `PR_SET_PDEATHSIG` (via `preexec_fn`) so the kernel SIGTERMs it
+automatically if the ccloop process that spawned it dies for any reason —
+crash, `kill -9`, OOM-kill — not just ccloop's own graceful relay/interrupt
+handling. Previously, a `claude` child spawned with inherited (non-piped)
+std fds had no death-of-parent protection: if ccloop died outside its own
+signal handling, the child was simply reparented to init and kept running
+indefinitely — the actual mechanism behind long-lived orphaned
+`claude ... begin` processes with PPID 1 seen in the wild. Confirmed and
+regression-tested by killing the ccloop process directly and asserting its
+child process dies with it. (The in-run relay path itself — halt sentinel
+/ context wall triggering `proc.terminate()` — was verified separately to
+already clean up its own child correctly across 5 live relay cycles
+against a real `claude` binary; that was not the source of the leak.)
+
 ## v0.6.0
 
 install.sh: mark the ccmemory and ccteam MCP servers `alwaysLoad: true` at

@@ -24,6 +24,33 @@ def log(msg):
     sys.stderr.flush()
 
 
+def _pdeathsig_preexec():
+    """Ask the kernel to SIGTERM this child if ITS PARENT (this ccloop
+    process) dies for any reason -- crash, ``kill -9``, OOM-kill -- not
+    just ccloop's own graceful relay/interrupt handling.
+
+    Without this, a ``claude`` child spawned with inherited (non-piped)
+    std fds has no death-of-parent protection: if ccloop itself is killed
+    outside its own signal handling, the child is simply reparented to
+    init and keeps running forever. This is what actually produces the
+    long-lived orphaned ``claude ... begin`` processes seen in the wild --
+    NOT a failure of the in-run relay logic, which already cleans up its
+    child correctly (verified separately).
+
+    Runs post-fork/pre-exec in the child's sole remaining thread (fork()
+    only preserves the calling thread), so it's safe despite the general
+    ``preexec_fn`` fork-safety warning: this callback touches no locks.
+    Linux-only; a silent no-op anywhere ``prctl`` isn't available.
+    """
+    try:
+        import ctypes
+        PR_SET_PDEATHSIG = 1
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+    except (OSError, AttributeError):
+        pass
+
+
 class CcloopError(Exception):
     """Fatal error that should abort the run with a message."""
 
@@ -306,6 +333,7 @@ def run_session(cmd, env, out_path, timeout):
             text=True,
             bufsize=1,
             start_new_session=True,
+            preexec_fn=_pdeathsig_preexec,
             env=env,
         )
         try:
@@ -401,7 +429,10 @@ def run_session_interactive(cmd, env, session_id, halt_file, transcript_file=Non
     # this and never triggers a relay.
     api_err = {"text": None, "since": None}
 
-    proc = subprocess.Popen(cmd, env=env)  # inherits this process's std fds
+    # Inherits this process's std fds (piping would break the TUI); the
+    # preexec_fn gives it death-of-parent protection so it can't outlive
+    # ccloop if ccloop itself dies abnormally (see _pdeathsig_preexec).
+    proc = subprocess.Popen(cmd, env=env, preexec_fn=_pdeathsig_preexec)
     pid = proc.pid
 
     def watcher():
