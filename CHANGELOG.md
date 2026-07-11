@@ -2,6 +2,32 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.6.0
+
+install.sh: mark the ccmemory and ccteam MCP servers `alwaysLoad: true` at
+registration so Claude Code blocks session startup until they connect, instead
+of letting the model's first turn begin while they are still connecting in the
+background.
+
+Claude Code loads MCP servers **non-blocking by default**: with tool-search on
+(the default) each server's tools are deferred behind `ToolSearch` and the
+server connects in the background, so the first turn can start before
+ccmemory/ccteam register. In a ccloop TUI session that meant the required first
+actions — ccmemory's `memory_list()` and ccteam's claim-before-edit — silently
+ran without their tools. `alwaysLoad: true` forces those two servers to load
+eagerly and gates startup on their connection (~5s/server cap). It fixes the
+race in both the TUI and headless, with no ccloop code and no reliance on the
+model obeying a prompt instruction — it is a claude-native startup gate.
+
+There is no `claude mcp add` flag for this (alwaysLoad is a field on the
+server's JSON entry), so the new `enable_always_load()` helper re-registers each
+server through `claude mcp add-json`, carrying its existing command/args/env
+untouched (`add-json` refuses to overwrite, so it does `remove` + `add-json`, the
+same heal pattern `register_mcp` uses). It runs after `register_mcp` so a
+heal-triggered re-register re-applies the flag, is idempotent, and only touches
+ccmemory/ccteam — `ask_*` stay deferred so their tool schemas don't cost prompt
+tokens on every turn. Existing installs pick it up on the next `install.sh` run.
+
 ## v0.5.0
 
 ccloop v0.9.0: `--model=NAME` flag. The model for a run's spawned claude

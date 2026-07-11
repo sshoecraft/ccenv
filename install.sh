@@ -172,6 +172,60 @@ register_mcp() {
     fi
 }
 
+# Mark a user-scoped MCP server alwaysLoad:true so Claude Code BLOCKS session
+# startup until it connects (~5s/server cap) and never defers its tools behind
+# ToolSearch. MCP startup is otherwise non-blocking: the model's first turn can
+# begin while ccmemory/ccteam are still connecting in the background, so a
+# session's required first actions (ccmemory's memory_list, ccteam's
+# claim-before-edit) silently miss the tools. There is no `claude mcp add` flag
+# for this — alwaysLoad is a field on the server's JSON entry — so we re-register
+# through `claude mcp add-json` (claude's own atomic writer, safe under
+# concurrent sessions), carrying the entry's existing command/args/env untouched
+# and only adding alwaysLoad. Idempotent: a no-op once the flag is set. Must run
+# AFTER register_mcp so a heal-triggered re-register (which drops the flag) gets
+# it re-applied in the same install. Reads ~/.claude.json to check the current
+# value (`claude mcp get` does not surface alwaysLoad) and to preserve the entry.
+# Args: name
+enable_always_load() {
+    local name="$1"
+    [ "$HAS_CLAUDE" = "1" ] || return 0
+    local merged rc=0
+    merged=$(CCENV_MCP_NAME="$name" python3 - <<'PY'
+import json, os, sys
+
+name = os.environ["CCENV_MCP_NAME"]
+try:
+    with open(os.path.expanduser("~/.claude.json"), encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, ValueError):
+    sys.exit(3)                       # unreadable / malformed config
+entry = (data.get("mcpServers") or {}).get(name)
+if not isinstance(entry, dict):
+    sys.exit(4)                       # not registered at user scope
+if entry.get("alwaysLoad") is True:
+    sys.exit(0)                       # already set — nothing to do
+out = dict(entry)
+out["alwaysLoad"] = True
+print(json.dumps(out))
+sys.exit(10)                          # needs update; merged JSON on stdout
+PY
+    ) || rc=$?
+    case "$rc" in
+        0)  info "MCP $name alwaysLoad already set" ;;
+        10) # add-json refuses to overwrite an existing entry, so drop and
+            # re-add carrying alwaysLoad — the same heal pattern register_mcp
+            # uses. claude's JSONC editor keeps the rest of the file intact.
+            claude mcp remove -s user "$name" >/dev/null 2>&1 || true
+            if claude mcp add-json -s user "$name" "$merged" >/dev/null 2>&1; then
+                info "MCP $name marked alwaysLoad — Claude blocks startup until it connects"
+            else
+                warn "failed to set alwaysLoad on MCP $name (re-run install, or add \"alwaysLoad\": true to its ~/.claude.json entry)"
+            fi ;;
+        4)  warn "MCP $name not registered at user scope — skipping alwaysLoad" ;;
+        *)  warn "could not read ~/.claude.json to set alwaysLoad on $name" ;;
+    esac
+}
+
 # ----------------------------------------------------------------------------
 # Prerequisites
 # ----------------------------------------------------------------------------
@@ -656,6 +710,10 @@ if should_install ccmemory; then
     step ccmemory "pip install --user + register MCP 'ccmemory'"
     pip_install_local "$SCRIPT_DIR/ccmemory"
     register_mcp ccmemory "$(resolve_cmd ccmemory)" mcp
+    # Block session startup until ccmemory connects — every session's required
+    # first action is memory_list(), which silently no-ops if the tools aren't
+    # registered yet (MCP startup is non-blocking by default).
+    enable_always_load ccmemory
 
     # Install the compile-memories skill. Compaction runs in the interactive
     # session (no claude -p / no metered Agent-SDK credit); the skill carries
@@ -700,6 +758,9 @@ if should_install ccteam; then
     step ccteam "pip install --user + register MCP 'ccteam' + SessionStart hook"
     pip_install_local "$SCRIPT_DIR/ccteam"
     register_mcp ccteam "$(resolve_cmd ccteam-mcp)"
+    # Block session startup until ccteam connects — claim-before-edit is
+    # useless if the model starts working before its tools register.
+    enable_always_load ccteam
 
     # Register a SessionStart hook so users see a notice in the conversation
     # if NATS is unreachable in a ccteam-bootstrapped project (.ccteam/ present).
