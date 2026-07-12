@@ -45,6 +45,8 @@ Options:
   --model=NAME                  model for the spawned claude sessions — an alias
                                 (opus, sonnet, haiku) or a full model id; passed
                                 to `claude --model`, overrides CCLOOP_MODEL
+  --effort=LEVEL                reasoning effort for the spawned claude sessions;
+                                passed to `claude --effort`, overrides CCLOOP_EFFORT
 
 Environment variables:
   CCLOOP_MAX_ITERATIONS    hard cap on sessions per run (default: 0 = unlimited)
@@ -59,7 +61,7 @@ Environment variables:
   CCLOOP_STOP_HOOK_BLOCK_CAP  override Claude Code's Stop hook cap (default: -1 = unlimited)
   CCLOOP_PERMISSION_MODE   default: bypassPermissions
   CCLOOP_MODEL             override model (--model flag wins over this)
-  CCLOOP_EFFORT            override effort level
+  CCLOOP_EFFORT            override effort level (--effort flag wins over this)
   CCLOOP_SETTINGS          path/JSON for claude --settings
   CCLOOP_MAX_BUDGET_USD    per-session cost cap
   CCLOOP_CLAUDE_BIN        claude binary to invoke (default: claude)
@@ -137,6 +139,19 @@ def _extract_model(argv):
     if error is None and model is not None and not model.strip():
         return argv, None, "--model requires a value (model name or alias)"
     return argv, model, error
+
+
+def _extract_effort(argv):
+    """Pop ``--effort=LEVEL`` / ``--effort LEVEL`` from argv.
+
+    Returns ``(new_argv, effort, error)``. ``effort`` is the level to pass
+    through to ``claude --effort`` (it wins over CCLOOP_EFFORT), or None
+    when the flag was not given.
+    """
+    argv, effort, error = _extract_value_flag(argv, "--effort", "reasoning effort level")
+    if error is None and effort is not None and not effort.strip():
+        return argv, None, "--effort requires a value (reasoning effort level)"
+    return argv, effort, error
 
 
 def _cmd_install(args):
@@ -265,6 +280,11 @@ def main(argv=None):
         print(f"ccloop: {model_err}", file=sys.stderr)
         return 2
 
+    argv, effort, effort_err = _extract_effort(argv)
+    if effort_err:
+        print(f"ccloop: {effort_err}", file=sys.stderr)
+        return 2
+
     if argv and argv[0] == "install":
         return _cmd_install(argv[1:])
 
@@ -299,7 +319,7 @@ def main(argv=None):
             return err
         return _run(runner.cmd_resume, run_id, ensure_hook=ensure_hook,
                     interactive=interactive, cutoff_tokens=cutoff_tokens,
-                    model=model)
+                    model=model, effort=effort)
 
     if argv[0].startswith("-"):
         print(f"ccloop: unknown option: {argv[0]}", file=sys.stderr)
@@ -331,7 +351,7 @@ def main(argv=None):
         return err
     return _run(runner.cmd_run, criteria, task, ensure_hook=ensure_hook,
                 interactive=interactive, cutoff_tokens=cutoff_tokens,
-                model=model)
+                model=model, effort=effort)
 
 
 if __name__ == "__main__":

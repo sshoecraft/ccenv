@@ -88,12 +88,13 @@ def _stub_run(monkeypatch):
     from ccloop import runner
     captured = {}
     def fake(criteria, task, ensure_hook=True, interactive=False, cutoff_tokens=None,
-             model=None):
+             model=None, effort=None):
         captured["criteria"] = criteria
         captured["task"] = task
         captured["interactive"] = interactive
         captured["cutoff_tokens"] = cutoff_tokens
         captured["model"] = model
+        captured["effort"] = effort
         return 0
     monkeypatch.setattr(runner, "cmd_run", fake)
     return captured
@@ -103,11 +104,12 @@ def _stub_resume(monkeypatch):
     from ccloop import runner
     captured = {}
     def fake(run_id, ensure_hook=True, interactive=False, cutoff_tokens=None,
-             model=None):
+             model=None, effort=None):
         captured["run_id"] = run_id
         captured["interactive"] = interactive
         captured["cutoff_tokens"] = cutoff_tokens
         captured["model"] = model
+        captured["effort"] = effort
         return 0
     monkeypatch.setattr(runner, "cmd_resume", fake)
     return captured
@@ -290,5 +292,50 @@ def test_model_combines_with_cutoff(monkeypatch):
     captured = _stub_run(monkeypatch)
     cli.main(["-i", "--model=opus", "--cutoff=500", "", "task"])
     assert captured["model"] == "opus"
+    assert captured["cutoff_tokens"] == 500000
+
+
+# ── --effort parsing ─────────────────────────────────────────────────────
+
+
+def test_effort_default_is_none(monkeypatch):
+    captured = _stub_run(monkeypatch)
+    cli.main(["-i", "", "task"])
+    assert captured["effort"] is None
+
+
+def test_effort_eq_form_parses(monkeypatch):
+    captured = _stub_run(monkeypatch)
+    cli.main(["-i", "--effort=max", "", "task"])
+    assert captured["effort"] == "max"
+
+
+def test_effort_space_form_parses(monkeypatch):
+    captured = _stub_run(monkeypatch)
+    cli.main(["-i", "--effort", "high", "", "task"])
+    assert captured["effort"] == "high"
+
+
+def test_effort_missing_value_rejected(capsys):
+    assert cli.main(["--effort"]) == 2
+    assert "--effort" in capsys.readouterr().err
+
+
+def test_effort_empty_value_rejected(capsys):
+    assert cli.main(["--effort=", "", "task"]) == 2
+    assert "--effort" in capsys.readouterr().err
+
+
+def test_effort_threads_into_resume(monkeypatch):
+    captured = _stub_resume(monkeypatch)
+    cli.main(["-i", "--effort=max", "--resume-run", "12345678-1234-1234-1234-123456789abc"])
+    assert captured["effort"] == "max"
+
+
+def test_effort_combines_with_model_and_cutoff(monkeypatch):
+    captured = _stub_run(monkeypatch)
+    cli.main(["-i", "--model=opus", "--effort=max", "--cutoff=500", "", "task"])
+    assert captured["model"] == "opus"
+    assert captured["effort"] == "max"
     assert captured["cutoff_tokens"] == 500000
     assert captured["task"] == "task"

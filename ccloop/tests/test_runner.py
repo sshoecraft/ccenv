@@ -82,6 +82,40 @@ def test_model_env_used_without_flag(project, isolated_home, fake_claude, monkey
     assert argv[argv.index("--model") + 1] == "sonnet"
 
 
+def test_build_command_effort_passthrough(tmp_path, monkeypatch):
+    monkeypatch.delenv("CCLOOP_EFFORT", raising=False)
+    cfg = runner._config()
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("the prompt")
+    cmd = runner._build_command(cfg, "sid", prompt_file=prompt_file, interactive=True)
+    assert "--effort" not in cmd
+    cfg["effort"] = "max"
+    cmd = runner._build_command(cfg, "sid", prompt_file=prompt_file, interactive=True)
+    assert cmd[cmd.index("--effort") + 1] == "max"
+
+
+def test_effort_flag_wins_over_env(project, isolated_home, fake_claude, monkeypatch):
+    monkeypatch.setenv("CCLOOP_EFFORT", "low")
+    monkeypatch.setenv("FAKE_COUNTER", str(project / "counter"))
+    monkeypatch.setenv("FAKE_DONE_AFTER", "1")
+    args_file = project / "argv.jsonl"
+    monkeypatch.setenv("FAKE_ARGS_FILE", str(args_file))
+    assert runner.cmd_run("", "task", ensure_hook=False, effort="max") == 0
+    argv = _spawned_argv(args_file)
+    assert argv[argv.index("--effort") + 1] == "max"
+
+
+def test_effort_env_used_without_flag(project, isolated_home, fake_claude, monkeypatch):
+    monkeypatch.setenv("CCLOOP_EFFORT", "low")
+    monkeypatch.setenv("FAKE_COUNTER", str(project / "counter"))
+    monkeypatch.setenv("FAKE_DONE_AFTER", "1")
+    args_file = project / "argv.jsonl"
+    monkeypatch.setenv("FAKE_ARGS_FILE", str(args_file))
+    assert runner.cmd_run("", "task", ensure_hook=False) == 0
+    argv = _spawned_argv(args_file)
+    assert argv[argv.index("--effort") + 1] == "low"
+
+
 def test_interactive_watcher_relays_when_halt_sentinel_appears(fake_claude, tmp_path, monkeypatch):
     """The watcher's only job now: relay when the keepgoing hook writes
     the halt sentinel. Pre-create it; the watcher must SIGTERM the TUI."""

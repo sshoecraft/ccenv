@@ -2,6 +2,20 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.7.0
+
+ccloop 0.10.0: added `--effort=LEVEL` CLI flag, mirroring the existing
+`--model=NAME` flag. Previously the reasoning-effort level for spawned
+`claude` sessions could only be set via the `CCLOOP_EFFORT` env var; now
+it can also be passed directly on the command line (e.g.
+`ccloop --effort=max ...`), and the flag wins over `CCLOOP_EFFORT` just
+like `--model` wins over `CCLOOP_MODEL`. Threaded through
+`cli.py` (`_extract_effort`, following the `_extract_model` pattern) into
+`runner.cmd_run`/`cmd_resume`/`loop`, which override `cfg["effort"]`
+before `_build_command` appends `--effort` to the spawned `claude`
+invocation. Added matching CLI-parsing and end-to-end (`fake_claude`
+argv-capture) tests.
+
 ## v0.6.1
 
 ccloop 0.9.1: fixed orphaned `claude` processes surviving after ccloop

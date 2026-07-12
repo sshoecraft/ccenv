@@ -6,4 +6,4 @@ session as its prompt. The loop ends when the resume file is empty,
 missing, or starts with DONE.
 """
 
-__version__ = "0.9.1"
+__version__ = "0.10.0"
