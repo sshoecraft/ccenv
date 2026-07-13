@@ -18,6 +18,7 @@ import math
 import re
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -66,6 +67,16 @@ CREATE TABLE IF NOT EXISTS mem_edges (
     dst_name  TEXT NOT NULL,
     PRIMARY KEY (src_name, dst_name)
 );
+
+CREATE TABLE IF NOT EXISTS injection_ledger (
+    session_id  TEXT    NOT NULL,
+    slug        TEXT    NOT NULL,
+    injected_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    tokens      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (session_id, slug)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_ledger_injected_at ON injection_ledger (injected_at);
 """
 
 STOP_WORDS = frozenset("""
@@ -184,8 +195,19 @@ class Store:
         else:
             self.db_path = self.memory_dir / INDEX_DB_NAME
             self._drop_legacy_index()
-        self.db = sqlite3.connect(self.db_path)
+        # isolation_level=None (autocommit) so hooks/claim_injections can issue
+        # explicit BEGIN IMMEDIATE for lock-free-until-needed writer semantics
+        # (see _write_txn). Every write path below opts into a transaction
+        # explicitly; nothing relies on sqlite3's implicit-transaction default.
+        self.db = sqlite3.connect(self.db_path, isolation_level=None)
         self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA busy_timeout = 3000")
+        self.db.execute("PRAGMA synchronous = NORMAL")
+        # journal_mode=WAL is persisted in the file itself; only touch it if
+        # it isn't already set, since changing it requires an exclusive lock
+        # that a plain read of the current mode does not.
+        if self.db.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+            self.db.execute("PRAGMA journal_mode = WAL")
         self.db.executescript(SCHEMA)
 
     def close(self):
@@ -196,6 +218,23 @@ class Store:
 
     def __exit__(self, *exc):
         self.close()
+
+    @contextmanager
+    def _write_txn(self):
+        """BEGIN IMMEDIATE / COMMIT, rolling back on any error.
+
+        BEGIN IMMEDIATE takes the single WAL writer lock up front (bounded by
+        the busy_timeout pragma above) instead of risking a deferred-read
+        transaction upgrading to a writer mid-flight under concurrent hook
+        subprocesses.
+        """
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
 
     def _drop_legacy_index(self):
         """Remove a pre-0.6.1 ``.memory_index.db`` (and its WAL/SHM/journal and
@@ -218,9 +257,13 @@ class Store:
         Returns (changed, removed, total_indexed).
         """
         seen: set[str] = set()
-        changed = 0
         existing = {row["name"]: row["content_hash"] for row in self.db.execute("SELECT name, content_hash FROM mem")}
 
+        # All filesystem I/O and parsing happens before the write lock is
+        # taken, so BEGIN IMMEDIATE below holds it only for the DB mutations
+        # themselves — concurrent hook claim_injections() calls aren't blocked
+        # for the duration of a full memory_dir walk.
+        to_upsert: list[Memory] = []
         for md in self._iter_md_files():
             mem = _parse_file(md)
             if mem is None:
@@ -228,19 +271,19 @@ class Store:
             seen.add(mem.name)
             if not force and existing.get(mem.name) == mem.content_hash:
                 continue
-            self._upsert(mem)
-            changed += 1
+            to_upsert.append(mem)
 
-        removed = 0
-        for name in list(existing):
-            if name not in seen:
+        to_remove = [name for name in existing if name not in seen]
+
+        with self._write_txn():
+            for mem in to_upsert:
+                self._upsert(mem)
+            for name in to_remove:
                 self.db.execute("DELETE FROM mem WHERE name = ?", (name,))
                 self.db.execute("DELETE FROM mem_edges WHERE src_name = ? OR dst_name = ?", (name, name))
-                removed += 1
 
-        self.db.commit()
         total = self.db.execute("SELECT COUNT(*) FROM mem").fetchone()[0]
-        return changed, removed, total
+        return len(to_upsert), len(to_remove), total
 
     def _iter_md_files(self) -> Iterator[Path]:
         # Skip MEMORY.md itself — that's a generated index, not a memory.
@@ -351,3 +394,76 @@ class Store:
             }
             for r in rows
         ]
+
+    def claim_injections(
+        self,
+        session_id: str,
+        candidates: list[dict],
+        *,
+        per_read_max: int,
+        session_max: int,
+        token_backstop: int,
+    ) -> list[dict]:
+        """Atomically claim up to ``per_read_max`` not-yet-injected candidates
+        against this session's ledger, in ranked order, honoring the
+        session-wide ``session_max`` slug count and ``token_backstop``
+        estimated-token ceiling.
+
+        Each candidate dict must carry ``name`` (the memory slug) and
+        ``line`` (the exact text that will be emitted, used for the token
+        estimate). Returns the subset actually claimed, in ranked order —
+        callers must emit only what's returned here, since a claim that
+        raises mid-transaction rolls back and grants nothing.
+
+        Raises on any DB error. Callers must treat that as fail-shut (inject
+        nothing) rather than fall back to unranked/unbounded injection.
+        """
+        claimed: list[dict] = []
+        with self._write_txn():
+            row = self.db.execute(
+                "SELECT COUNT(*), COALESCE(SUM(tokens), 0) FROM injection_ledger WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            session_count, session_tokens = row[0], row[1]
+
+            for cand in candidates:
+                if len(claimed) >= per_read_max:
+                    break
+                if session_count >= session_max or session_tokens >= token_backstop:
+                    break
+                est = max(1, -(-len(cand["line"]) // 4))  # ceil(chars / 4)
+                if session_tokens + est > token_backstop:
+                    continue
+                cur = self.db.execute(
+                    """
+                    INSERT INTO injection_ledger(session_id, slug, injected_at, tokens)
+                    VALUES (?, ?, unixepoch(), ?)
+                    ON CONFLICT(session_id, slug) DO NOTHING
+                    RETURNING slug
+                    """,
+                    (session_id, cand["name"], est),
+                )
+                if cur.fetchone() is not None:
+                    claimed.append(cand)
+                    session_count += 1
+                    session_tokens += est
+        return claimed
+
+    def reset_session_ledger(self, session_id: str) -> int:
+        """Delete all ledger rows for one session (post compact/clear — the
+        injected context is gone, so re-injection + a fresh budget are
+        correct). Returns the number of rows deleted."""
+        with self._write_txn():
+            cur = self.db.execute("DELETE FROM injection_ledger WHERE session_id = ?", (session_id,))
+            return cur.rowcount
+
+    def prune_ledger(self, max_age_days: int = 30) -> int:
+        """Delete ledger rows older than ``max_age_days``. A rolling
+        retention window, not a session-lifetime guarantee — see
+        docs/injection-ledger.md. Returns the number of rows deleted."""
+        with self._write_txn():
+            cur = self.db.execute(
+                "DELETE FROM injection_ledger WHERE injected_at < unixepoch() - ?",
+                (max_age_days * 86400,),
+            )
+            return cur.rowcount

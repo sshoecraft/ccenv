@@ -2,6 +2,20 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.9.0
+
+**ccmemory 0.12.0** — fixes unbounded context growth from the `PreToolUse:Read`
+inject hook re-surfacing the same memory teaser on every Read with no memory
+of what it had already shown (measured: 55% of one long ccloop session's
+context on `/src/aitrader`'s memory store). Adds a session-scoped injection
+ledger (atomic per-Read claim against a new `injection_ledger` table in the
+existing `index.db`), a hard per-session cap (20 unique slugs / ~4000 est.
+tokens, both env-tunable), fail-shut behavior on any ledger error or missing
+`session_id`, and ledger reset on SessionStart `compact`/`clear`. `Store` now
+runs in WAL mode. Verified this resets for free on every ccloop relay (fresh
+`session_id` per relay, never `--resume`) with no ccloop-specific code
+needed. See `ccmemory/CHANGELOG.md` v0.12.0 for full detail.
+
 ## v0.8.0
 
 New component: **ccprospect 0.1.0** — prospective memory (the FUTURE store,

@@ -1,11 +1,18 @@
 # ccenv
 
-Self-contained Claude Code env/harness. Bundles six Claude Code tooling
-projects into one installable repo, and ships an overlay system so a host
-or user can layer additional MCP servers and instructions on top without
-forking.
+**The missing operating environment for Claude Code.**
 
-## What's in here
+Claude Code is an excellent coding agent, but it has no long-term memory, no continuity between sessions, no awareness of previous work, and no built-in way to coordinate multiple instances.
+
+ccenv fills those gaps.
+
+It layers project awareness, persistent memory, prospective memory, automatic session handoff, context monitoring, and multi-agent coordination on top of Claude Code while remaining lightweight and composable.
+
+The result is a continuous AI development environment where work survives context exhaustion, sessions resume with minimal friction, and long-running projects can evolve across days, weeks, or months instead of ending when a conversation does.
+
+---
+
+## What's Included
 
 | Component   | What it does                                              | MCP name   |
 |-------------|-----------------------------------------------------------|------------|

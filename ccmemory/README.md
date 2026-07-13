@@ -94,10 +94,10 @@ Four hooks land in `~/.claude/settings.json`, each fail-open:
 
 | Event       | Matcher                  | Handler   | Purpose |
 |-------------|--------------------------|-----------|---------|
-| SessionStart| –                        | `session` | Inject memory protocol as additionalContext |
+| SessionStart| –                        | `session` | Inject memory protocol as additionalContext; reset the injection ledger on compact/clear; prune ledger rows >30d |
 | Stop        | –                        | `stop`    | Regenerate `MEMORY.md` from frontmatter |
 | PreToolUse  | `Write\|Edit\|NotebookEdit` | `guard`   | Block edits to `MEMORY.md` |
-| PreToolUse  | `Read`                   | `inject`  | Surface relevant prior memories for the file being read |
+| PreToolUse  | `Read`                   | `inject`  | Surface prior memories relevant to the file being read — at most once per memory per session, under a hard session-wide budget. See `docs/injection-ledger.md`. |
 
 Foreign hooks (e.g. ccloop's own Stop/PostToolUse entries) are preserved.
 Installer self-heals on path changes — moving the `ccmemory` binary
@@ -185,6 +185,16 @@ to re-enable regeneration.
         +-- ccmemory.compile             LLM knowledge compiler (claude -p)
 ```
 
+### Injection ledger (session-scoped Read-hook dedup + budget)
+
+The `inject` hook doesn't just fire-and-forget on every Read: it claims each
+memory it surfaces against a per-session ledger (`injection_ledger` table,
+same `index.db`), atomically, so a memory is eligible for injection at most
+once per session, under a hard session-wide cap. See
+[`docs/injection-ledger.md`](docs/injection-ledger.md) for the full design,
+including why it fails *shut* (opposite of every other hook here) and why
+`memory_get`/`memory_search` deliberately don't share the ledger.
+
 ### Why FTS5 over vector embeddings
 
 Lexical wins for code-shaped queries (error codes, function names, error
@@ -205,9 +215,12 @@ session's lesson outranks a 90-day-old one on equal text match.
 cd ccmemory && python3 -m pytest -q
 ```
 
-22 tests covering store reindex/search/recency, installer install/uninstall
+60 tests covering store reindex/search/recency, installer install/uninstall
 round-trips with foreign-hook preservation, hook handler outputs, fail-open
-behavior, and sentinel detection.
+behavior, sentinel detection, and the injection ledger (dedup — including
+against a larger candidate pool, where a repeat read surfaces fresh slugs
+rather than going silent — session/per-Read caps, fail-shut, compact/clear
+reset, prune, atomic-claim idempotency).
 
 ## Dependencies
 

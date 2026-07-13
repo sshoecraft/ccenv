@@ -81,16 +81,40 @@ def guard_handler() -> int:
     return 0
 
 
+def _teaser_line(r: dict) -> str:
+    desc = (r["description"] or "").strip().replace("\n", " ")
+    if len(desc) > 120:
+        desc = desc[:119] + "…"
+    return f"  - [{r['name']}] {desc}  (age {r['age_days']:.0f}d — get with: ccmemory get {r['name']})"
+
+
+#: Ranked candidates examined per Read before dedup/budget filtering. Fixed,
+#: not env-configurable: wide enough that claim_injections() can skip already-
+#: seen slugs without falsely concluding "nothing relevant".
+INJECT_CANDIDATE_WIDTH = 10
+
+
 def inject_handler() -> int:
-    """On Read of a project file, surface relevant prior memory inline.
+    """On Read of a project file, surface relevant prior memory inline — at
+    most once per memory per session, under a hard per-session budget.
 
     Pattern lifted from claude-mem: when about to spend tokens on a Read,
     cheaply query memory for context the model will likely want anyway.
     Outputs an additional-context payload — never denies the Read.
+
+    Fails SHUT: any error (including a missing session_id, which we need to
+    key the dedup ledger) means no injection this Read, never a fallback to
+    unranked/unbounded injection — that fallback is the exact bug this dedup
+    exists to fix. Ledger accounting lives in Store.claim_injections; see
+    docs/injection-ledger.md for the full design.
     """
     payload = _read_stdin_json()
     tool_name = payload.get("tool_name") or payload.get("toolName") or ""
     if tool_name != "Read":
+        return 0
+
+    session_id = payload.get("session_id") or ""
+    if not session_id:
         return 0
 
     tool_input = payload.get("tool_input") or payload.get("toolInput") or {}
@@ -116,21 +140,26 @@ def inject_handler() -> int:
 
     try:
         with Store(d) as store:
-            results = store.search(query, limit=int(os.environ.get("CCMEMORY_INJECT_TOP_N", "3")))
+            results = store.search(query, limit=INJECT_CANDIDATE_WIDTH)
+            if not results:
+                return 0
+            for r in results:
+                r["line"] = _teaser_line(r)
+            claimed = store.claim_injections(
+                session_id,
+                results,
+                per_read_max=int(os.environ.get("CCMEMORY_INJECT_TOP_N", "3")),
+                session_max=int(os.environ.get("CCMEMORY_INJECT_SESSION_MAX", "20")),
+                token_backstop=int(os.environ.get("CCMEMORY_INJECT_TOKEN_BACKSTOP", "4000")),
+            )
     except Exception as e:
-        sys.stderr.write(f"[ccmemory] inject query failed (fail-open): {e}\n")
+        sys.stderr.write(f"[ccmemory] inject failed (fail-shut, no injection): {e}\n")
         return 0
 
-    if not results:
+    if not claimed:
         return 0
 
-    lines = [f"ccmemory: prior lessons relevant to {p.name}:"]
-    for r in results:
-        desc = (r["description"] or "").strip().replace("\n", " ")
-        if len(desc) > 120:
-            desc = desc[:119] + "…"
-        lines.append(f"  - [{r['name']}] {desc}  (age {r['age_days']:.0f}d — get with: ccmemory get {r['name']})")
-
+    lines = [f"ccmemory: prior lessons relevant to {p.name}:"] + [r["line"] for r in claimed]
     out = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "\n".join(lines)}}
     print(json.dumps(out))
     return 0
@@ -231,17 +260,41 @@ def _compaction_nudge(memory_dir: Path) -> str:
         return ""
 
 
+#: Rolling retention window for injection_ledger rows (see Store.prune_ledger).
+#: Not a session-lifetime guarantee — a session alive longer than this could
+#: theoretically re-inject a slug — but it dwarfs a ccloop iteration (hours)
+#: and any realistic --resume gap. See docs/injection-ledger.md.
+LEDGER_RETENTION_DAYS = 30
+
+
 def session_handler() -> int:
-    """SessionStart: inject the ccmemory protocol as additionalContext.
+    """SessionStart: inject the ccmemory protocol as additionalContext, and
+    perform injection-ledger maintenance (compact/clear reset + prune).
 
     Only fires when ccmemory is actually wired up for this project (memory
     dir resolvable). Otherwise no-op so we don't pollute the system prompt
-    on projects that don't use ccmemory.
+    on projects that don't use ccmemory. Ledger maintenance is best-effort:
+    a failure there must never block the (unrelated) protocol injection.
     """
-    _read_stdin_json()
+    payload = _read_stdin_json()
     d = _autodetect_memory_dir()
     if not d:
         return 0
+
+    session_id = payload.get("session_id") or ""
+    source = payload.get("source") or ""
+    try:
+        with Store(d) as store:
+            # Post compact/clear, whatever context held the earlier teasers
+            # is gone — re-injection eligibility and the budget should reset.
+            # Moot under ccloop (fresh session_id per relay already resets
+            # this for free) but correct for interactive users who do compact.
+            if session_id and source in ("compact", "clear"):
+                store.reset_session_ledger(session_id)
+            store.prune_ledger(LEDGER_RETENTION_DAYS)
+    except Exception as e:
+        sys.stderr.write(f"[ccmemory] session ledger maintenance failed (fail-open): {e}\n")
+
     context = SESSION_PROTOCOL + _compaction_nudge(d)
     out = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}
     print(json.dumps(out))

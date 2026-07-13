@@ -2,6 +2,57 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.12.0
+
+Fixes unbounded context growth from the `PreToolUse:Read` inject hook: it
+re-surfaced the same memory teaser on every Read with no memory of what it
+had already shown, permanently bloating the transcript (measured: 55% of one
+long ccloop session's context on `/src/aitrader`'s 79-memory store; 9 related
+Reads in a separate session re-injected 2 memories 5x each).
+
+Adds a session-scoped **injection ledger**: a new `injection_ledger` table in
+the existing `index.db`, claimed atomically per Read via `INSERT ... ON
+CONFLICT DO NOTHING RETURNING` inside a `BEGIN IMMEDIATE` transaction
+(`Store.claim_injections`). `inject_handler` now searches a wider candidate
+set (10) and emits only what it successfully claims — at most
+`CCMEMORY_INJECT_TOP_N` (default 3) per Read, capped session-wide at
+`CCMEMORY_INJECT_SESSION_MAX` unique slugs (default 20) and
+`CCMEMORY_INJECT_TOKEN_BACKSTOP` estimated tokens (default 4000). A missing
+`session_id` or any ledger error fails **shut** (no injection at all) rather
+than falling back to the unbounded behavior being fixed.
+
+`session_handler` (SessionStart) now resets a session's ledger rows when
+`source` is `compact` or `clear` (the injected context is gone by then, so
+re-injection is correct), and prunes ledger rows older than 30 days — a
+rolling retention window, not a session-lifetime guarantee, since nothing
+reliably signals a session can no longer be resumed.
+
+`Store` now opens with `isolation_level=None` and sets `journal_mode=WAL` /
+`busy_timeout=3000` / `synchronous=NORMAL`, so concurrent hook subprocesses
+claiming against the same `index.db` serialize on the WAL writer lock
+instead of racing a read-modify-write. `reindex()` now computes its upsert/
+delete sets before opening the write transaction, so the lock is held only
+for the DB mutations, not the full memory_dir filesystem walk.
+
+Deliberately out of scope: unifying `memory_get`/`memory_search` into the
+same ledger. The MCP `initialize` handshake and tool calls carry no session
+identity (only hooks receive `session_id`, via stdin), so there is no correct
+way to attribute an MCP tool call to a hook's ledger — this is a protocol
+gap, not a deferred nice-to-have. Revisit only if Claude Code ever exposes
+session identity to MCP servers.
+
+Verified against ccloop: each relay mints a fresh `session_id` (`--session-id`,
+never `--resume`), so the ledger resets for free on every relay with no
+ccloop-specific code. ccloop also sets `DISABLE_AUTO_COMPACT=1`, meaning
+nothing reclaims wasted context until the hard wall — which is exactly why
+the session-wide cap matters more there than in an interactive session.
+
+New tests (9): cross-Read dedup, cross-file dedup, dedup against a larger
+candidate pool (a repeat read surfaces fresh slugs rather than going silent
+— confirmed live against the real aitrader store), per-session cap, per-Read
+cap, fail-shut on missing session_id, compact/clear reset, prune retention,
+and atomic-claim idempotency. 60 tests total, all green.
+
 ## v0.11.0
 
 Memory anchors to the directory Claude Code was started in (CWD) — nothing
