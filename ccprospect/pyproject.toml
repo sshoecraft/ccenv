@@ -1,0 +1,46 @@
+[project]
+name = "ccprospect"
+version = "0.1.0"
+description = "Prospective memory for Claude Code: immutable file-backed intention/forecast contracts + append-only event log + evaluate-on-wake predicates + enforcement hooks + MCP server"
+readme = {text = "See README.md and docs/ccprospect.md for design notes and architecture.", content-type = "text/plain"}
+requires-python = ">=3.9"
+authors = [{name = "Steve Shoecraft", email = "spshoecraft@gmail.com"}]
+license = {text = "MIT"}
+keywords = ["claude-code", "mcp", "prospective-memory", "intentions", "forecasts"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+]
+
+[project.scripts]
+ccprospect = "ccprospect.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ccprospect*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

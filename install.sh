@@ -6,6 +6,7 @@
 #   gitsync     — SessionStart hook that warns when the repo is out of sync with GitHub
 #   ccenvmcp    — stdlib-only MCP shim (foundation; lets the MCP servers run on Python 3.9)
 #   ccmemory    — persistent memory MCP server + hooks  (MCP name: ccmemory)
+#   ccprospect  — prospective memory (future intentions/forecasts) MCP server + hooks  (MCP name: ccprospect)
 #   ccusage     — context/rate-limit usage MCP + statusline  (MCP name: ccusage)
 #   ccloop     — relay-loop wrapper that hands work between sessions
 #   ccteam      — multi-instance coordination via NATS (MCP name: ccteam)
@@ -61,14 +62,14 @@ CLAUDE_MD_OVERLAY_DIRS=(
 
 # Core subdirs in $SCRIPT_DIR — skipped during overlay scan of the script dir
 # (they're already handled explicitly above).
-CORE_SUBDIRS=(ccenvmcp ccloop ccmemory ccusage ccproject ccteam)
+CORE_SUBDIRS=(ccenvmcp ccloop ccmemory ccprospect ccusage ccproject ccteam)
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip) SKIP+=("$2"); shift 2 ;;
         --only) ONLY+=("$2"); shift 2 ;;
         --no-overlays) DO_OVERLAYS=0; shift ;;
-        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
         *) echo "unknown flag: $1" >&2; exit 1 ;;
     esac
 done
@@ -605,15 +606,16 @@ assemble_ccenv_base_claude_md
 ensure_build_toolchain
 
 # ----------------------------------------------------------------------------
-# Foundation: ccenvmcp — the stdlib-only MCP shim that ccmemory, ccusage, and
-# ccteam import in place of the official `mcp` SDK (which requires Python
-# 3.10+). It MUST be installed before them. It is deliberately NOT a declared
-# dependency of those packages (this repo installs from local source, never
-# PyPI, so a declared dep would trigger a failing PyPI lookup) — install
-# ordering is what guarantees it is importable from the shared --user site.
+# Foundation: ccenvmcp — the stdlib-only MCP shim that ccmemory, ccprospect,
+# ccusage, and ccteam import in place of the official `mcp` SDK (which
+# requires Python 3.10+). It MUST be installed before them. It is deliberately
+# NOT a declared dependency of those packages (this repo installs from local
+# source, never PyPI, so a declared dep would trigger a failing PyPI lookup) —
+# install ordering is what guarantees it is importable from the shared
+# --user site.
 # ----------------------------------------------------------------------------
-if should_install ccmemory || should_install ccusage || should_install ccteam; then
-    step ccenvmcp "pip install --user (MCP shim for ccmemory/ccusage/ccteam)"
+if should_install ccmemory || should_install ccprospect || should_install ccusage || should_install ccteam; then
+    step ccenvmcp "pip install --user (MCP shim for ccmemory/ccprospect/ccusage/ccteam)"
     pip_install_local "$SCRIPT_DIR/ccenvmcp"
 fi
 
@@ -722,6 +724,38 @@ if should_install ccmemory; then
     mkdir -p "$CCMEM_SKILL_DIR"
     cp "$SCRIPT_DIR/ccmemory/skills/compile-memories/SKILL.md" "$CCMEM_SKILL_DIR/SKILL.md"
     info "installed $CCMEM_SKILL_DIR/SKILL.md"
+fi
+
+# ----------------------------------------------------------------------------
+# Core: ccprospect — MCP name: ccprospect
+# ----------------------------------------------------------------------------
+if should_install ccprospect; then
+    step ccprospect "pip install --user + register MCP 'ccprospect'"
+    pip_install_local "$SCRIPT_DIR/ccprospect"
+    register_mcp ccprospect "$(resolve_cmd ccprospect)" mcp
+    # NO alwaysLoad here (unlike ccmemory/ccteam): the required wake-time work
+    # — evaluating predicates and injecting the inbox — is done by the
+    # SessionStart HOOK, a console script independent of MCP registration.
+    # The prospect_* MCP tools are only needed once the model ACTS on the
+    # inbox, and loading them lazily through ToolSearch is fine; gating
+    # session startup on another server would buy nothing.
+
+    # Register hooks now (normally autoinstalled on first MCP boot, but doing
+    # it here means the very first session already gets the SessionStart
+    # inbox, and it heals hook paths stale from a relocated install).
+    if command -v ccprospect >/dev/null 2>&1; then
+        info "refreshing ccprospect hook registrations (heals stale paths)"
+        ccprospect install 2>&1 | sed 's/^/  /' || warn "ccprospect install failed (non-fatal)"
+    fi
+
+    # Install the prospect-integrate skill: wires a project's binding surface
+    # (project CLAUDE.md / ccloop criteria file / custom-loop constitution
+    # source) to the PROSPECT INBOX with the forced-step grammar, so loops
+    # ACT on fired prospects instead of merely seeing the injection.
+    CCPROSPECT_SKILL_DIR="$HOME/.claude/skills/prospect-integrate"
+    mkdir -p "$CCPROSPECT_SKILL_DIR"
+    cp "$SCRIPT_DIR/ccprospect/skills/prospect-integrate/SKILL.md" "$CCPROSPECT_SKILL_DIR/SKILL.md"
+    info "installed $CCPROSPECT_SKILL_DIR/SKILL.md"
 fi
 
 # ----------------------------------------------------------------------------
@@ -897,7 +931,7 @@ if [ -n "$USER_BIN" ]; then
     info "user-bin: $USER_BIN"
 fi
 
-for cmd in ccmemory ccusage-mcp ccusage-statusline ccloop ccteam ccteam-mcp; do
+for cmd in ccmemory ccprospect ccusage-mcp ccusage-statusline ccloop ccteam ccteam-mcp; do
     resolved=$(command -v "$cmd" 2>/dev/null)
     if [ -n "$resolved" ]; then
         info "OK       $cmd -> $resolved"

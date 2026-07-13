@@ -1,6 +1,6 @@
 # ccenv
 
-Self-contained Claude Code env/harness. Bundles five Claude Code tooling
+Self-contained Claude Code env/harness. Bundles six Claude Code tooling
 projects into one installable repo, and ships an overlay system so a host
 or user can layer additional MCP servers and instructions on top without
 forking.
@@ -11,6 +11,7 @@ forking.
 |-------------|-----------------------------------------------------------|------------|
 | `ccproject` | Three-layer project awareness skill (constitution → subsystem docs → structural map) + global `~/.claude/CLAUDE.md` snippet | — |
 | `ccmemory`  | Persistent file-backed memory with FTS5 index, autoinstalled hooks, MCP server | `ccmemory` |
+| `ccprospect` | Prospective memory: immutable intention/forecast contracts with typed predicates, evaluated at wake boundaries into an inbox; autoinstalled hooks, MCP server | `ccprospect` |
 | `ccusage`   | Real-time context-window + rate-limit usage as an MCP tool and statusline | `ccusage` |
 | `ccloop`    | Relay-loop wrapper that hands work between fresh Claude Code sessions as context fills | — |
 | `ccteam`    | Multi-instance coordination layer (filesystem replication via NATS JetStream, file-level locking, MCP tools + hooks) | `ccteam` |

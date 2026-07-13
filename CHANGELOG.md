@@ -2,6 +2,50 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.8.0
+
+New component: **ccprospect 0.1.0** — prospective memory (the FUTURE store,
+sibling of ccmemory's TIMELESS store), implementing Part IV of the design
+archived in `prospect.md` / `prospective-memory-ledger-design.md`.
+
+Immutable intention/forecast contracts (`.ccprospect/contracts/*.md`, YAML
+frontmatter) + an append-only `events.jsonl`; all state (attention ×
+resolution) is derived by folding the log, so outcomes cannot be rewritten.
+Typed predicates v1 (`at`, `session_start`, `path_exists`, `path_changed`,
+`cmd_ok`, `cmd_fail`, `cmd_match`) are evaluated at wake boundaries — the
+SessionStart hook injects a PROSPECT INBOX of fired/due items with
+mechanically observed values; no daemon. Creation refuses already-true
+predicates (probes baseline once at creation), enforces attention budgets
+(~20 active, 8/day, env-tunable), and is gated while fired items sit
+unacknowledged. `prospect_amend` supersedes; cancelled/superseded contracts
+still resolve counterfactually at their original expiry (final evaluation at
+the boundary). Optional `expect` + probability bucket (20/40/60/80) upgrade
+an intention to a forecast feeding the factual `prospect_report`
+(denominators always; no adjectives, thresholds, or advice). MCP tools:
+prospect_file/inbox/ack/amend/list/get/report; hooks (SessionStart evaluate+
+inject, Stop PROSPECT.md regen, PreToolUse guard on contracts/ +
+events.jsonl + PROSPECT.md) autoinstall on MCP boot. 72 tests plus an
+end-to-end stdio MCP drive.
+
+install.sh: ccprospect added to core components (pip install, MCP register —
+deliberately without alwaysLoad since the SessionStart hook does the
+wake-time work independently of MCP; hooks registered at install so the
+first session already gets the inbox), added to the ccenvmcp foundation
+gate, CORE_SUBDIRS, and the verify loop.
+
+Also ships the `prospect-integrate` skill (installed to
+`~/.claude/skills/prospect-integrate/`, ccmemory/compile-memories pattern):
+one-time per-project wiring of the inbox binding. Deterministic decision
+tree — interactive projects get a short managed block in project CLAUDE.md;
+ccloop projects get the forced-step block (NOT-DONE grammar,
+`pending_count == 0` completion, NO_CONTRACT always legal) in the criteria
+file; custom-loop projects (own constitution) are never guessed at: the
+skill locates the prompt artifact via project docs/memory, confirms the
+target with the user, and for built constitutions produces a diff against
+the source rather than editing a generated file. The decision is recorded in
+`.ccprospect/integration.json` (committed with the repo) so re-runs refresh
+the managed block in place.
+
 ## v0.7.0
 
 ccloop 0.10.0: added `--effort=LEVEL` CLI flag, mirroring the existing
