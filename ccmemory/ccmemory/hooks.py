@@ -202,13 +202,21 @@ Two distinct failures, and only one of them announces itself:
 - **`mcp__ccmemory__memory_list` is not in your tool list at all** — the
   server never registered. This does NOT surface as an error; the tool is
   simply absent, which is indistinguishable from a project that has no
-  ccmemory. Call `ToolSearch("select:mcp__ccmemory__memory_list")` once to
-  try to pull in a late-connecting server.
+  ccmemory. IF, and only if, a `ToolSearch` tool is in your tool list,
+  call it once with `select:mcp__ccmemory__memory_list` to try to pull in
+  a late-connecting server.
 
-If the tool is still unavailable after that, STOP and tell the user that
-ccmemory did not load. Do not proceed silently: with no memory access,
-every "there is no prior memory on this" conclusion you reach for the
-rest of the session is false, and it will read like a clean session.
+`ToolSearch` is itself frequently absent — it exists only when the harness
+has tool-search enabled. If it is not in your tool list, SKIP that step
+entirely. Do not go looking for `ToolSearch`, and do not run shell
+commands hunting for it or for the ccmemory tools: there is no shell path
+to an MCP tool, and nothing you run in bash can register one.
+
+Then, by whichever branch: if `memory_list` is still unavailable, STOP and
+tell the user plainly that ccmemory did not load. Do not proceed silently
+— with no memory access, every "there is no prior memory on this"
+conclusion you reach for the rest of the session is false, and it will
+read like a clean session.
 
 ## Recalling prior context — pick the right tool
 

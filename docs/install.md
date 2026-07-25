@@ -71,40 +71,66 @@ build toolchain) are warned and non-fatal.
 `python-tag` is informational only — `heal_stale_compiled_exts` decides what to
 reinstall from the on-disk `.so` ABI tags, so it works even with no prior marker.
 
-## MCP `alwaysLoad` — block startup until ccmemory connects (v0.6.0)
+## MCP `alwaysLoad` — set v0.6.0, REMOVED v0.13.2
 
-Claude Code loads MCP servers **non-blocking by default**: with tool-search on
-(the default) a server's tools are *deferred* behind `ToolSearch` and the server
-connects in the background, so the model's first turn can start before the tools
-register. In a ccloop TUI session that races the session's required first action
-— ccmemory's `memory_list()` — which then silently runs without its tools.
+`install.sh` used to mark ccmemory's user-scoped entry `alwaysLoad: true`.
+`strip_always_load()` now actively removes that field instead. It strips rather
+than merely stops setting, because every box installed between v0.6.0 and
+v0.13.1 already carries the flag in `~/.claude.json` — dropping the call alone
+would have healed nothing.
 
-`enable_always_load <name>` marks a user-scoped server `alwaysLoad: true`, which
-makes Claude load it eagerly (never deferred) and **block session startup until it
-connects** (~5s/server cap). It is claude-native, so it works in the TUI and
-headless alike — no ccloop code, no dependence on the model obeying a prompt.
-Mechanics and constraints:
+### Why it went
 
-- There is **no `claude mcp add` flag** for it — `alwaysLoad` is a field on the
-  server's JSON entry — so the helper re-registers via `claude mcp add-json`,
-  carrying the entry's existing `command`/`args`/`env` untouched and only adding
-  the flag. `add-json` refuses to overwrite, so it does `remove` + `add-json`,
-  the same heal pattern as `register_mcp` (claude's JSONC editor keeps the rest
-  of `~/.claude.json` intact).
-- It reads `~/.claude.json` to check the current value, because `claude mcp get`
-  does **not** surface `alwaysLoad`. Idempotent: a no-op once the flag is set.
-- It runs **after** `register_mcp`, so a heal-triggered re-register (which drops
-  the flag) gets it re-applied in the same install.
-- Only **ccmemory** is marked — the one server a session depends on at turn 1.
-  (`ccteam` was also marked until it left the bundle in v0.13.0.) `ask_*` stay
-  deferred so their tool schemas don't cost prompt tokens on every turn; the 3 `claude.ai` HTTP servers show `Needs authentication` and
-  can't connect unattended regardless.
+**It never did what its name says.** Decompiled from binary 2.1.219,
+`alwaysLoad` splits servers into two tiers launched in one `Promise.all`. The
+flagged tier gets a *shared* 5000 ms deadline (`MCP_CONNECT_TIMEOUT_MS`), and
+on expiry Claude Code starts the session anyway:
+
+```
+[MCP] regular-required: N/M not ready after 5000ms — proceeding; background connection continues
+```
+
+A deadline, not a barrier. So it never guaranteed the tools were present, which
+was the whole reason for setting it.
+
+**And on non-Anthropic models it removed them entirely.** Measured on a box
+running Claude Code against `google/gemma-4-26B-A4B-it` through an
+OpenAI-compatible proxy (visible as `chatcmpl-` tool-use IDs):
+
+| Server | `alwaysLoad` | Outcome over 172 sessions / 3 weeks |
+|--------|--------------|--------------------------------------|
+| broker, journal, scheduler, searxng | unset | 353-495 successful calls each |
+| ccusage | unset | used in 16 sessions, 0 rejections |
+| **ccmemory** | **true** | **0 successful `memory_list` calls, ever** |
+
+ccusage is the control that settles it: same bundle, same installer, same box,
+same proxy, same session — the only difference is the flag, and it worked.
+
+The ccmemory tools were not deferred behind `ToolSearch` either; no
+deferred-tool system-reminder ever named them. They were simply absent from the
+model's tool surface, while the server itself was demonstrably healthy
+(`claude mcp list` reported ✔ Connected; the MCP handshake measured 0.18 s).
+
+So: upside is a best-effort 5 s wait that guarantees nothing; downside is total
+tool loss on an entire class of setup. Removed.
+
+### What replaces it
+
+Nothing, at the installer level. ccmemory's `SESSION_PROTOCOL` already carries
+the software fallback — a call that *errors* means retry; a tool that is
+*absent* means stop and tell the user rather than proceed as though the project
+has no memory. A project that genuinely needs the tools present at turn 1 should
+assert that in its own startup steps, where it can be checked and reported,
+rather than relying on a flag that quietly proceeds degraded.
 
 ## History
 
-- **v0.6.0** — `enable_always_load()`: mark ccmemory (and, then, ccteam) `alwaysLoad: true`
-  so Claude Code blocks session startup until they connect (fixes the model
-  starting work before its MCP tools register in ccloop TUI sessions).
+- **v0.13.2** — `strip_always_load()` replaces `enable_always_load()`: the flag
+  is now actively removed from existing registrations. It was a 5 s deadline
+  that proceeded degraded rather than a barrier, and it cost ccmemory its
+  entire tool surface on non-Anthropic-model setups.
+- **v0.6.0** — `enable_always_load()`: mark ccmemory (and, then, ccteam)
+  `alwaysLoad: true`. Removed in v0.13.2, see above.
 - **v0.1.5** — added `heal_stale_compiled_exts()` and the `python-tag` marker;
   fixes ccteam failing after a Python version bump (`watchfiles._rust_notify`).
 - **v0.1.4** — auto-append `PYTHONUSERBASE` + a runtime-guarded `~/.local/bin`

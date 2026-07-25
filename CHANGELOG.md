@@ -2,6 +2,60 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.13.2
+
+**`alwaysLoad` is removed.** `install.sh` set it on ccmemory from v0.6.0; it now
+strips the field instead. `strip_always_load()` replaces `enable_always_load()`
+and must actively rewrite the entry, not merely stop setting it — every box
+installed since v0.6.0 already carries `"alwaysLoad": true` in `~/.claude.json`,
+so dropping the call alone would have healed nothing.
+
+Two independent reasons:
+
+**It was never a barrier.** Decompiled from 2.1.219, the flag splits servers
+into two tiers launched in one `Promise.all`; the flagged tier gets a shared
+5000 ms deadline and on expiry Claude Code starts the session anyway
+(`... not ready after 5000ms — proceeding; background connection continues`).
+It never guaranteed the tools were registered, which was the entire point of
+setting it. This was already known and recorded — it was not acted on.
+
+**On non-Anthropic models it removed the tools entirely.** Measured on a box
+running Claude Code against `google/gemma-4-26B-A4B-it` via an
+OpenAI-compatible proxy, over 172 sessions and three weeks:
+
+- ccmemory (`alwaysLoad: true`) — **0** successful `memory_list` calls, ever;
+  122 transcripts carrying `No such tool available: mcp__ccmemory__memory_list`
+- ccusage (same bundle, same installer, same box, flag unset) — used in 16
+  sessions, **0** rejections
+- broker / journal / scheduler / searxng (flag unset) — 353-495 calls each
+
+The tools were not deferred behind `ToolSearch`; no deferred-tool reminder ever
+named them. They were absent from the tool surface while the server itself was
+healthy — `claude mcp list` showed ✔ Connected and the handshake measured
+0.18 s. The SessionStart hook fired normally, which is why the model knew the
+tool's name from the injected protocol text and called a tool it had never been
+offered.
+
+Upside: a best-effort 5 s wait that guarantees nothing. Downside: total tool
+loss on a whole class of setup. Nothing replaces it at the installer level —
+ccmemory's `SESSION_PROTOCOL` already handles an absent tool by stopping and
+telling the user, and a project needing the tools at turn 1 should assert that
+in its own startup steps where it can be checked and reported.
+
+## v0.13.1
+
+ccmemory v0.13.1: the "what to do when `memory_list` is unavailable" guidance
+added in v0.13.0 told the model to call `ToolSearch` — a tool that only exists
+when the harness has tool-search enabled, and so is frequently absent itself.
+A model that correctly detected the missing `memory_list` then dead-ended
+hunting for the tool with which to find a tool; one observed session spent a
+turn running `bash` with its own reasoning pasted in as comments.
+
+The step is now explicitly conditional, its absence is called out as normal
+with an instruction to skip rather than search, shell hunting for MCP tools is
+forbidden outright, and the terminal stop-and-tell-the-user state is reachable
+from either branch.
+
 ## v0.13.0
 
 **Breaking: three components leave the bundle.** `ccprospect` and `ccinsight`

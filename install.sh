@@ -177,21 +177,38 @@ register_mcp() {
     fi
 }
 
-# Mark a user-scoped MCP server alwaysLoad:true so Claude Code BLOCKS session
-# startup until it connects (~5s/server cap) and never defers its tools behind
-# ToolSearch. MCP startup is otherwise non-blocking: the model's first turn can
-# begin while ccmemory is still connecting in the background, so a session's
-# required first action (ccmemory's memory_list) silently misses the tools.
-# There is no `claude mcp add` flag
-# for this — alwaysLoad is a field on the server's JSON entry — so we re-register
-# through `claude mcp add-json` (claude's own atomic writer, safe under
-# concurrent sessions), carrying the entry's existing command/args/env untouched
-# and only adding alwaysLoad. Idempotent: a no-op once the flag is set. Must run
-# AFTER register_mcp so a heal-triggered re-register (which drops the flag) gets
-# it re-applied in the same install. Reads ~/.claude.json to check the current
-# value (`claude mcp get` does not surface alwaysLoad) and to preserve the entry.
+# Strip alwaysLoad from a user-scoped MCP server's ~/.claude.json entry.
+#
+# ccenv used to SET this flag on ccmemory (v0.6.0 - v0.13.1). It is removed
+# because it was never worth what it cost:
+#
+# - It does not do what its name says. Decompiled from 2.1.219, alwaysLoad
+#   splits servers into two tiers launched in one Promise.all; the flagged
+#   tier gets a shared 5000ms deadline and on expiry Claude Code STARTS THE
+#   SESSION ANYWAY ("proceeding; background connection continues"). It is a
+#   deadline, not a barrier, so it never actually guaranteed the tools were
+#   there — which was the entire reason for setting it.
+# - On Claude Code driving a NON-Anthropic model through an OpenAI-compatible
+#   proxy, the flagged tier's tools do not reach the model's tool surface at
+#   all. Measured on a gemma-4-26B trading box: ccmemory (the only flagged
+#   server) had 0 successful memory_list calls across 172 sessions spanning
+#   three weeks, while ccusage — same bundle, same installer, same box, flag
+#   unset — was called in 16 sessions and never once rejected. The tools were
+#   not deferred behind ToolSearch either; no deferred-tool reminder ever
+#   named them. They were simply absent.
+#
+# So the flag's upside is a best-effort 5s wait, and its downside is total
+# tool loss on an entire class of setup. Not a trade worth making.
+#
+# This function must STRIP the flag rather than merely stop setting it: every
+# box installed since v0.6.0 already carries "alwaysLoad": true in
+# ~/.claude.json, and dropping the call alone would leave them all broken.
+# Reads ~/.claude.json directly because `claude mcp get` does not surface the
+# field. Rewrites through `claude mcp add-json` (claude's own atomic writer,
+# safe under concurrent sessions) carrying command/args/env untouched.
+# Idempotent: a no-op once the flag is gone.
 # Args: name
-enable_always_load() {
+strip_always_load() {
     local name="$1"
     [ "$HAS_CLAUDE" = "1" ] || return 0
     local merged rc=0
@@ -207,27 +224,26 @@ except (OSError, ValueError):
 entry = (data.get("mcpServers") or {}).get(name)
 if not isinstance(entry, dict):
     sys.exit(4)                       # not registered at user scope
-if entry.get("alwaysLoad") is True:
-    sys.exit(0)                       # already set — nothing to do
-out = dict(entry)
-out["alwaysLoad"] = True
+if "alwaysLoad" not in entry:
+    sys.exit(0)                       # already clean — nothing to do
+out = {k: v for k, v in entry.items() if k != "alwaysLoad"}
 print(json.dumps(out))
 sys.exit(10)                          # needs update; merged JSON on stdout
 PY
     ) || rc=$?
     case "$rc" in
-        0)  info "MCP $name alwaysLoad already set" ;;
+        0)  ;;                        # already clean — stay quiet
         10) # add-json refuses to overwrite an existing entry, so drop and
-            # re-add carrying alwaysLoad — the same heal pattern register_mcp
+            # re-add without the flag — the same heal pattern register_mcp
             # uses. claude's JSONC editor keeps the rest of the file intact.
             claude mcp remove -s user "$name" >/dev/null 2>&1 || true
             if claude mcp add-json -s user "$name" "$merged" >/dev/null 2>&1; then
-                info "MCP $name marked alwaysLoad — Claude blocks startup until it connects"
+                info "MCP $name: removed legacy alwaysLoad flag"
             else
-                warn "failed to set alwaysLoad on MCP $name (re-run install, or add \"alwaysLoad\": true to its ~/.claude.json entry)"
+                warn "failed to strip alwaysLoad from MCP $name (re-run install, or delete the \"alwaysLoad\" key from its ~/.claude.json entry)"
             fi ;;
-        4)  warn "MCP $name not registered at user scope — skipping alwaysLoad" ;;
-        *)  warn "could not read ~/.claude.json to set alwaysLoad on $name" ;;
+        4)  ;;                        # not registered — nothing to strip
+        *)  warn "could not read ~/.claude.json to check alwaysLoad on $name" ;;
     esac
 }
 
@@ -717,10 +733,9 @@ if should_install ccmemory; then
     step ccmemory "pip install --user + register MCP 'ccmemory'"
     pip_install_local "$SCRIPT_DIR/ccmemory"
     register_mcp ccmemory "$(resolve_cmd ccmemory)" mcp
-    # Block session startup until ccmemory connects — every session's required
-    # first action is memory_list(), which silently no-ops if the tools aren't
-    # registered yet (MCP startup is non-blocking by default).
-    enable_always_load ccmemory
+    # Heal boxes installed between v0.6.0 and v0.13.1, which carry a legacy
+    # "alwaysLoad": true on this entry. See strip_always_load for why it goes.
+    strip_always_load ccmemory
 
     # Install the compile-memories skill. Compaction runs in the interactive
     # session (no claude -p / no metered Agent-SDK credit); the skill carries

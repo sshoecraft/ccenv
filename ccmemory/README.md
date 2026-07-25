@@ -131,9 +131,25 @@ So the protocol distinguishes the two cases: a call that *errors* → retry
 `ToolSearch("select:mcp__ccmemory__memory_list")` to pull in a
 late-connecting server, then STOP and tell the user rather than proceed.
 
-Only ccmemory is gated this way. ccmemory and ccteam carry `alwaysLoad`
-(set by the top-level `install.sh`); ccprospect and ccinsight are left
-deferred on purpose — their wake-time work is not turn-1 work.
+That `ToolSearch` step is conditional, and v0.13.1 says so explicitly.
+`ToolSearch` exists only when the harness has tool-search enabled, so a
+model on a session without it would otherwise dead-end hunting for a tool
+with which to find a tool — observed in the wild, including one model that
+burned a turn running `bash` to look for it. There is no shell path to an
+MCP tool. If `ToolSearch` is absent, the step is skipped and the protocol
+goes straight to STOP-and-tell-the-user.
+
+ccmemory is the only server gated this way, and the software fallback is now
+all there is. The top-level `install.sh` used to also mark its entry
+`alwaysLoad: true`; as of ccenv v0.13.2 it strips that flag instead.
+
+`alwaysLoad` was a shared 5000 ms deadline, not a barrier — on expiry Claude
+Code starts the session anyway — so it never guaranteed the tools were there.
+Worse, on Claude Code driving a non-Anthropic model through an
+OpenAI-compatible proxy, the flagged tier's tools never reached the model's
+tool surface at all: measured 0 successful `memory_list` calls across 172
+sessions, while ccusage (same bundle, flag unset) worked throughout. See
+`docs/install.md` in the bundle for the full measurement.
 
 ## Memory file format
 

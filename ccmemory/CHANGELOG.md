@@ -2,6 +2,34 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.13.1
+
+The v0.13.0 remedy for a missing `memory_list` assumed a tool that is
+frequently missing itself.
+
+It said, as a bare imperative, "Call `ToolSearch("select:...")` once to try to
+pull in a late-connecting server." But `ToolSearch` exists only when the
+harness has tool-search enabled. On a session without it, a model that
+correctly detected the absent `memory_list` then dead-ended hunting for the
+tool with which to find a tool. Observed in the wild on a gemma-4-26B session:
+it looked for `ToolSearch`, did not find it, re-read its tool list, and burned
+a turn on a `bash` call whose body was its own reasoning pasted in as comments.
+
+v0.13.0 did close the hole it was aimed at — the model noticed and said so
+instead of silently proceeding as if the project had no memory. But it turned
+"silently wrong" into "visibly stuck," which is better and still not right.
+
+Now:
+
+- The `ToolSearch` step is explicitly conditional — "IF, and only if, a
+  `ToolSearch` tool is in your tool list."
+- Its absence is called out as normal, with an explicit instruction to SKIP
+  rather than search for it.
+- Shell hunting is forbidden outright: there is no shell path to an MCP tool,
+  and nothing run in bash can register one.
+- The terminal STOP-and-tell-the-user state is reachable from either branch,
+  not only from the branch that ran `ToolSearch`.
+
 ## v0.13.0
 
 `SESSION_PROTOCOL` now tells the model what to do when `memory_list` is
