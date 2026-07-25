@@ -191,6 +191,25 @@ mistakes the user already corrected.
 After that initial memory_list, use the decision rules below for the
 rest of the session.
 
+### If memory_list is not available
+
+MCP servers connect in the background while the session starts, so the
+ccmemory tools are not guaranteed to be registered by your first turn.
+Two distinct failures, and only one of them announces itself:
+
+- **The call fails or errors** — the server is up but not answering yet.
+  Retry up to 3 times before continuing.
+- **`mcp__ccmemory__memory_list` is not in your tool list at all** — the
+  server never registered. This does NOT surface as an error; the tool is
+  simply absent, which is indistinguishable from a project that has no
+  ccmemory. Call `ToolSearch("select:mcp__ccmemory__memory_list")` once to
+  try to pull in a late-connecting server.
+
+If the tool is still unavailable after that, STOP and tell the user that
+ccmemory did not load. Do not proceed silently: with no memory access,
+every "there is no prior memory on this" conclusion you reach for the
+rest of the session is false, and it will read like a clean session.
+
 ## Recalling prior context — pick the right tool
 
 Three tools, three different shapes of question. Picking the wrong one

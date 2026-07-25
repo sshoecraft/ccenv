@@ -6,7 +6,7 @@ Claude Code is an excellent coding agent, but it has no long-term memory, no con
 
 ccenv fills those gaps.
 
-It layers project awareness, persistent memory, prospective memory, automatic session handoff, context monitoring, and multi-agent coordination on top of Claude Code while remaining lightweight and composable.
+It layers project awareness, persistent memory, automatic session handoff, and context monitoring on top of Claude Code while remaining lightweight and composable.
 
 The result is a continuous AI development environment where work survives context exhaustion, sessions resume with minimal friction, and long-running projects can evolve across days, weeks, or months instead of ending when a conversation does.
 
@@ -18,15 +18,28 @@ The result is a continuous AI development environment where work survives contex
 |-------------|-----------------------------------------------------------|------------|
 | `ccproject` | Three-layer project awareness skill (constitution → subsystem docs → structural map) + global `~/.claude/CLAUDE.md` snippet | — |
 | `ccmemory`  | Persistent file-backed memory with FTS5 index, autoinstalled hooks, MCP server | `ccmemory` |
-| `ccprospect` | Prospective memory: immutable intention/forecast contracts with typed predicates, evaluated at wake boundaries into an inbox; autoinstalled hooks, MCP server | `ccprospect` |
 | `ccusage`   | Real-time context-window + rate-limit usage as an MCP tool and statusline | `ccusage` |
 | `ccloop`    | Relay-loop wrapper that hands work between fresh Claude Code sessions as context fills | — |
-| `ccteam`    | Multi-instance coordination layer (filesystem replication via NATS JetStream, file-level locking, MCP tools + hooks) | `ccteam` |
 
 Each component still lives in its own subdirectory and has its own
 `README.md`, `pyproject.toml`, and tests. Top-level `install.sh`
 delegates to each component's own installer where one exists, and falls
 back to `pip3 install --user <path>` (non-editable) for the rest.
+
+### Removed in v0.13.0
+
+Three components are gone from the bundle:
+
+| Component    | Status                          |
+|--------------|---------------------------------|
+| `ccprospect` | Retired                         |
+| `ccinsight`  | Retired                         |
+| `ccteam`     | Moved to its own repository     |
+
+They installed hooks, MCP servers, skills and per-project state, and none
+of that is removed by installing a newer version over the top — an
+install only ever adds. **If you ran any earlier version of ccenv, run
+`./uninstall.sh` before `./install.sh`** (see [Upgrading](#upgrading)).
 
 ## Install
 
@@ -39,7 +52,7 @@ cd ccenv
 Per-component options:
 
 ```sh
-./install.sh --skip ccteam        # skip a component (repeatable)
+./install.sh --skip ccloop        # skip a component (repeatable)
 ./install.sh --only ccmemory      # install only listed components (repeatable)
 ./install.sh --no-overlays        # skip the overlay scan
 ./install.sh -h                   # full help
@@ -49,6 +62,42 @@ Re-running is idempotent. Each sub-installer checks its own state; MCP
 registrations use `claude mcp get <name>` to detect prior installs;
 `~/.claude/CLAUDE.md` overlay blocks are stripped and re-applied so stale
 content self-heals.
+
+## Upgrading
+
+**From any earlier version, uninstall first:**
+
+```sh
+git pull
+./uninstall.sh          # removes EVERYTHING ccenv has ever installed
+./install.sh
+```
+
+`install.sh` only ever adds. It cannot remove a hook, MCP registration,
+skill or state directory belonging to a component the bundle no longer
+ships — so upgrading in place leaves `ccprospect`, `ccinsight` and
+`ccteam` fully wired into every session: their SessionStart hooks still
+fire, their MCP servers still register, their skills still load. Their
+binaries are still installed, so the hooks won't even fail loudly; they
+just keep running.
+
+`uninstall.sh` knows about every component ccenv has ever shipped,
+including the three that were removed, which is exactly why it has to run
+from the NEW checkout rather than the old one.
+
+What it will not touch: `.ccmemory/` directories (committed repo content
+that travels with your repos) and `.ccloop/` run state, which it lists
+rather than deletes. Per-project `.ccprospect/`, `.ccinsight/` and
+`.ccteam/` state is tarred into `~/ccenv-uninstall-<stamp>/` before
+removal, and every file it rewrites is backed up beside the original.
+
+Preview it first if you like — it changes nothing:
+
+```sh
+./uninstall.sh --dry-run
+```
+
+See [docs/uninstall.md](docs/uninstall.md) for the full removal matrix.
 
 ## Overlay system
 
@@ -82,8 +131,8 @@ component tree.
 ## MCP server naming
 
 All MCP servers register at user scope under a `cc<short>` convention:
-`ccmemory`, `ccusage`, `ccteam`. Overlay MCP servers default to their
-subdir name unless overridden.
+`ccmemory`, `ccusage`. Overlay MCP servers default to their subdir name
+unless overridden.
 
 ## Requirements
 
@@ -92,10 +141,6 @@ subdir name unless overridden.
 - Claude Code CLI on `PATH` for MCP / hook registration steps (the
   installer falls back gracefully and prints warnings if it can't find
   `claude`)
-- `nats-server` with JetStream — **only** if you want ccteam's
-  cross-instance coordination. Without it, ccteam boots in standalone
-  mode and a SessionStart hook surfaces a one-line notice in any
-  `.ccteam/`-bootstrapped project so you know sync is off.
 
 ## License
 

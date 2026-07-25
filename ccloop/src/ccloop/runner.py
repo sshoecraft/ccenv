@@ -51,6 +51,127 @@ def _pdeathsig_preexec():
         pass
 
 
+def _proc_field(pid, index):
+    """Return one field of ``/proc/<pid>/stat`` as an int, or None.
+
+    ``index`` is 0-based *after* the comm field, so index 0 is field 3
+    (state), 1 is field 4 (ppid), 19 is field 22 (starttime). comm is
+    parenthesized and may itself contain spaces and parens, so the split
+    starts after its final ``)``.
+    """
+    try:
+        data = Path(f"/proc/{pid}/stat").read_bytes()
+    except (OSError, ValueError):
+        return None
+    end = data.rfind(b")")
+    if end < 0:
+        return None
+    fields = data[end + 2:].split()
+    if len(fields) <= index:
+        return None
+    try:
+        return int(fields[index])
+    except ValueError:
+        return None
+
+
+def _proc_identity(pid):
+    """Start time (clock ticks since boot) of ``pid``, or None if it's gone.
+
+    Pinning a PID to its start time is what makes it safe to signal a
+    process later: a recycled PID has a different start time, so a stale
+    entry can never be used to kill an unrelated process.
+    """
+    return _proc_field(pid, 19)
+
+
+def _descendants(pid):
+    """Every live descendant of ``pid``, deepest-first, as (pid, starttime).
+
+    Needed because the tracked child is frequently NOT ``claude`` itself:
+    ``CCLOOP_CLAUDE_BIN`` is commonly a shell wrapper that exports env
+    (base URL, model, token budget) and then runs ``claude "$@"``. A
+    SIGTERM aimed at that wrapper's PID kills only the shell — a
+    non-interactive bash does not forward the signal to the foreground
+    job it is waiting on — and the real ``claude`` is reparented to
+    init/systemd and runs forever. Deepest-first so a worker is signalled
+    before the wrapper that owns it.
+
+    Linux-only (/proc); returns [] anywhere /proc isn't readable.
+    """
+    children = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    for name in entries:
+        if not name.isdigit():
+            continue
+        ppid = _proc_field(name, 1)
+        if ppid is None:
+            continue
+        children.setdefault(ppid, []).append(int(name))
+
+    found = []
+
+    def walk(parent):
+        for child in children.get(parent, ()):
+            walk(child)
+            starttime = _proc_identity(child)
+            if starttime is not None:
+                found.append((child, starttime))
+
+    walk(pid)
+    return found
+
+
+def _signal_tracked(victims, sig):
+    """Signal each still-matching (pid, starttime); return those signalled."""
+    signalled = []
+    for pid, starttime in victims:
+        if _proc_identity(pid) != starttime:
+            continue  # exited, or the PID now belongs to something else
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            continue
+        signalled.append((pid, starttime))
+    return signalled
+
+
+def _terminate_tree(proc, victims, grace=5.0):
+    """Terminate the tracked child AND the descendants it would strand.
+
+    ``victims`` is a snapshot taken *before* the child is signalled, since
+    a wrapper's real worker stops being a descendant the instant the
+    wrapper dies. SIGTERM first, then SIGKILL whatever is still standing
+    after ``grace`` seconds.
+
+    Uses ``proc.poll()`` rather than ``proc.wait(timeout=...)``: this runs
+    on the watcher thread while the main thread is blocked in
+    ``proc.wait()``, and poll never contends for the reap.
+    """
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+    remaining = _signal_tracked(victims, signal.SIGTERM)
+
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        remaining = [v for v in remaining if _proc_identity(v[0]) == v[1]]
+        if proc.poll() is not None and not remaining:
+            return
+        time.sleep(0.2)
+
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    _signal_tracked(remaining, signal.SIGKILL)
+
+
 class CcloopError(Exception):
     """Fatal error that should abort the run with a message."""
 
@@ -434,6 +555,10 @@ def run_session_interactive(cmd, env, session_id, halt_file, transcript_file=Non
     # ccloop if ccloop itself dies abnormally (see _pdeathsig_preexec).
     proc = subprocess.Popen(cmd, env=env, preexec_fn=_pdeathsig_preexec)
     pid = proc.pid
+    # Descendants alive at relay time, snapshotted before the child is
+    # signalled — see _descendants/_terminate_tree for why the tracked PID
+    # is not necessarily the process that has to die.
+    doomed = {"tree": []}
 
     def watcher():
         while not stop.wait(poll):
@@ -461,10 +586,8 @@ def run_session_interactive(cmd, env, session_id, halt_file, transcript_file=Non
                 else:
                     why = "context-stop signalled by hook"
                 log(f"{why} — relaying to a fresh session")
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
+                doomed["tree"] = _descendants(pid)
+                _terminate_tree(proc, doomed["tree"])
                 return
 
     wt = threading.Thread(target=watcher, daemon=True)
@@ -490,12 +613,12 @@ def run_session_interactive(cmd, env, session_id, halt_file, transcript_file=Non
             except (termios.error, ValueError, OSError):
                 pass
 
-    if relayed["flag"] and proc.poll() is None:
-        try:
-            time.sleep(1)
-            proc.kill()
-        except ProcessLookupError:
-            pass
+    # The tracked child has exited by now, but a wrapper's worker can still
+    # be alive (it never saw the SIGTERM aimed at its parent). Sweep the
+    # snapshot again and SIGKILL anything left, so the next session never
+    # starts while the previous one's claude is still running.
+    if relayed["flag"]:
+        _terminate_tree(proc, doomed["tree"], grace=1.0)
 
     return proc.returncode, relayed["flag"]
 

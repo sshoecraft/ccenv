@@ -2,6 +2,43 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.13.0
+
+`SESSION_PROTOCOL` now tells the model what to do when `memory_list` is
+**not available**, closing a silent-failure hole in the "REQUIRED first
+action" instruction added in v0.9.0.
+
+MCP servers connect in the background while a session starts, so ccmemory's
+tools are not guaranteed to be registered by turn 1 (upstream: no hook phase
+fires after MCP connect — anthropics/claude-code#26112; scheduled/Remote
+Trigger sessions miss the tool list entirely — #41778). Verified on 2.1.219
+that Claude Code's own wait is not a barrier: `alwaysLoad:true` puts a server
+in the always-blocking tier, but that tier waits `MCP_CONNECT_TIMEOUT_MS`
+(default 5000, shared across the whole tier) and then logs
+`"N/M not ready after 5000ms — proceeding; background connection continues"`
+and starts the session anyway.
+
+The old instruction only covered the happy path, and the two failure modes
+are not symmetric:
+
+  - the call errors           → server up, not answering yet → retry
+  - the tool is **absent**    → server never registered → NO error is raised
+
+The second is the dangerous one: an unregistered tool doesn't fail, it simply
+isn't in the tool list, which is indistinguishable from a project that has no
+ccmemory. The session then proceeds and every "there is no prior memory on
+this" conclusion it reaches is false — and the transcript looks clean.
+
+The protocol now names both cases: retry up to 3x on error;
+`ToolSearch("select:mcp__ccmemory__memory_list")` once if the tool is missing
+(pulls in a late-connecting server); and if it is still unavailable, STOP and
+tell the user rather than proceeding silently.
+
+Deliberately does NOT gate on the other ccenv servers. ccmemory and ccteam
+carry `alwaysLoad` (always-blocking tier); ccprospect and ccinsight are
+deferred by design (see install.sh:740,775) because their wake-time work is
+not turn-1 work.
+
 ## v0.12.0
 
 Fixes unbounded context growth from the `PreToolUse:Read` inject hook: it

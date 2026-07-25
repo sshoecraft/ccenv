@@ -6,10 +6,14 @@
 #   gitsync     — SessionStart hook that warns when the repo is out of sync with GitHub
 #   ccenvmcp    — stdlib-only MCP shim (foundation; lets the MCP servers run on Python 3.9)
 #   ccmemory    — persistent memory MCP server + hooks  (MCP name: ccmemory)
-#   ccprospect  — prospective memory (future intentions/forecasts) MCP server + hooks  (MCP name: ccprospect)
 #   ccusage     — context/rate-limit usage MCP + statusline  (MCP name: ccusage)
-#   ccloop     — relay-loop wrapper that hands work between sessions
-#   ccteam      — multi-instance coordination via NATS (MCP name: ccteam)
+#   ccloop      — relay-loop wrapper that hands work between sessions
+#
+# Retired in v0.13.0 — no longer part of this bundle:
+#   ccprospect, ccinsight, ccteam
+#
+# uninstall.sh still knows how to remove all three, so a machine carrying an
+# older install can be cleaned with the current script.
 #
 # Overlay system — additional MCP servers and CLAUDE.md fragments are picked up
 # from these directories (lowest precedence first):
@@ -29,7 +33,7 @@
 #
 # Usage:
 #   ./install.sh                       # install everything (core + overlays)
-#   ./install.sh --skip ccteam    # skip a core component (repeatable)
+#   ./install.sh --skip ccloop         # skip a core component (repeatable)
 #   ./install.sh --only ccmemory       # install only listed core components
 #   ./install.sh --no-overlays         # skip overlay scanning
 #   ./install.sh -h                    # show this help
@@ -62,14 +66,14 @@ CLAUDE_MD_OVERLAY_DIRS=(
 
 # Core subdirs in $SCRIPT_DIR — skipped during overlay scan of the script dir
 # (they're already handled explicitly above).
-CORE_SUBDIRS=(ccenvmcp ccloop ccmemory ccprospect ccusage ccproject ccteam)
+CORE_SUBDIRS=(ccenvmcp ccloop ccmemory ccusage ccproject)
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip) SKIP+=("$2"); shift 2 ;;
         --only) ONLY+=("$2"); shift 2 ;;
         --no-overlays) DO_OVERLAYS=0; shift ;;
-        -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
         *) echo "unknown flag: $1" >&2; exit 1 ;;
     esac
 done
@@ -176,9 +180,9 @@ register_mcp() {
 # Mark a user-scoped MCP server alwaysLoad:true so Claude Code BLOCKS session
 # startup until it connects (~5s/server cap) and never defers its tools behind
 # ToolSearch. MCP startup is otherwise non-blocking: the model's first turn can
-# begin while ccmemory/ccteam are still connecting in the background, so a
-# session's required first actions (ccmemory's memory_list, ccteam's
-# claim-before-edit) silently miss the tools. There is no `claude mcp add` flag
+# begin while ccmemory is still connecting in the background, so a session's
+# required first action (ccmemory's memory_list) silently misses the tools.
+# There is no `claude mcp add` flag
 # for this — alwaysLoad is a field on the server's JSON entry — so we re-register
 # through `claude mcp add-json` (claude's own atomic writer, safe under
 # concurrent sessions), carrying the entry's existing command/args/env untouched
@@ -410,16 +414,17 @@ ensure_build_toolchain() {
 # matching interpreter. After a Python bump the old tagged .so lingers, the new
 # interpreter cannot import it, and pip — seeing the distribution already
 # "present" in the shared dir — never refetches the right-ABI wheel. The
-# observed symptom was ccteam's MCP failing to connect with
-# `ModuleNotFoundError: No module named 'watchfiles._rust_notify'`.
+# originally observed symptom was the (since split out) ccteam MCP failing to
+# connect with `ModuleNotFoundError: No module named 'watchfiles._rust_notify'`.
 #
 # Fix: after everything is installed, walk the shared user-site for native
 # extension files whose ABI tag does not match the running interpreter, map each
 # stale file back to its owning pip distribution (via that dist's RECORD), and
 # `pip install --force-reinstall --no-deps` it so the correct-ABI wheel lands.
-# Generic by construction — it heals ANY compiled dep (today only watchfiles via
-# ccteam), self-heals an already-broken box, and is a near-instant no-op when
-# every extension already matches.
+# Generic by construction — it heals ANY compiled dep, self-heals an
+# already-broken box, and is a near-instant no-op when every extension already
+# matches. Kept after ccteam left the bundle: the shared user-site is shared
+# with the user's own --user installs, so the hazard did not leave with it.
 # ----------------------------------------------------------------------------
 heal_stale_compiled_exts() {
     step "native deps" "checking for stale-ABI compiled extensions in the shared user-site"
@@ -606,16 +611,16 @@ assemble_ccenv_base_claude_md
 ensure_build_toolchain
 
 # ----------------------------------------------------------------------------
-# Foundation: ccenvmcp — the stdlib-only MCP shim that ccmemory, ccprospect,
-# ccusage, and ccteam import in place of the official `mcp` SDK (which
-# requires Python 3.10+). It MUST be installed before them. It is deliberately
-# NOT a declared dependency of those packages (this repo installs from local
-# source, never PyPI, so a declared dep would trigger a failing PyPI lookup) —
-# install ordering is what guarantees it is importable from the shared
-# --user site.
+# Foundation: ccenvmcp — the stdlib-only MCP shim that ccmemory and ccusage
+# import in place of the official `mcp` SDK
+# (which requires Python 3.10+). It MUST be installed before them. It is
+# deliberately NOT a declared dependency of those packages (this repo installs
+# from local source, never PyPI, so a declared dep would trigger a failing
+# PyPI lookup) — install ordering is what guarantees it is importable from the
+# shared --user site.
 # ----------------------------------------------------------------------------
-if should_install ccmemory || should_install ccprospect || should_install ccusage || should_install ccteam; then
-    step ccenvmcp "pip install --user (MCP shim for ccmemory/ccprospect/ccusage/ccteam)"
+if should_install ccmemory || should_install ccusage; then
+    step ccenvmcp "pip install --user (MCP shim for ccmemory/ccusage)"
     pip_install_local "$SCRIPT_DIR/ccenvmcp"
 fi
 
@@ -727,38 +732,6 @@ if should_install ccmemory; then
 fi
 
 # ----------------------------------------------------------------------------
-# Core: ccprospect — MCP name: ccprospect
-# ----------------------------------------------------------------------------
-if should_install ccprospect; then
-    step ccprospect "pip install --user + register MCP 'ccprospect'"
-    pip_install_local "$SCRIPT_DIR/ccprospect"
-    register_mcp ccprospect "$(resolve_cmd ccprospect)" mcp
-    # NO alwaysLoad here (unlike ccmemory/ccteam): the required wake-time work
-    # — evaluating predicates and injecting the inbox — is done by the
-    # SessionStart HOOK, a console script independent of MCP registration.
-    # The prospect_* MCP tools are only needed once the model ACTS on the
-    # inbox, and loading them lazily through ToolSearch is fine; gating
-    # session startup on another server would buy nothing.
-
-    # Register hooks now (normally autoinstalled on first MCP boot, but doing
-    # it here means the very first session already gets the SessionStart
-    # inbox, and it heals hook paths stale from a relocated install).
-    if command -v ccprospect >/dev/null 2>&1; then
-        info "refreshing ccprospect hook registrations (heals stale paths)"
-        ccprospect install 2>&1 | sed 's/^/  /' || warn "ccprospect install failed (non-fatal)"
-    fi
-
-    # Install the prospect-integrate skill: wires a project's binding surface
-    # (project CLAUDE.md / ccloop criteria file / custom-loop constitution
-    # source) to the PROSPECT INBOX with the forced-step grammar, so loops
-    # ACT on fired prospects instead of merely seeing the injection.
-    CCPROSPECT_SKILL_DIR="$HOME/.claude/skills/prospect-integrate"
-    mkdir -p "$CCPROSPECT_SKILL_DIR"
-    cp "$SCRIPT_DIR/ccprospect/skills/prospect-integrate/SKILL.md" "$CCPROSPECT_SKILL_DIR/SKILL.md"
-    info "installed $CCPROSPECT_SKILL_DIR/SKILL.md"
-fi
-
-# ----------------------------------------------------------------------------
 # Core: ccusage — its own installer (UID-aware); MCP name: ccusage
 # ----------------------------------------------------------------------------
 if should_install ccusage; then
@@ -783,59 +756,6 @@ if should_install ccloop; then
         info "refreshing ccloop hook registrations (heals stale paths)"
         ccloop install 2>&1 | sed 's/^/  /' || warn "ccloop install failed (non-fatal)"
     fi
-fi
-
-# ----------------------------------------------------------------------------
-# Core: ccteam package — MCP name: ccteam (standardized)
-# ----------------------------------------------------------------------------
-if should_install ccteam; then
-    step ccteam "pip install --user + register MCP 'ccteam' + SessionStart hook"
-    pip_install_local "$SCRIPT_DIR/ccteam"
-    register_mcp ccteam "$(resolve_cmd ccteam-mcp)"
-    # Block session startup until ccteam connects — claim-before-edit is
-    # useless if the model starts working before its tools register.
-    enable_always_load ccteam
-
-    # Register a SessionStart hook so users see a notice in the conversation
-    # if NATS is unreachable in a ccteam-bootstrapped project (.ccteam/ present).
-    # Idempotent — re-running does not duplicate the entry.
-    python3 - <<'PY'
-import json, os
-from pathlib import Path
-
-settings_path = Path.home() / ".claude" / "settings.json"
-settings_path.parent.mkdir(parents=True, exist_ok=True)
-
-if settings_path.exists():
-    try:
-        data = json.loads(settings_path.read_text() or "{}")
-    except json.JSONDecodeError:
-        data = {}
-else:
-    data = {}
-
-hooks = data.setdefault("hooks", {})
-session_start = hooks.setdefault("SessionStart", [])
-
-entry = {"hooks": [{"type": "command", "command": "ccteam session-start"}]}
-
-# Check whether our command is already wired up anywhere in SessionStart.
-def has_cmd(items):
-    for item in items:
-        for h in item.get("hooks", []):
-            if h.get("type") == "command" and h.get("command") == "ccteam session-start":
-                return True
-    return False
-
-if not has_cmd(session_start):
-    session_start.append(entry)
-    settings_path.write_text(json.dumps(data, indent=2) + "\n")
-    print("  registered SessionStart hook 'ccteam session-start' in ~/.claude/settings.json")
-else:
-    print("  SessionStart hook 'ccteam session-start' already registered")
-PY
-
-    warn "ccteam needs a running NATS server at runtime (set CCTEAM_NATS_URL)."
 fi
 
 # ----------------------------------------------------------------------------
@@ -931,7 +851,7 @@ if [ -n "$USER_BIN" ]; then
     info "user-bin: $USER_BIN"
 fi
 
-for cmd in ccmemory ccprospect ccusage-mcp ccusage-statusline ccloop ccteam ccteam-mcp; do
+for cmd in ccmemory ccusage-mcp ccusage-statusline ccloop; do
     resolved=$(command -v "$cmd" 2>/dev/null)
     if [ -n "$resolved" ]; then
         info "OK       $cmd -> $resolved"

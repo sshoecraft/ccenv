@@ -1,95 +1,109 @@
 ---
 name: ccloop-interactive-relay-orphans-child-processes
-description: ccloop's tracked claude child has no death-of-parent protection: if ccloop's own process dies abnormally, the child is orphaned to init and runs fore…
+description: TWO orphan mechanisms, both fixed: (1) ccloop's own abnormal death -> PDEATHSIG (v0.6.1); (2) relay SIGTERM hitting a CCLOOP_CLAUDE_BIN shell wrapper…
 metadata:
   type: project
+tags: [ccloop, orphans, signals, relay, process-tree, CCLOOP_CLAUDE_BIN]
 ---
 
-## Bug: ccloop leaves orphaned `claude` processes running when the wrapper itself dies
+## ccloop leaked `claude` processes — TWO separate mechanisms
 
-Confirmed 2026-07-11 with three separate repros. Matches production evidence:
-a real `/src/mxfs` ccloop run had 8 prior-session `claude ... begin`
-processes still running with **PPID 1** (orphaned, reparented to init)
-while only the current session had a live parent.
+Both are fixed now. They are independent; fixing the first did not fix the
+second, and that is what made this confusing.
 
-### Root cause (CONFIRMED — this is the real one; see "ruled out" below)
+### Mechanism 1: ccloop's own process dies abnormally (fixed, bundle v0.6.1)
 
-`ccloop/src/ccloop/runner.py`'s `run_session_interactive()` spawns the
-`claude` child with plain `subprocess.Popen(cmd, env=env)` — no
-`start_new_session`, no death-of-parent protection of any kind. As long as
-ccloop's own relay logic is the thing that ends the child (halt sentinel /
-context wall → `proc.terminate()`), it works fine. But if the **ccloop
-wrapper process itself dies for any reason other than its own graceful
-relay** — crash, `kill -9` on just that PID, OOM-kill, or (in the general
-case, not the session-leader special case below) the terminal session
-disappearing — nothing tells the kernel to clean up the child. It gets
-reparented to init (PID 1) and keeps running forever, fully intact
-(the complete `claude --effort=... --session-id ... begin` invocation, not
-some stripped-down remnant).
+`run_session_interactive()` spawned the child with a plain `Popen` — no
+death-of-parent protection. If ccloop itself was killed outside its own
+signal handling (crash, `kill -9` on just that PID, OOM), the child was
+reparented to init and ran forever.
 
-Repro (no `script`/pty — see "gotcha" below for why that matters):
+Fix: `_pdeathsig_preexec` — `prctl(PR_SET_PDEATHSIG, SIGTERM)` via
+`preexec_fn`, on both `run_session()` and `run_session_interactive()`.
+Chosen over `killpg` because setsid/pgid changes would cost the interactive
+TUI its controlling terminal (raw mode, Ctrl-C, SIGWINCH).
+
+**Note the limit that mattered later: PDEATHSIG protects only the TRACKED
+child. It is cleared on fork, so a wrapper's own children never inherit it.**
+
+### Mechanism 2: relay SIGTERM lands on a wrapper, not on claude (fixed, bundle v0.11.1 / ccloop 0.10.1)
+
+This is the one that produced the long-lived production leak, and it fires
+while ccloop is perfectly healthy.
+
+`CCLOOP_CLAUDE_BIN` is routinely a **shell wrapper** — e.g.
+`/usr/local/bin/clyde`, which exports `ANTHROPIC_BASE_URL` /
+`ANTHROPIC_MODEL` / `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and then runs
+`claude --dangerously-skip-permissions --effort medium "$@"`. So the PID
+ccloop tracks is **bash**; `claude` is its grandchild.
+
+The relay did `proc.terminate()` → SIGTERM to bash. A **non-interactive bash
+does not forward SIGTERM to the foreground job it is waiting on** — bash
+dies, the foreground child does not. `claude` was reparented (to
+`systemd --user`, not always PID 1 — a user systemd is a subreaper) and kept
+running forever. One leaked `claude` per relay, every one still pointed at
+the same run state.
+
+Production evidence (2026-07-24, atrader): one `ccloop --resume-run` with
+FOUR live `claude ... begin` processes — sessions 10/11/12/13, elapsed
+3h17m / 2h50m / 1h21m / 47m. Sessions 10-12 had `PPID 3043`
+(`systemd --user`) and no wrapper left; session 13 was the live
+`clyde`(bash) → `claude` pair. The itrader run on the same box invoked
+`claude` DIRECTLY (no wrapper) and had exactly one claude, PPID = ccloop —
+that contrast is the diagnosis in one `ps`.
+
+30-second repro, no ccloop needed:
 ```
-CCLOOP_CLAUDE_BIN=<fake-claude wrapper> FAKE_MODE=sleep FAKE_SLEEP=120 \
-  ccloop -i --cutoff=0 '' 'sit and wait' &
-CCLOOP_PID=$!
-sleep 3
-kill -9 "$CCLOOP_PID"          # kills ONLY ccloop, nothing else
-# → the claude child is still alive afterward, PPid: 1
+printf '#!/bin/bash\npython3 -c "import time; time.sleep(60)"\n' > w.sh
+chmod +x w.sh; ./w.sh & W=$!; sleep 1; K=$(pgrep -P $W)
+kill -TERM $W; sleep 1; ps -p $K -o pid=,ppid=      # -> alive, PPID 1
 ```
-Verified: after `kill -9` on ccloop alone, `/proc/<child>/status` showed
-`PPid: 1`, `State: S (sleeping)` — running indefinitely.
 
-### Gotcha that produced a false negative first
+Fix in `runner.py`: `_descendants()` walks `/proc` for the child's whole
+subtree, **deepest-first**, snapshotted **before** signalling (a wrapper's
+worker stops being a descendant the instant the wrapper dies), then
+`_terminate_tree()` escalates SIGTERM → SIGKILL across it. Every PID is
+pinned to its `/proc/<pid>/stat` start time (`_proc_identity`) so a recycled
+PID can never be signalled. Called from the watcher on relay AND swept again
+after `proc.wait()` returns.
 
-Wrapping the launch in `script -qec "ccloop ..." log` makes **ccloop itself
-the session leader** of the new pty `script` allocates. Killing the session
-leader makes the kernel auto-deliver `SIGHUP` to the whole foreground
-process group (a real POSIX protection), which happened to also kill the
-`claude` child in that setup — a false negative. In real usage the user's
-**shell/tmux/sshd is the session leader**, not `ccloop` (`ccloop` is just
-an ordinary job in that session), so killing `ccloop` alone does NOT
-trigger that kernel protection. Reproduce parent-death scenarios by
-backgrounding the command directly (`cmd &`), not through `script`, unless
-you're deliberately testing the session-leader case.
+Why not the headless path's approach: `run_session()` uses
+`start_new_session=True` + `os.killpg`, which does cover wrappers (the
+grandchild inherits the pgid). The interactive path cannot — setsid detaches
+the TUI's controlling terminal, and the child shares ccloop's own process
+group, so killpg would kill ccloop too.
 
-### Hypothesis RULED OUT: the graceful in-run relay path leaking a claude-internal subprocess
+### CORRECTION to the earlier "ruled out" conclusion
 
-Original hypothesis (wrong, but worth recording so it isn't re-litigated):
-that `run_session_interactive()`'s SIGTERM-only-`proc.pid` relay logic (as
-opposed to `run_session()`'s headless path, which correctly uses
-`start_new_session=True` + `os.killpg` — see DESIGN.md line ~40-42, ~449,
-added specifically to fix orphaned processes from Ctrl-C) leaves behind
-some subprocess the real `claude` CLI forks internally, every relay.
+A previous investigation ran real `claude` via `CCLOOP_CLAUDE_BIN=clyde`
+through 5 relay cycles, saw `exit=143`, and concluded the relay path was
+clean ("0/5 leaked", "NOT where the real leak comes from"). **That was
+wrong.** 143 = SIGTERM is what the *wrapper bash* exits with — the check
+confirmed the tracked PID died, which was never in question. It did not look
+for a surviving grandchild. When a check can be satisfied by the wrong
+process, it proves nothing: assert on the PID that must NOT survive
+(`pgrep -P <wrapper>` before the kill), not on the one you signalled.
 
-Disproved by a live end-to-end test: real `claude` binary via
-`CCLOOP_CLAUDE_BIN=/usr/local/bin/clyde` (execs real `claude` against a
-free local OpenAI-compatible model, zero API cost) run through actual
-`ccloop -i --cutoff=1 ...` (cutoff=1 = `keepgoing.MIN_REASONABLE_CUTOFF_TOKENS`
-= 1000 tokens, the minimum meaningful value — trips the halt sentinel on
-turn one) for 5 full relay cycles under a `script`-allocated pty. Result:
-**0/5 leaked** — every session's `claude` process exited cleanly with
-`exit=143` (SIGTERM) and no descendant survived. The targeted relay path is
-solid; this is NOT where the real leak comes from.
+### Testing notes
 
-(A synthetic variant — a fake `claude` that deliberately forks a worker and
-never forwards signals to it — DOES leak 5/5 under the same driver. That
-mechanism is real in principle if `claude` ever internally forks a
-long-lived helper, but isn't what's happening with the actual `claude`
-binary today. Worth a defensive fix but not the production bug.)
+- `tests/test_runner.py::test_interactive_relay_kills_claude_behind_a_shell_wrapper`
+  uses a real bash wrapper + real fork/exec; signal delivery across a process
+  boundary is the whole subject and cannot be mocked. It finds the worker via
+  `pgrep -P` (deliberately NOT the runner's own `/proc` walk, so it can't
+  pass by agreeing with a broken implementation).
+- `run_session_interactive` calls `signal.signal`, so **it must run on the
+  main thread** in tests. Drive it from the main thread and put the
+  observer/trigger in the helper thread, not the other way around.
+- The autouse `no_sleep` fixture patches `runner.time.sleep` — which is the
+  *global* `time` module, so the test's own `time.sleep` is a no-op too. Any
+  wait loop must use a `time.monotonic()` deadline; a counted retry loop
+  waits zero wall-clock. This silently flaked the PDEATHSIG test (fixed).
+- `/proc/<pid>` existence is NOT liveness: an unreaped zombie still has an
+  entry. Check state field == `Z` (`_gone()` helper).
 
-### Fix direction
+### Complementary hardening (user-side, not applied)
 
-The idiomatic Linux fix for "child must die if its specific parent process
-dies, no matter how" is `prctl(PR_SET_PDEATHSIG, SIGTERM)`, set in the
-child (via `preexec_fn` in `subprocess.Popen`, which runs post-fork
-pre-exec in the child's single remaining thread — safe here since the
-callback is a single side-effect-free ctypes call, not lock-touching).
-Unlike `killpg`, this needs no process-group/session changes, so it can't
-interfere with the interactive TUI's terminal ownership (raw mode,
-Ctrl-C handling, SIGWINCH) — it only fires when ccloop's own process (the
-one that called prctl at spawn time) actually dies. Apply to BOTH
-`run_session()` and `run_session_interactive()`'s `Popen` calls (headless
-mode has killpg for graceful cases, but no protection against ccloop's own
-process crashing either).
-
-Not yet applied as of this memory (diagnosis + repro only).
+Making the wrapper's last line `exec claude ...` collapses bash into the
+claude process: one PID, so both PDEATHSIG and `terminate()` hit claude
+directly. Worth doing in `clyde`, but it is a wrapper-by-wrapper fix — ccloop
+cannot rely on it, hence the tree kill.

@@ -71,14 +71,13 @@ build toolchain) are warned and non-fatal.
 `python-tag` is informational only — `heal_stale_compiled_exts` decides what to
 reinstall from the on-disk `.so` ABI tags, so it works even with no prior marker.
 
-## MCP `alwaysLoad` — block startup until ccmemory/ccteam connect (v0.6.0)
+## MCP `alwaysLoad` — block startup until ccmemory connects (v0.6.0)
 
 Claude Code loads MCP servers **non-blocking by default**: with tool-search on
 (the default) a server's tools are *deferred* behind `ToolSearch` and the server
 connects in the background, so the model's first turn can start before the tools
-register. In a ccloop TUI session that races the session's required first actions
-— ccmemory's `memory_list()` and ccteam's claim-before-edit — which then silently
-run without their tools.
+register. In a ccloop TUI session that races the session's required first action
+— ccmemory's `memory_list()` — which then silently runs without its tools.
 
 `enable_always_load <name>` marks a user-scoped server `alwaysLoad: true`, which
 makes Claude load it eagerly (never deferred) and **block session startup until it
@@ -96,14 +95,14 @@ Mechanics and constraints:
   does **not** surface `alwaysLoad`. Idempotent: a no-op once the flag is set.
 - It runs **after** `register_mcp`, so a heal-triggered re-register (which drops
   the flag) gets it re-applied in the same install.
-- Only **ccmemory** and **ccteam** are marked — the servers a session depends on
-  at turn 1. `ask_*` stay deferred so their tool schemas don't cost prompt tokens
-  on every turn; the 3 `claude.ai` HTTP servers show `Needs authentication` and
+- Only **ccmemory** is marked — the one server a session depends on at turn 1.
+  (`ccteam` was also marked until it left the bundle in v0.13.0.) `ask_*` stay
+  deferred so their tool schemas don't cost prompt tokens on every turn; the 3 `claude.ai` HTTP servers show `Needs authentication` and
   can't connect unattended regardless.
 
 ## History
 
-- **v0.6.0** — `enable_always_load()`: mark ccmemory + ccteam `alwaysLoad: true`
+- **v0.6.0** — `enable_always_load()`: mark ccmemory (and, then, ccteam) `alwaysLoad: true`
   so Claude Code blocks session startup until they connect (fixes the model
   starting work before its MCP tools register in ccloop TUI sessions).
 - **v0.1.5** — added `heal_stale_compiled_exts()` and the `python-tag` marker;

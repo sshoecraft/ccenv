@@ -94,7 +94,7 @@ Four hooks land in `~/.claude/settings.json`, each fail-open:
 
 | Event       | Matcher                  | Handler   | Purpose |
 |-------------|--------------------------|-----------|---------|
-| SessionStart| –                        | `session` | Inject memory protocol as additionalContext; reset the injection ledger on compact/clear; prune ledger rows >30d |
+| SessionStart| –                        | `session` | Inject memory protocol as additionalContext (incl. the MCP-readiness clause below); reset the injection ledger on compact/clear; prune ledger rows >30d |
 | Stop        | –                        | `stop`    | Regenerate `MEMORY.md` from frontmatter |
 | PreToolUse  | `Write\|Edit\|NotebookEdit` | `guard`   | Block edits to `MEMORY.md` |
 | PreToolUse  | `Read`                   | `inject`  | Surface prior memories relevant to the file being read — at most once per memory per session, under a hard session-wide budget. See `docs/injection-ledger.md`. |
@@ -102,6 +102,38 @@ Four hooks land in `~/.claude/settings.json`, each fail-open:
 Foreign hooks (e.g. ccloop's own Stop/PostToolUse entries) are preserved.
 Installer self-heals on path changes — moving the `ccmemory` binary
 rewrites the registered commands automatically on next MCP server boot.
+
+### MCP readiness: why the protocol has a fallback
+
+The SessionStart protocol mandates `memory_list()` as the first action, but
+MCP servers connect in the *background* while a session starts, so the
+ccmemory tools are not guaranteed to be registered by turn 1. Claude Code
+provides no mechanical gate for this (verified against 2.1.219):
+
+- **SessionStart hooks are too early.** They complete *before* the `init`
+  event that reports MCP status, so a hook cannot observe whether servers
+  connected. Upstream has no post-MCP-connect hook phase
+  ([claude-code#26112](https://github.com/anthropics/claude-code/issues/26112));
+  scheduled/Remote Trigger sessions can miss the tool list entirely
+  ([#41778](https://github.com/anthropics/claude-code/issues/41778)).
+- **`alwaysLoad` is a timeout, not a barrier.** It puts a server in the
+  always-blocking tier, but that tier waits `MCP_CONNECT_TIMEOUT_MS`
+  (default 5000ms, shared across the whole tier) and then logs
+  `"N/M not ready after 5000ms — proceeding"` and starts anyway.
+
+The failure this creates is silent: an unregistered MCP tool raises no
+error, it is simply **absent** from the tool list — indistinguishable from a
+project that has no ccmemory. The session proceeds and every "there is no
+prior memory on this" conclusion is wrong, while the transcript looks clean.
+
+So the protocol distinguishes the two cases: a call that *errors* → retry
+(server up, not answering yet); a tool that is *absent* → one
+`ToolSearch("select:mcp__ccmemory__memory_list")` to pull in a
+late-connecting server, then STOP and tell the user rather than proceed.
+
+Only ccmemory is gated this way. ccmemory and ccteam carry `alwaysLoad`
+(set by the top-level `install.sh`); ccprospect and ccinsight are left
+deferred on purpose — their wake-time work is not turn-1 work.
 
 ## Memory file format
 

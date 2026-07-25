@@ -2,6 +2,253 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.13.0
+
+**Breaking: three components leave the bundle.** `ccprospect` and `ccinsight`
+are retired; `ccteam` moves to its own repository. `install.sh` no longer
+builds, registers or hooks any of them.
+
+Taken out of `install.sh`: the three component blocks, their entries in
+`CORE_SUBDIRS`, `ccteam`'s `SessionStart` registration and NATS warning, the
+`ccenvmcp` install gate (now `ccmemory || ccusage`), and the console-script
+verify loop. 1108 -> 991 lines.
+
+**`uninstall.sh` deliberately keeps all three.** An install only ever adds —
+it cannot remove a hook, MCP registration, skill or state directory for a
+component the bundle no longer knows about. Upgrading in place would leave
+ccprospect/ccinsight/ccteam fully wired into every session, hooks firing,
+against binaries that are still installed and so fail silently rather than
+loudly. The upgrade path is therefore uninstall-then-install, run from the NEW
+checkout:
+
+    git pull && ./uninstall.sh && ./install.sh
+
+Documented in README's new Upgrading section. A component removed from
+`install.sh` must never be mirrored out of `uninstall.sh`.
+
+**Fixed: `uninstall.sh` truncated its own documentation.** `docs/uninstall.md`
+quotes both opening integration markers inside a ``` fence to show what they
+look like. The stripper matched the first one, found no closing marker, and
+applied its remove-to-EOF rule — deleting 52 of 112 lines. Two guards:
+
+- Markers inside a fenced code block are documentation and are ignored. (Both
+  `SKILL.md`s quote them the same way.)
+- An opening marker with no close now leaves the file **untouched** and warns.
+  The extent of such a block is unknowable; guessing at it is how a cleanup
+  script destroys a file it was only supposed to trim.
+
+Also in `install.sh`: comments that described ccteam's claim-before-edit as an
+`alwaysLoad` justification, and ccinsight's sibling-library import convention,
+are gone. `heal_stale_compiled_exts` stays — the hazard is the shared
+`--user` site, which did not leave with ccteam.
+
+## v0.12.1
+
+Three `uninstall.sh` fixes found by running it for real, twice.
+
+**The backup could hold the intermediate state, not the original.**
+`backup_file()` copied unconditionally, so a file rewritten more than once in
+a single run ended up with a "backup" of a partially-uninstalled state. Seen
+on `~/.claude/CLAUDE.md`: the ccproject step strips the `[AWARENESS PROTOCOL]`
+section, the global step then strips the `[CCENV MANAGED]` region, and the
+second `backup_file` overwrote the first — leaving a backup with no awareness
+section in it. (`~/.claude.json` and `settings.json` have the same shape,
+touched once per component.) `backup_file()` is now a no-op once the backup
+exists, so `<file>.uninstall-bak.<stamp>` is always the pre-uninstall state.
+The now-redundant `backup_claude_json_once` helper is gone.
+
+**Every idempotent re-run littered `$HOME` with identical backups.** The
+backup fired on the ATTEMPT to modify a file, not on an actual change, so a
+second full run — which correctly no-ops everything — still produced fresh
+copies of `settings.json`, `~/.claude.json` and `.bashrc`. The shell callers
+already grep-gate before backing up (which is why `CLAUDE.md` was exempt);
+the three Python writers now call `bak()` themselves immediately before
+`os.replace`, where the decision to write has actually been made. A no-op run
+now writes nothing at all.
+
+**`~/.claude/hooks/` was left behind empty** after `check_sync_status.sh` came
+out. gitsync now `rmdir`s it — which fails harmlessly, by design, if anything
+else put a hook there.
+
+## v0.12.0
+
+`uninstall.sh` — the exact inverse of `install.sh`. Until now ccenv could
+only be added to a machine; backing it out meant hand-editing four JSON
+files, hunting skill directories, and remembering which `pip` dists exist.
+
+For each component in scope it removes the pip distribution, its hook
+entries in `~/.claude/settings.json`, its user-scope MCP registration in
+`~/.claude.json`, its skill directory, its managed region in
+`~/.claude/CLAUDE.md`, and its per-project state.
+
+Same component vocabulary and `--only` / `--skip` flags as `install.sh`:
+`ccproject gitsync ccmemory ccprospect ccinsight ccusage ccloop ccteam
+ccenvmcp`.
+
+Three things it does that a naive script would get wrong:
+
+- **Hook removal matches on the EXECUTABLE, not a substring.** The first
+  token of the command must be the component's console script (for
+  ccproject, `awareness_hooks.py` must be the script argument). A foreign
+  hook that merely mentions the word is never touched, and when one of ours
+  shares a settings entry with a foreign hook, only our hook object is
+  dropped.
+- **Injected project blocks are found without a filesystem scan.**
+  `prospect-integrate` / `ccinsight-integrate` land marker-fenced blocks in
+  arbitrary project files (a CLAUDE.md, a ccloop criteria file, a custom
+  loop's constitution fragment). Candidates come from `~/.claude.json`'s
+  `projects` map — the bounded, authoritative list of directories a session
+  ever ran in — searched at depth <= 2 for markdown, plus the exact
+  `binding_file` each `integration.json` recorded, which may sit deeper.
+  `--project DIR` adds a repo that was integrated but never opened here.
+- **Nothing is deleted without a copy first.** Rewritten files are copied to
+  `<file>.uninstall-bak.<stamp>`; every per-project state directory is
+  tarred into `~/ccenv-uninstall-<stamp>/` before removal.
+
+Project-data policy: `.ccprospect/`, `.ccinsight/` and `.ccteam/` are
+archived then deleted (`--keep-project-data` opts out). `.ccmemory/` is
+NEVER touched — it is committed repo content that travels with the repo.
+`.ccloop/` run state is left in place and merely listed.
+
+`ccenvmcp`, the shared shim every other component imports, is uninstalled
+last and only once no dependent dist remains.
+
+Also: `--dry-run` prints every action and changes nothing, a confirmation
+prompt guards the project-level work (`-y` to skip), the global artifacts
+(the `[CCENV MANAGED]` CLAUDE.md region, `~/.config/ccenv`, the shell
+exports) come out only on a fully unscoped run, and the `# [ccenv]`
+`~/.local/bin` PATH guard is kept by default since unrelated `pip --user`
+tools depend on it (`--remove-path` drops it).
+
+## v0.11.1
+
+ccloop v0.10.1: the interactive relay now terminates the session's whole
+process tree, fixing `claude` processes that accumulated one per relay.
+
+Observed in production under one `ccloop --resume-run`: four live `claude
+... begin` processes for sessions 10, 11, 12 and 13 — elapsed 3h17m, 2h50m,
+1h21m and 47m — i.e. every session the run had ever relayed was still
+running, all pointed at the same run state.
+
+Cause: `CCLOOP_CLAUDE_BIN` is commonly a shell wrapper that exports env (base
+URL, model, token budget) and then runs `claude "$@"`, so the PID ccloop
+tracks is bash, not claude. The relay's `proc.terminate()` went to bash, and
+a non-interactive bash does not forward SIGTERM to the foreground job it is
+waiting on — bash exited, and claude was reparented to systemd and left
+running forever. Runs that invoke `claude` directly were never affected,
+which is why this survived the earlier orphan fix (v0.6.1's
+`PR_SET_PDEATHSIG`, which likewise only protects the *tracked* child).
+
+Fix: on relay, `run_session_interactive` snapshots the child's descendants
+from `/proc` *before* signalling — a wrapper's worker stops being a
+descendant the moment the wrapper dies — then escalates SIGTERM → SIGKILL
+across the whole tree, deepest-first. Each PID is pinned to its `/proc` start
+time, so a recycled PID can never be signalled. The headless path already
+covered this via `start_new_session=True` + `killpg`; the interactive path
+can't use that without costing the TUI its controlling terminal.
+
+Also fixes a pre-existing flake in the PDEATHSIG regression test: the autouse
+`no_sleep` fixture made its counted retry loop wait no wall-clock time at
+all, and it read `/proc/<pid>` existence as liveness when an unreaped zombie
+still has an entry.
+
+## v0.11.0
+
+ccmemory v0.13.0: the SessionStart protocol now handles `memory_list` being
+**unavailable**, not just present-and-working.
+
+MCP servers connect in the background as a session starts, so ccmemory's
+tools may not be registered by turn 1. Claude Code offers no mechanical gate
+for this — verified against 2.1.219: SessionStart hooks complete *before* the
+`init` event that reports MCP status (so a hook cannot observe it), and
+`alwaysLoad:true` is a timeout rather than a barrier — its tier waits
+`MCP_CONNECT_TIMEOUT_MS` (default 5000, shared across the tier) and then
+proceeds degraded. Upstream has no post-MCP-connect hook phase
+(anthropics/claude-code#26112).
+
+The hole: an unregistered MCP tool raises no error, it is simply absent from
+the tool list — identical in appearance to a project with no ccmemory. The
+session proceeds, and every "no prior memory on this" conclusion is silently
+wrong. The protocol now distinguishes call-errors (retry 3x) from
+tool-absent (`ToolSearch` once, then STOP and tell the user).
+
+## v0.10.0
+
+New component: **ccinsight 0.1.0** — observation-to-hypothesis memory (the
+EMERGING store, third sibling alongside ccmemory's TIMELESS and
+ccprospect's FUTURE). Built after checking ccprospect against the exact
+complaint that motivated it (an agent that narrates events but never forms
+a higher-level pattern) and finding it didn't solve it: an audit of one
+trading agent's 374-entry journal found heavy price-action language but
+zero pattern-recognition hypotheses, because nothing in its loop ever
+forced synthesis — ccprospect, a flawless mechanical store, had nothing
+pattern-shaped to catch. Two independent model consultations (`ask_fable`,
+`ask_gpt`) converged: the storage is the easy part; the forcing function is
+the load-bearing 80%.
+
+An append-only, uncapped observation buffer (`.ccinsight/observations.jsonl`)
+feeds versioned DERIVED views — symbolic-key, temporal-window, metric-
+correlation, and motif-candidate (the last exists specifically because a
+same-key-recurrence trigger is circular for a perception domain: a chart
+wedge has no repeated discrete event to key by before it's recognized).
+Six pluggable mechanical trigger families decide WHEN synthesis is
+required; every fired trigger gets a schema-gated forced response — a
+falsifiable candidate hypothesis (preregistered test, cited evidence), a
+no-actionable-pattern disposition (must prune the cluster, not merely
+decline), or a bounded insufficient-coverage disposition (must name a
+concrete next-observation requirement) — no fourth option. Hypotheses are
+immutable (`.ccinsight/hypotheses/*.md`); epistemic status AND confidence
+are both derived by folding an append-only evidence ledger
+(`events.jsonl`) — there is no field anywhere for a model to self-assert a
+confidence score, and `mark_supported`/`mark_refuted` are mechanically
+refused without the matching outcome already on record. Graduation into
+ccmemory is gated (supported status only), owns dedup, carries provenance,
+and auto-spawns a ccprospect re-verification contract — never automatic,
+since a confabulated pattern laundered into the one store with no expiry
+and auto-injection was the single biggest risk both consultations flagged.
+
+Reuses ccprospect's predicate engine and ccmemory's store as sibling
+libraries (install-order dependencies, same convention as ccenvmcp — never
+declared pip dependencies, since this repo installs from local source).
+MCP tools: insight_observe/survey/hypothesize/ledger/dispose/amend/
+graduate/list/get/report; hooks (SessionStart evaluate+inject, PostToolUse
+mechanical observation harvest, Stop INSIGHT.md regen, PreToolUse guard)
+autoinstall on MCP boot. 119 tests plus three independent end-to-end
+verifications (in-process lifecycle, cross-store graduation writing a real
+ccmemory file + ccprospect contract, and a full stdio JSON-RPC drive of the
+actual MCP server subprocess).
+
+install.sh: ccinsight added to core components (pip install, MCP register
+— deliberately without alwaysLoad, same reasoning as ccprospect), added to
+the ccenvmcp foundation gate (it also imports ccmemory + ccprospect
+directly), CORE_SUBDIRS, and the verify loop; installed after both ccmemory
+and ccprospect so its sibling-library imports resolve.
+
+Also ships the `ccinsight-integrate` skill (installed to
+`~/.claude/skills/ccinsight-integrate/`, `prospect-integrate` pattern):
+one-time per-project wiring of the pending-synthesis binding, landed
+adjacent to (never merged with) an existing ccprospect integration since
+the two answer different questions. Same deterministic classify tree
+(interactive / ccloop / custom-loop with owner-confirmed diffs against
+constitution SOURCE, never hot-edited). Decision recorded in
+`.ccinsight/integration.json`.
+
+**Also this release — two ccprospect 0.2.0 fixes**, root-caused from the
+same investigation: itrader's real `.ccprospect/events.jsonl` showed 8
+contracts filed between 00:33–06:20 UTC, exhausting the daily budget almost
+7 hours before market open because the reset boundary is UTC midnight,
+which splits a 24-hour trading agent's overnight session in half. Added
+`CCPROSPECT_DAY_RESET_TZ` (realign the reset to a project's actual
+operating day; default UTC behavior unchanged) and raised
+`DEFAULT_DAILY_BUDGET` 8 → 20. See `ccprospect/CHANGELOG.md` v0.2.0.
+
+## v0.9.1
+
+**ccprospect 0.1.1** — removed dead design-archive path references from
+ccprospect's `CHANGELOG.md` and `docs/ccprospect.md`: the archive lives
+outside this repo, so a hardcoded path can never resolve for a clone. No
+functional change. See `ccprospect/CHANGELOG.md` v0.1.1.
+
 ## v0.9.0
 
 **ccmemory 0.12.0** — fixes unbounded context growth from the `PreToolUse:Read`

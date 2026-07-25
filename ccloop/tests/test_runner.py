@@ -1,7 +1,9 @@
 import json
 import os
+import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -180,17 +182,104 @@ def test_interactive_child_dies_if_ccloop_process_itself_is_killed(tmp_path):
         driver_proc.kill()  # SIGKILL only the driver ("ccloop"), not the child
         driver_proc.wait(timeout=5)
 
-        for _ in range(30):
-            if not Path(f"/proc/{child_pid}").is_dir():
-                break
+        # Real deadline, not a sleep count: the autouse no_sleep fixture makes
+        # time.sleep a no-op, so a counted retry loop would give the kernel no
+        # wall-clock time at all. _gone() also treats an unreaped zombie as
+        # dead -- /proc/<pid> outlives the process itself until it's reaped.
+        deadline = time.monotonic() + 15
+        while not _gone(child_pid) and time.monotonic() < deadline:
             time.sleep(0.1)
-        assert not Path(f"/proc/{child_pid}").is_dir(), (
+        assert _gone(child_pid), (
             "claude child survived ccloop's own death -- orphaned to init"
         )
     finally:
         if driver_proc.poll() is None:
             driver_proc.kill()
             driver_proc.wait()
+
+
+def _child_pids(pid):
+    """Direct children of ``pid``, via pgrep — deliberately NOT the runner's
+    own /proc walk, so the test can't pass by agreeing with a broken one."""
+    out = subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True)
+    return [int(x) for x in out.stdout.split()]
+
+
+def _gone(pid):
+    """True once the process no longer exists or is an unreaped zombie."""
+    stat = Path(f"/proc/{pid}/stat")
+    try:
+        data = stat.read_bytes()
+    except OSError:
+        return True
+    return data[data.rfind(b")") + 2:].split()[0] == b"Z"
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="tree kill relies on /proc")
+def test_interactive_relay_kills_claude_behind_a_shell_wrapper(tmp_path):
+    """Regression: CCLOOP_CLAUDE_BIN is routinely a shell wrapper that exports
+    env and then runs `claude "$@"` (base-URL/model gateways do exactly this).
+    The relay's SIGTERM goes to the tracked PID, which is that wrapper — and a
+    non-interactive bash does NOT forward the signal to the foreground job it
+    is waiting on. bash died, the real `claude` was reparented to systemd, and
+    every relayed session's claude stayed alive: four concurrent sessions
+    (10/11/12/13) under one ccloop run, oldest 3h17m, observed in production.
+
+    Real processes throughout — signal delivery across a fork/exec boundary is
+    the entire subject of the test and cannot be mocked in-process.
+    """
+    worker = f"{sys.executable} -c 'import time; time.sleep(120)'"
+    wrapper = tmp_path / "gateway.sh"
+    wrapper.write_text(f"#!/bin/bash\n{worker}\n")
+    wrapper.chmod(0o755)
+
+    halt = tmp_path / "halt-wrapper-sess"
+    found = {}
+
+    # run_session_interactive installs signal handlers, so it must own the
+    # main thread; the observer runs alongside it, notes the PID that must
+    # not survive, then trips the relay.
+    def observe():
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            for shell in _child_pids(os.getpid()):
+                try:
+                    argv = Path(f"/proc/{shell}/cmdline").read_bytes()
+                except OSError:
+                    continue
+                if str(wrapper).encode() not in argv:
+                    continue
+                kids = _child_pids(shell)
+                if kids:
+                    found["worker"] = kids[0]
+                    halt.write_text("")  # keepgoing's sentinel -> relay
+                    return
+            time.sleep(0.05)
+
+    observer = threading.Thread(target=observe)
+    observer.start()
+    try:
+        exit_code, relayed = runner.run_session_interactive(
+            [str(wrapper)], dict(os.environ), "wrapper-sess",
+            halt_file=halt, poll=0.2,
+        )
+        observer.join(timeout=5)
+        worker = found.get("worker")
+        assert worker is not None, "wrapper never spawned its worker"
+        assert relayed is True
+
+        deadline = time.monotonic() + 15
+        while not _gone(worker) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert _gone(worker), (
+            "claude survived the relay behind its wrapper — it will run "
+            "concurrently with the next session"
+        )
+    finally:
+        observer.join(timeout=5)
+        worker = found.get("worker")
+        if worker is not None and not _gone(worker):
+            os.kill(worker, signal.SIGKILL)
 
 
 def test_write_cutoff_new_run_writes_default(tmp_path):

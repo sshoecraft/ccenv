@@ -151,6 +151,19 @@ opt-in. Resolution order:
   - ignores SIGINT in the wrapper (the TUI owns Ctrl-C/Escape in raw
     mode) and restores terminal `termios` settings after the child exits,
     in case it was killed mid-raw-mode;
+  - on relay, terminates the child's whole **process tree**, not just the
+    PID it tracks. `CCLOOP_CLAUDE_BIN` is routinely a shell wrapper that
+    exports env (base URL, model, budget) and then runs `claude "$@"`; a
+    SIGTERM to that wrapper kills only the shell, because a
+    non-interactive bash does not forward signals to the foreground job it
+    is waiting on. The real `claude` would be reparented to init/systemd
+    and keep running — one leaked session per relay, all sharing the run's
+    state. The interactive path can't use the headless path's
+    `start_new_session=True` + `killpg` (setsid would cost the TUI its
+    controlling terminal, and killpg on ccloop's own group would kill
+    ccloop), so it snapshots descendants from `/proc` *before* signalling
+    and escalates SIGTERM → SIGKILL over them. Each PID is pinned to its
+    start time so a recycled PID can never be signalled;
   - on a plain user exit (not a watcher relay), asks before relaunching so
     quitting the TUI doesn't trap you in an endless loop. To stop: answer
     `n`, or have Claude write `DONE`.
@@ -447,6 +460,8 @@ earlier design probes):
 | Claude keeps inventing work | Optional `CCLOOP_MAX_ITERATIONS` cap (off by default) |
 | Single session hangs | Optional `CCLOOP_SESSION_TIMEOUT` watchdog (off by default) |
 | Orphaned child processes on interrupt | Session runs in its own process group; SIGINT kills the group (SIGKILL on second Ctrl-C) |
+| Orphaned `claude` when ccloop itself is killed | Child spawned with `PR_SET_PDEATHSIG` (`_pdeathsig_preexec`), so the kernel SIGTERMs it when ccloop's process dies for any reason |
+| `claude` surviving a relay behind a `CCLOOP_CLAUDE_BIN` wrapper | Interactive relay snapshots the child's descendants and terminates the whole tree, not just the tracked PID (`_descendants`/`_terminate_tree`) |
 | Permission prompts block headless mode | `--permission-mode bypassPermissions` (overridable) |
 | Concurrent ccloops collide | Run-id-scoped state; session-id-scoped transcripts; hook gates on env vars |
 | ccusage cache unavailable / wrong session | Hook falls back to a transcript-based estimate (per-session accurate) |
