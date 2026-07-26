@@ -2,6 +2,45 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.16.0
+
+**install.sh removes retired-component residue by itself; the
+uninstall-everything-then-install upgrade dance is no longer needed.**
+
+ccprospect, ccinsight and ccteam were retired in v0.13.0, but retiring them
+only stopped new installs — a box set up before that release still carries
+their MCP registrations, hooks, skills and pip dists, and nothing in the
+install path cleaned any of it up. The workaround was to run the full
+uninstaller before every install, tearing down a working box to fix residue
+that usually is not there.
+
+install.sh now detects it and scopes the fix:
+
+- `retired_residue()` checks four independent signals per retired component —
+  console script in the `--user` bin, hook entry in `settings.json`, MCP
+  registration in `~/.claude.json` (user scope and per project), and a
+  `dist-info` in the `--user` site. They rot independently, so one signal is
+  not enough.
+- When something is found, `run_retired_cleanup()` runs `./uninstall.sh` with
+  one `--only <comp>` per detected component. The scope is the safety
+  property: a component ccenv currently ships can never be handed to the
+  uninstaller.
+- Project state dirs (`.ccprospect/`, `.ccinsight/`, `.ccteam/`) are kept
+  unless `--purge-retired-state` is passed. An upgrade does not delete user
+  data as a side effect.
+- Runs before the `[CCENV MANAGED]` CLAUDE.md region is reassembled, since the
+  uninstaller strips the retired components' own sections.
+- A clean box does zero work.
+
+New flags: `--check-retired` (report and exit, changing nothing — the
+standalone answer to "do I need to run the uninstaller?"),
+`--no-retired-cleanup`, `--purge-retired-state`.
+
+`tests/test_retired_detection.sh`: 17 assertions over throwaway /tmp HOME
+fixtures. The cleanup path is exercised against a fake `uninstall.sh` that
+records its argv, so the suite can never remove anything from the box it runs
+on. Verified read-only against both live boxes here: no residue on either.
+
 ## v0.15.0
 
 **ccmemory 0.15.0: the settle stall announces itself before it is felt.**

@@ -138,8 +138,72 @@ has no memory. A project that genuinely needs the tools present at turn 1 should
 assert that in its own startup steps, where it can be checked and reported,
 rather than relying on a flag that quietly proceeds degraded.
 
+## Retired-component cleanup (v0.16.0)
+
+`ccprospect`, `ccinsight` and `ccteam` were retired in v0.13.0. install.sh
+stopped installing them — but "stopped installing" is not "removes". A box set
+up before that release keeps their MCP registrations in `~/.claude.json`, their
+hooks in `settings.json`, their skill dirs and their pip dists, and nothing in
+the install path ever cleaned any of it up.
+
+That made the documented upgrade "run uninstall.sh, then install.sh" — a full
+teardown of a working box to clear residue that, on almost every upgrade, is
+not present at all.
+
+install.sh now answers the question itself.
+
+**`retired_residue()`** checks each retired component for four independent
+signals and prints one `<component><TAB><reasons>` line per component that has
+any. Read-only: two JSON parses plus a handful of stat calls.
+
+| Signal | Where |
+|---|---|
+| console script | `$USER_BIN/ccprospect`, `ccinsight`, `ccteam`, `ccteam-mcp` |
+| hook entry | any `hooks.*[].hooks[].command` in `settings.json` whose argv[0] basename matches a console script |
+| MCP registration | `mcpServers` in `~/.claude.json`, user scope **and** per project |
+| pip dist | `<comp>-*.dist-info` in the `--user` site |
+
+Four signals rather than one because they rot independently: `pip uninstall`
+leaves hooks behind, a hand-edited `settings.json` leaves the MCP entry, and a
+half-finished removal leaves the binary.
+
+**`run_retired_cleanup()`** then invokes `./uninstall.sh` with one `--only
+<comp>` per detected component, plus `-y`. The scope is what makes this safe —
+the uninstaller can only touch what it is scoped to, so a component ccenv
+currently ships can never be swept up. `-y` because this runs inside an install
+the user already invoked; prompting would stall an unattended run.
+
+Per-project state dirs (`.ccprospect/`, `.ccinsight/`, `.ccteam/`) are **kept**
+by default: `--keep-project-data` is passed unless `--purge-retired-state` is
+given. Deleting a user's data as a side effect of an upgrade is not the
+installer's call, even though the uninstaller archives before it deletes.
+(`.ccmemory/` is never in scope at all — it is committed repo content.)
+
+Ordering: the cleanup runs **before** `assemble_ccenv_base_claude_md`, because
+the uninstaller strips the retired components' own `CLAUDE.md` sections. Doing
+it after would leave their text in a file that was just rebuilt.
+
+Flags:
+
+- `--check-retired` — report residue and exit, changing nothing. This is the
+  standalone answer to "do I need to run the uninstaller?"
+- `--no-retired-cleanup` — detect nothing, remove nothing.
+- `--purge-retired-state` — also hand the project state dirs to the uninstaller.
+
+A clean box does zero work: detection finds nothing and the uninstaller is
+never invoked.
+
+Tests: `tests/test_retired_detection.sh` — 17 assertions over throwaway `/tmp`
+HOME fixtures, with a fake `uninstall.sh` that records its argv. The real
+uninstaller is never invoked by the suite, so no test run can remove anything
+from the box it runs on.
+
 ## History
 
+- **v0.16.0** — retired-component cleanup: `retired_residue()` /
+  `run_retired_cleanup()` plus `--check-retired`, `--no-retired-cleanup` and
+  `--purge-retired-state`. Removes the "uninstall everything first" step from
+  ordinary upgrades.
 - **v0.13.3** — bundled temp-file rule rewritten: test scripts and debug
   harnesses go in the project's `tests/` directory; /tmp only for true
   one-shot files (it is wiped on reboot and was losing work across sessions).

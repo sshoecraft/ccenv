@@ -36,7 +36,15 @@
 #   ./install.sh --skip ccloop         # skip a core component (repeatable)
 #   ./install.sh --only ccmemory       # install only listed core components
 #   ./install.sh --no-overlays         # skip overlay scanning
+#   ./install.sh --check-retired       # report retired-component residue, change nothing
+#   ./install.sh --no-retired-cleanup  # leave retired-component residue in place
+#   ./install.sh --purge-retired-state # also delete .ccprospect/.ccinsight/.ccteam
+#                                        project state dirs (archived first)
 #   ./install.sh -h                    # show this help
+#
+# Retired components (ccprospect, ccinsight, ccteam) are detected and removed
+# automatically when residue is found — see "Retired-component cleanup" below.
+# The full uninstall+install dance is not needed for an ordinary upgrade.
 #
 # Idempotent — re-running is safe. Components with their own installers
 # (ccproject/install.sh, ccusage/install.py) are delegated to.
@@ -48,6 +56,16 @@ GLOBAL_CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 SKIP=()
 ONLY=()
 DO_OVERLAYS=1
+CHECK_RETIRED_ONLY=0
+DO_RETIRED_CLEANUP=1
+PURGE_RETIRED_STATE=0
+
+# Components ccenv used to ship and no longer does (retired in v0.13.0). They
+# are NOT installed by this script, but a box installed before that release is
+# still carrying their wiring — MCP registrations, hooks, skills, packages —
+# with nothing in the install path to clean it up. See the retired-cleanup
+# section below.
+RETIRED_COMPONENTS=(ccprospect ccinsight ccteam)
 
 # Dirs scanned for MCP server subdirs (anywhere a subdir with pyproject.toml lives).
 MCP_OVERLAY_DIRS=(
@@ -73,7 +91,10 @@ while [ $# -gt 0 ]; do
         --skip) SKIP+=("$2"); shift 2 ;;
         --only) ONLY+=("$2"); shift 2 ;;
         --no-overlays) DO_OVERLAYS=0; shift ;;
-        -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+        --check-retired) CHECK_RETIRED_ONLY=1; shift ;;
+        --no-retired-cleanup) DO_RETIRED_CLEANUP=0; shift ;;
+        --purge-retired-state) PURGE_RETIRED_STATE=1; shift ;;
+        -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
         *) echo "unknown flag: $1" >&2; exit 1 ;;
     esac
 done
@@ -248,6 +269,145 @@ PY
 }
 
 # ----------------------------------------------------------------------------
+# Retired-component cleanup
+#
+# ccprospect, ccinsight and ccteam were retired in v0.13.0. install.sh no
+# longer installs them, but "no longer installs" is not "removes": a box set
+# up before that release still has their MCP registrations in ~/.claude.json,
+# their hooks in settings.json, their skills and their pip dists. Nothing in
+# the install path ever cleaned that up, so the documented upgrade was
+# "uninstall everything, then install" — a full teardown of a working box to
+# fix residue that, on 99% of upgrades, is not even present.
+#
+# So: detect the residue, and run the uninstaller ONLY for the components that
+# actually have some, ONLY when some exists. A clean box does zero work here.
+#
+# Detection is read-only and cheap (two JSON reads plus a few stat calls) and
+# is exposed on its own as `--check-retired` so the question "do I need to run
+# the uninstaller?" can be answered without running anything.
+#
+# Scope discipline: this NEVER touches a component ccenv currently ships. It
+# passes --only for each detected retired component, so the uninstaller can
+# only remove those. Project state dirs (.ccprospect/ .ccinsight/ .ccteam/)
+# are KEPT unless --purge-retired-state is given — deleting a user's data as a
+# side effect of an upgrade is not the installer's call, even though the
+# uninstaller archives before deleting.
+# ----------------------------------------------------------------------------
+
+# Print one "<component><TAB><reasons>" line per retired component that still
+# has residue on this box. Empty output = nothing to clean.
+retired_residue() {
+    CCENV_USER_BIN="$USER_BIN" python3 - "${RETIRED_COMPONENTS[@]}" <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+
+home = Path.home()
+user_bin = Path(os.environ.get("CCENV_USER_BIN") or (home / ".local" / "bin"))
+skills_dir = home / ".claude" / "skills"
+
+# component -> (console scripts, skill dirs, MCP server names)
+KNOWN = {
+    "ccprospect": (["ccprospect"],            ["prospect-integrate"],  ["ccprospect"]),
+    "ccinsight":  (["ccinsight"],             ["ccinsight-integrate"], ["ccinsight"]),
+    "ccteam":     (["ccteam", "ccteam-mcp"],  [],                      ["ccteam"]),
+}
+
+
+def load(path):
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}
+
+
+settings = load(home / ".claude" / "settings.json")
+claude_json = load(home / ".claude.json")
+
+hook_exes = set()
+for entries in (settings.get("hooks") or {}).values():
+    if not isinstance(entries, list):
+        continue
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for hook in entry.get("hooks") or []:
+            cmd = hook.get("command") if isinstance(hook, dict) else None
+            if isinstance(cmd, str) and cmd.split():
+                hook_exes.add(os.path.basename(cmd.split()[0]))
+
+# MCP servers can be registered at user scope or per project; either one is
+# residue that keeps a dead server in the tool surface.
+mcp_names = set((claude_json.get("mcpServers") or {}).keys())
+for project in (claude_json.get("projects") or {}).values():
+    if isinstance(project, dict):
+        mcp_names.update((project.get("mcpServers") or {}).keys())
+
+try:
+    import site
+    user_site = Path(site.getusersitepackages())
+except Exception:
+    user_site = None
+
+for comp in sys.argv[1:]:
+    scripts, skills, mcps = KNOWN.get(comp, ([comp], [], [comp]))
+    reasons = []
+    for script in scripts:
+        if (user_bin / script).exists():
+            reasons.append("binary " + script)
+        if script in hook_exes:
+            reasons.append("hook " + script)
+    for skill in skills:
+        if (skills_dir / skill).is_dir():
+            reasons.append("skill " + skill)
+    for name in mcps:
+        if name in mcp_names:
+            reasons.append("MCP " + name)
+    if user_site is not None:
+        try:
+            if any(user_site.glob(comp + "-*.dist-info")):
+                reasons.append("pip dist " + comp)
+        except Exception:
+            pass
+    if reasons:
+        print(comp + "\t" + ", ".join(sorted(set(reasons))))
+PYEOF
+}
+
+# Run the uninstaller, scoped to exactly the retired components passed in.
+run_retired_cleanup() {
+    local residue="$1"
+    local args=() comp reasons
+    while IFS=$'\t' read -r comp reasons; do
+        [ -n "$comp" ] || continue
+        info "$comp: $reasons"
+        args+=(--only "$comp")
+    done <<< "$residue"
+
+    if [ ${#args[@]} -eq 0 ]; then
+        return 0
+    fi
+    if [ ! -f "$SCRIPT_DIR/uninstall.sh" ]; then
+        warn "uninstall.sh not found beside install.sh — leaving retired residue in place"
+        return 0
+    fi
+
+    if [ "$PURGE_RETIRED_STATE" = "1" ]; then
+        info "including per-project state dirs (archived to ~/ccenv-uninstall-<stamp>/ first)"
+    else
+        args+=(--keep-project-data)
+    fi
+
+    # -y: this is a scoped, automatic step inside an install the user already
+    # invoked; prompting here would stall an otherwise unattended run. The
+    # scope is what makes it safe, not the prompt.
+    if bash "$SCRIPT_DIR/uninstall.sh" "${args[@]}" -y; then
+        info "retired-component cleanup complete"
+    else
+        warn "retired-component cleanup reported errors — run ./uninstall.sh --only <comp> by hand"
+    fi
+}
+
+# ----------------------------------------------------------------------------
 # Prerequisites
 # ----------------------------------------------------------------------------
 echo "=== ccenv installer ==="
@@ -312,6 +472,23 @@ fi
 export PYTHONUSERBASE="$HOME/.local"
 USER_BIN="$PYTHONUSERBASE/bin"
 info "user-base: $PYTHONUSERBASE  (PYTHONUSERBASE forced for consistency)"
+
+# --check-retired: answer "do I need to run the uninstaller?" and stop. Placed
+# here because it needs USER_BIN and nothing above this point writes anything.
+if [ "$CHECK_RETIRED_ONLY" = "1" ]; then
+    step "retired components" "checking for residue (read-only)"
+    RETIRED_FOUND=$(retired_residue)
+    if [ -z "$RETIRED_FOUND" ]; then
+        info "none — no uninstall needed"
+        exit 0
+    fi
+    while IFS=$'\t' read -r comp reasons; do
+        [ -n "$comp" ] && info "$comp: $reasons"
+    done <<< "$RETIRED_FOUND"
+    info ""
+    info "a normal ./install.sh run will remove these automatically"
+    exit 0
+fi
 
 # Snapshot the user's real PATH before we augment it, so the verify step
 # at the bottom can tell the user accurately whether THEIR shell sees the
@@ -620,6 +797,18 @@ assemble_ccenv_base_claude_md() {
     mv "$tmp" "$GLOBAL_CLAUDE_MD"
     info "installed base $GLOBAL_CLAUDE_MD"
 }
+
+# Retired-component residue is cleared BEFORE the CLAUDE.md region is
+# reassembled and before anything is installed: the uninstaller strips the
+# retired components' own CLAUDE.md sections, so doing it after would leave
+# their text in a file we just rebuilt.
+if [ "$DO_RETIRED_CLEANUP" = "1" ]; then
+    RETIRED_FOUND=$(retired_residue)
+    if [ -n "$RETIRED_FOUND" ]; then
+        step "retired components" "residue found — removing ccprospect/ccinsight/ccteam leftovers"
+        run_retired_cleanup "$RETIRED_FOUND"
+    fi
+fi
 
 assemble_ccenv_base_claude_md
 

@@ -36,10 +36,11 @@ Three components are gone from the bundle:
 | `ccinsight`  | Retired                         |
 | `ccteam`     | Moved to its own repository     |
 
-They installed hooks, MCP servers, skills and per-project state, and none
-of that is removed by installing a newer version over the top — an
-install only ever adds. **If you ran any earlier version of ccenv, run
-`./uninstall.sh` before `./install.sh`** (see [Upgrading](#upgrading)).
+They installed hooks, MCP servers, skills and per-project state. As of
+v0.16.0 `./install.sh` detects anything they left behind and removes it
+for you, scoped to those components only — see
+[Upgrading](#upgrading). Run `./install.sh --check-retired` to see what
+(if anything) is still on your box, without changing a thing.
 
 ## Install
 
@@ -55,6 +56,8 @@ Per-component options:
 ./install.sh --skip ccloop        # skip a component (repeatable)
 ./install.sh --only ccmemory      # install only listed components (repeatable)
 ./install.sh --no-overlays        # skip the overlay scan
+./install.sh --check-retired      # report retired-component residue, change nothing
+./install.sh --no-retired-cleanup # leave retired-component residue in place
 ./install.sh -h                   # full help
 ```
 
@@ -65,21 +68,41 @@ content self-heals.
 
 ## Upgrading
 
-**From any earlier version, uninstall first:**
+**From any version:**
 
 ```sh
 git pull
-./uninstall.sh          # removes EVERYTHING ccenv has ever installed
 ./install.sh
 ```
 
-`install.sh` only ever adds. It cannot remove a hook, MCP registration,
-skill or state directory belonging to a component the bundle no longer
-ships — so upgrading in place leaves `ccprospect`, `ccinsight` and
-`ccteam` fully wired into every session: their SessionStart hooks still
-fire, their MCP servers still register, their skills still load. Their
-binaries are still installed, so the hooks won't even fail loudly; they
-just keep running.
+Since v0.16.0 the installer handles the retired components itself. It
+checks four independent signals per component — console script in the
+`--user` bin, hook entry in `settings.json`, MCP registration in
+`~/.claude.json`, `dist-info` in the `--user` site — and when it finds
+any, it runs `./uninstall.sh` scoped with `--only` to exactly those
+components before installing anything. A clean box does no work at all.
+
+That matters because an install otherwise only ever *adds*: it cannot
+remove a hook, MCP registration or skill belonging to a component the
+bundle no longer ships, so upgrading in place used to leave
+`ccprospect`, `ccinsight` and `ccteam` fully wired into every session —
+SessionStart hooks still firing, MCP servers still registering, and their
+binaries still present so nothing failed loudly.
+
+Check without changing anything:
+
+```sh
+./install.sh --check-retired
+```
+
+Per-project `.ccprospect/`, `.ccinsight/` and `.ccteam/` state dirs are
+**kept** by this automatic pass. Add `--purge-retired-state` to have them
+archived and removed too, or run the uninstaller yourself for a full
+teardown:
+
+```sh
+./uninstall.sh          # removes EVERYTHING ccenv has ever installed
+```
 
 `uninstall.sh` knows about every component ccenv has ever shipped,
 including the three that were removed, which is exactly why it has to run
