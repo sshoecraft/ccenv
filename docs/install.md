@@ -7,6 +7,21 @@ It is idempotent — re-running heals stale state rather than duplicating it.
 See the header comment in `install.sh` for the component list, overlay
 directories, and CLI flags (`--skip`, `--only`, `--no-overlays`).
 
+## The bundled `CLAUDE.md` is the source of the base managed block
+
+`assemble_ccenv_base_claude_md()` runs first, before any component, and
+rebuilds the `# [CCENV MANAGED]` region of `~/.claude/CLAUDE.md` on every run:
+marker header, a verbatim `cat` of this repo's top-level `CLAUDE.md`, any
+overlay blocks, closing marker. Everything outside the markers
+(component-owned sections like `[AWARENESS PROTOCOL]`) is preserved.
+
+Consequence: an edit made directly inside the managed region of
+`~/.claude/CLAUDE.md` lasts only until the next install run. Policy changes
+must land in the repo's top-level `CLAUDE.md` — which doubles as this
+project's own instructions file. v0.13.3 is the precedent: the temp-file rule
+was rewritten in place on one box and had to be back-ported here to survive
+reinstalls.
+
 ## The shared, version-agnostic `--user` site (a load-bearing gotcha)
 
 `install.sh` forces `PYTHONUSERBASE=$HOME/.local` so `pip install --user` lands
@@ -125,6 +140,9 @@ rather than relying on a flag that quietly proceeds degraded.
 
 ## History
 
+- **v0.13.3** — bundled temp-file rule rewritten: test scripts and debug
+  harnesses go in the project's `tests/` directory; /tmp only for true
+  one-shot files (it is wiped on reboot and was losing work across sessions).
 - **v0.13.2** — `strip_always_load()` replaces `enable_always_load()`: the flag
   is now actively removed from existing registrations. It was a 5 s deadline
   that proceeded degraded rather than a barrier, and it cost ccmemory its

@@ -2,6 +2,19 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.13.3
+
+**Bundled temp-file rule rewritten: test scripts and debug harnesses go in the
+project's `tests/` directory, not /tmp.** The old rule sent every test script
+to /tmp, which is wiped on reboot — sessions kept reporting the scripts lost
+and rebuilding them. /tmp remains the place only for genuinely one-shot files
+that will never be used again.
+
+The installed `~/.claude/CLAUDE.md` was already edited in place, but the
+managed block is reassembled from the bundled `CLAUDE.md` on every install
+(`assemble_ccenv_base_claude_md`), so without this source change the next
+install run would have reverted the edit.
+
 ## v0.13.2
 
 **`alwaysLoad` is removed.** `install.sh` set it on ccmemory from v0.6.0; it now

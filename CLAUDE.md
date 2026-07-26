@@ -1,5 +1,6 @@
 ## Development Guidelines
-- NEVER put temporary files or test scripts in the project directory - ALWAYS use /tmp
+- Test scripts, debug harnesses, or ANY file that might be used again in the future: put it in the project's `tests/` directory (create it if it doesn't exist) - NOT /tmp, which is wiped on reboot and loses the work
+- ONLY truly temporary files that will NEVER be used again go in /tmp - do not scatter throwaway files elsewhere in the project directory
 
 ## Python Guidelines
 - when running ANY python command ALWAYS use python3 unless told otherwise!
