@@ -312,34 +312,31 @@ MCP_SETTLE_SECONDS_DEFAULT = 0.0
 SETTLE_SOURCES = ("startup", "resume")
 
 
-def _announce(msg: str) -> None:
-    """Surface a line to the human mid-hook.
-
-    Hook stderr only reaches transcript mode, so also write the controlling
-    terminal directly when there is one — an unexplained multi-second freeze
-    at session start reads as a hang. Best-effort: no tty (ccloop, headless,
-    cron) → stderr alone, never an exception.
-    """
-    sys.stderr.write(msg + "\n")
-    sys.stderr.flush()
-    try:
-        with open("/dev/tty", "w") as tty:
-            tty.write(msg + "\n")
-            tty.flush()
-    except Exception:
-        pass
-
-
-def _settle_for_mcp(source: str) -> None:
-    """Stall so late-connecting MCP servers are registered by the first turn."""
+def _settle_planned(source: str) -> float:
+    """Seconds this session will stall — 0.0 when it won't. Single source of
+    truth for both the stall and the notice hook that announces it."""
     raw = os.environ.get("CCMEMORY_MCP_SETTLE_SECONDS")
     try:
         seconds = float(raw) if raw is not None else MCP_SETTLE_SECONDS_DEFAULT
     except ValueError:
         seconds = MCP_SETTLE_SECONDS_DEFAULT
     if seconds <= 0 or source not in SETTLE_SOURCES:
+        return 0.0
+    return seconds
+
+
+def _settle_for_mcp(source: str) -> None:
+    """Stall so late-connecting MCP servers are registered by the first turn.
+
+    Announces nothing. It cannot: a hook's stdout is read only after it
+    exits, so anything this handler emits arrives after the wait, and hook
+    stderr is never rendered anywhere in the UI — it lands in the session
+    transcript JSONL and nowhere else. The announcement is `notice_handler`'s
+    job, via `systemMessage`, from a hook that returns immediately.
+    """
+    seconds = _settle_planned(source)
+    if not seconds:
         return
-    _announce(f"[ccmemory] waiting {seconds:g}s for MCPs to settle…")
     time.sleep(seconds)
 
 
@@ -388,8 +385,44 @@ def session_handler() -> int:
     return 0
 
 
+def notice_handler() -> int:
+    """SessionStart (second entry): announce the stall BEFORE it is felt.
+
+    The stall lives in `session_handler`, which cannot say anything while it
+    sleeps — Claude Code reads a hook's stdout only after the process exits,
+    so anything that handler emits lands after the wait it was meant to
+    explain. stderr renders nowhere in the UI at all — it lands in the
+    session transcript JSONL and nothing surfaces it, not even ctrl+o — and a
+    raw /dev/tty write is overdrawn by the TUI's next repaint. `systemMessage`
+    is the only hook output Claude Code paints on its own. Measured on 2.1.220.
+
+    So the notice is split into its own SessionStart hook that emits
+    `systemMessage` and exits immediately. Both entries are registered under
+    the same event; this one returns in milliseconds while the other sleeps.
+
+    Emits nothing when no stall is planned, so the default (opt-out) session
+    start is untouched.
+    """
+    payload = _read_stdin_json()
+    d = _autodetect_memory_dir()
+    if not d:
+        return 0
+
+    seconds = _settle_planned(payload.get("source") or "")
+    if not seconds:
+        return 0
+
+    msg = (
+        f"ccmemory: holding session start {seconds:g}s so MCP servers can "
+        f"finish connecting (CCMEMORY_MCP_SETTLE_SECONDS={seconds:g})"
+    )
+    print(json.dumps({"systemMessage": msg}))
+    return 0
+
+
 HANDLERS = {
     "session": session_handler,
+    "notice": notice_handler,
     "stop": stop_handler,
     "guard": guard_handler,
     "inject": inject_handler,

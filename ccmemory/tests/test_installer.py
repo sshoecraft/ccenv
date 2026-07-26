@@ -16,6 +16,19 @@ def test_install_into_empty_settings(tmp_path):
     assert data["hooks"]["SessionStart"]
 
 
+def test_both_session_start_hooks_coexist(tmp_path):
+    """`notice` and `session` share the SessionStart event with the same empty
+    matcher — _ensure_event keys ours-ness on the trailing subcommand, so the
+    second registration must not overwrite the first."""
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}")
+    installer.ensure_registered(settings_path=settings, executable="/bin/ccmemory")
+    data = json.loads(settings.read_text())
+    cmds = [h["command"] for e in data["hooks"]["SessionStart"] for h in e["hooks"]]
+    assert "/bin/ccmemory hook notice" in cmds
+    assert "/bin/ccmemory hook session" in cmds
+
+
 def test_install_is_idempotent(tmp_path):
     settings = tmp_path / "settings.json"
     settings.write_text("{}")

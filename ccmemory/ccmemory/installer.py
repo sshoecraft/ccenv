@@ -4,13 +4,23 @@ Modeled on /src/ccloop/src/ccloop/install.py — atomic writes with timestamped
 backups, idempotent registration, self-healing for relocated executables,
 clean uninstall that doesn't clobber foreign hooks.
 
-ccmemory owns three hook slots:
+ccmemory owns five hook slots:
 
+- ``SessionStart`` → ``ccmemory hook notice``  : announce a planned MCP settle
+  stall. Registered separately from ``session`` on purpose — it must return
+  immediately while ``session`` sleeps, because a hook's stdout is only read
+  after it exits and so cannot describe its own stall.
+- ``SessionStart`` → ``ccmemory hook session`` : stall for MCP connect, inject
+  the memory protocol, maintain the injection ledger
 - ``Stop``        → ``ccmemory hook stop``         : regen MEMORY.md
 - ``PreToolUse`` (Write|Edit|NotebookEdit, matcher) → ``ccmemory hook guard``
   : block hand edits to MEMORY.md so it stays generated
 - ``PreToolUse`` (Read) → ``ccmemory hook inject`` : surface relevant prior
   lessons when Reading a file
+
+Two entries under one event is supported: ``_ensure_event`` keys ours-ness on
+the trailing subcommand, so ``notice`` and ``session`` coexist rather than
+overwrite each other.
 
 Every CLI entry calls ``ensure_registered()`` so the first invocation in any
 project auto-installs. Set ``CCMEMORY_NO_AUTOINSTALL=1`` to skip.
@@ -26,6 +36,7 @@ import time
 from pathlib import Path
 
 HOOKS = [
+    ("SessionStart", "", "notice"),
     ("SessionStart", "", "session"),
     ("Stop", "", "stop"),
     ("PreToolUse", "Write|Edit|NotebookEdit", "guard"),

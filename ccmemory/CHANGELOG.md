@@ -2,6 +2,45 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.15.0
+
+**The settle stall now announces itself before it is felt.** v0.14.0 wrote
+`[ccmemory] waiting Ns for MCPs to settle…` from inside the stalling hook,
+where nobody could see it: a `claude` launch just froze for N seconds with no
+explanation.
+
+A hook cannot describe its own stall. Measured on 2.1.220:
+
+- **stdout** is read only after the process exits — anything the stalling
+  hook emits arrives after the wait it was meant to explain.
+- **stderr** is never rendered anywhere — not the pane, not ctrl+o. It is
+  recorded in the session transcript JSONL and nowhere else. Confirmed in a
+  live transcript the user never saw on screen:
+  `"stderr": "[ccmemory] waiting 10s for MCPs to settle…", "durationMs": 10246`.
+  The stalling hook is therefore silent as of this version; `_announce()`
+  (stderr + `/dev/tty`) is removed.
+- **/dev/tty** does reach the terminal, but the TUI repaints over it within
+  milliseconds. It survives only outside the TUI.
+
+So the notice is its own SessionStart hook, `ccmemory hook notice`, emitting
+`systemMessage` (a documented hook field: "Warning message shown to the
+user") and returning in ~120 ms while `ccmemory hook session` sleeps. Both
+entries live under one event; `_ensure_event` keys ours-ness on the trailing
+subcommand, so they coexist instead of overwriting each other.
+
+- Silent unless a stall is actually planned — no env var, `compact`/`clear`
+  source, or no memory dir → no output at all.
+- `_settle_planned(source)` is now the single source of truth for "will this
+  session stall, and for how long", shared by both hooks.
+- Requires a reinstall: the `notice` entry is new in `~/.claude/settings.json`.
+
+Verified on 2.1.220 with `CCMEMORY_MCP_SETTLE_SECONDS=10`: the two
+SessionStart entries run in parallel and each `systemMessage` is flushed on
+its own hook's completion, so `notice` finished in 416 ms while `session`
+ran 10132 ms. The pane shows
+`SessionStart:startup says: ccmemory: holding session start 10s …` about
+0.4s in, ahead of the remaining ~9.7s of stall.
+
 ## v0.14.0
 
 **Opt-in MCP settle stall in the SessionStart hook.** Set

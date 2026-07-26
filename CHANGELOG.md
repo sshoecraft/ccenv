@@ -2,6 +2,31 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.15.0
+
+**ccmemory 0.15.0: the settle stall announces itself before it is felt.**
+v0.14.0 printed its notice from inside the stalling hook, where nothing could
+show it — a launch with `CCMEMORY_MCP_SETTLE_SECONDS=10` simply froze for ten
+seconds with no explanation.
+
+A hook cannot describe its own stall: stdout is read only after the process
+exits, hook stderr is never rendered anywhere in the UI (it goes to the
+transcript JSONL alone), and a `/dev/tty` write is overdrawn by the TUI
+repaint. Verified in a live transcript — `durationMs: 10246`, stderr
+recorded, nothing on screen and nothing under ctrl+o. The stalling hook is
+now silent; `systemMessage` from the notice hook is the only announcement.
+
+The notice is now its own SessionStart hook — `ccmemory hook notice` — which
+emits `systemMessage` and returns immediately while `ccmemory hook session`
+sleeps. Silent whenever no stall is planned. Requires a reinstall: the entry
+is new in `~/.claude/settings.json`.
+
+Verified on 2.1.220 with a 10s stall: Claude Code runs both SessionStart
+entries in parallel and flushes each `systemMessage` on its own hook's
+completion — `notice` returned in 416 ms, `session` in 10132 ms, so the pane
+showed `SessionStart:startup says: ccmemory: holding session start 10s …`
+about 0.4s in, ahead of the wait it describes.
+
 ## v0.14.0
 
 **ccmemory 0.14.0: opt-in MCP settle stall at SessionStart.**

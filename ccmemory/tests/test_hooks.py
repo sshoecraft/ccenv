@@ -75,11 +75,9 @@ def test_session_emits_protocol(memory_dir, monkeypatch):
 
 
 def _record_settle(monkeypatch):
-    """Stub out the stall itself and the terminal write it emits — tests must
-    not sleep, and must not scribble on the runner's tty."""
-    calls = {"slept": [], "said": []}
+    """Stub out the stall — tests must never actually sleep."""
+    calls = {"slept": []}
     monkeypatch.setattr(hooks.time, "sleep", calls["slept"].append)
-    monkeypatch.setattr(hooks, "_announce", calls["said"].append)
     return calls
 
 
@@ -92,7 +90,6 @@ def test_session_does_not_settle_by_default(memory_dir, monkeypatch):
     _capture(monkeypatch, {"session_id": "s1", "source": "startup"})
     assert hooks.session_handler() == 0
     assert calls["slept"] == []
-    assert calls["said"] == []
 
 
 def test_session_settles_for_mcp_on_startup_when_opted_in(memory_dir, monkeypatch):
@@ -102,7 +99,8 @@ def test_session_settles_for_mcp_on_startup_when_opted_in(memory_dir, monkeypatc
                    env={"CCMEMORY_MCP_SETTLE_SECONDS": "12"})
     assert hooks.session_handler() == 0
     assert calls["slept"] == [12.0]
-    assert "MCPs to settle" in calls["said"][0]
+    # The stalling hook says nothing itself — the notice hook does that.
+    assert "systemMessage" not in out.getvalue()
     # The stall must not cost the injection it exists to make useful.
     assert "memory_search" in json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
 
@@ -145,6 +143,43 @@ def test_session_settle_garbage_env_falls_back_to_default(memory_dir, monkeypatc
              env={"CCMEMORY_MCP_SETTLE_SECONDS": "soon"})
     assert hooks.session_handler() == 0
     assert calls["slept"] == []
+
+
+def test_notice_announces_planned_stall(memory_dir, monkeypatch):
+    """The notice hook exists so the stall is explained BEFORE it is felt: it
+    must emit systemMessage and return without sleeping."""
+    write_memory(memory_dir, "foo")
+    calls = _record_settle(monkeypatch)
+    out = _capture(monkeypatch, {"session_id": "s1", "source": "startup"},
+                   env={"CCMEMORY_MCP_SETTLE_SECONDS": "10"})
+    assert hooks.notice_handler() == 0
+    assert calls["slept"] == []
+    msg = json.loads(out.getvalue())["systemMessage"]
+    assert "10s" in msg and "MCP" in msg
+
+
+def test_notice_silent_when_no_stall_planned(memory_dir, monkeypatch):
+    write_memory(memory_dir, "foo")
+    monkeypatch.delenv("CCMEMORY_MCP_SETTLE_SECONDS", raising=False)
+    out = _capture(monkeypatch, {"session_id": "s1", "source": "startup"})
+    assert hooks.notice_handler() == 0
+    assert out.getvalue() == ""
+
+
+def test_notice_silent_on_compact(memory_dir, monkeypatch):
+    write_memory(memory_dir, "foo")
+    out = _capture(monkeypatch, {"session_id": "s1", "source": "compact"},
+                   env={"CCMEMORY_MCP_SETTLE_SECONDS": "10"})
+    assert hooks.notice_handler() == 0
+    assert out.getvalue() == ""
+
+
+def test_notice_silent_without_memory_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = _capture(monkeypatch, {"session_id": "s1", "source": "startup"},
+                   env={"CCMEMORY_MCP_SETTLE_SECONDS": "10"})
+    assert hooks.notice_handler() == 0
+    assert out.getvalue() == ""
 
 
 def test_session_noop_when_no_memory_dir(tmp_path, monkeypatch):

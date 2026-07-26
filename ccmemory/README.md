@@ -44,7 +44,7 @@ project:
 claude mcp add -s user ccmemory ccmemory mcp
 ```
 
-That's it. The MCP server's first boot autoinstalls four hooks into
+That's it. The MCP server's first boot autoinstalls five hooks into
 `~/.claude/settings.json` and, in any project that has legacy memory at
 `~/.claude/projects/<slug>/memory/`, auto-migrates that memory into a
 project-local `.ccmemory/` directory.
@@ -90,10 +90,11 @@ Manual migration: `ccmemory migrate [--from PATH --to PATH --dry-run --overwrite
 
 ## What gets installed
 
-Four hooks land in `~/.claude/settings.json`, each fail-open:
+Five hooks land in `~/.claude/settings.json`, each fail-open:
 
 | Event       | Matcher                  | Handler   | Purpose |
 |-------------|--------------------------|-----------|---------|
+| SessionStart| –                        | `notice`  | Announce a planned MCP settle stall and exit immediately, so the pause is explained before it is felt. Silent unless `CCMEMORY_MCP_SETTLE_SECONDS` is set. |
 | SessionStart| –                        | `session` | Inject memory protocol as additionalContext (incl. the MCP-readiness clause below); reset the injection ledger on compact/clear; prune ledger rows >30d |
 | Stop        | –                        | `stop`    | Regenerate `MEMORY.md` from frontmatter |
 | PreToolUse  | `Write\|Edit\|NotebookEdit` | `guard`   | Block edits to `MEMORY.md` |
@@ -153,8 +154,15 @@ export CCMEMORY_MCP_SETTLE_SECONDS=12   # ~/.zshenv or ~/.bashrc
 - Applies only to `source` of `startup`/`resume` — a fresh process with
   servers still connecting. `compact` and `clear` reuse the live process,
   where the servers connected long ago, so those never stall.
-- Prints `[ccmemory] waiting 12s for MCPs to settle…` to stderr and to
-  `/dev/tty` when there is one, so the pause doesn't read as a hang.
+- The pause is announced by a *separate* SessionStart hook (`notice`), which
+  emits a `systemMessage` and returns immediately while `session` sleeps. A
+  hook cannot describe its own stall — Claude Code reads hook stdout only
+  after the process exits — and `systemMessage` is the only hook output
+  Claude Code renders on screen by itself. It appears as
+  `SessionStart:startup says: …`.
+- The stalling hook writes nothing. Hook stderr is not rendered anywhere in
+  the UI (not in the pane, not under ctrl+o); it goes to the session
+  transcript JSONL and nowhere else, so it was dead weight.
 - `0`, negative, or unparseable → no stall.
 - Stay under Claude Code's 60s default hook timeout. A timed-out hook is
   killed and the protocol injection dies with it.
