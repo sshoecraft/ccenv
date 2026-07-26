@@ -139,6 +139,31 @@ burned a turn running `bash` to look for it. There is no shell path to an
 MCP tool. If `ToolSearch` is absent, the step is skipped and the protocol
 goes straight to STOP-and-tell-the-user.
 
+### Opt-in settle stall (`CCMEMORY_MCP_SETTLE_SECONDS`)
+
+Since no hook can *gate* on MCP status, the only lever left is wall-clock:
+the SessionStart hook can hold Claude Code before returning, which lets
+background MCP connects finish first. Off by default; export a value to
+enable it.
+
+```sh
+export CCMEMORY_MCP_SETTLE_SECONDS=12   # ~/.zshenv or ~/.bashrc
+```
+
+- Applies only to `source` of `startup`/`resume` — a fresh process with
+  servers still connecting. `compact` and `clear` reuse the live process,
+  where the servers connected long ago, so those never stall.
+- Prints `[ccmemory] waiting 12s for MCPs to settle…` to stderr and to
+  `/dev/tty` when there is one, so the pause doesn't read as a hang.
+- `0`, negative, or unparseable → no stall.
+- Stay under Claude Code's 60s default hook timeout. A timed-out hook is
+  killed and the protocol injection dies with it.
+
+It buys a probability, not a guarantee, and charges every session start on
+the box for it — which is why it ships off. Turn it on only on a box where
+you have actually watched the tools miss turn 1. Full rationale in
+`docs/mcp-settle.md`.
+
 ccmemory is the only server gated this way, and the software fallback is now
 all there is. The top-level `install.sh` used to also mark its entry
 `alwaysLoad: true`; as of ccenv v0.13.2 it strips that flag instead.

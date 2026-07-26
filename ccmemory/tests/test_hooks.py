@@ -74,6 +74,79 @@ def test_session_emits_protocol(memory_dir, monkeypatch):
     assert "memory_search" in payload["hookSpecificOutput"]["additionalContext"]
 
 
+def _record_settle(monkeypatch):
+    """Stub out the stall itself and the terminal write it emits — tests must
+    not sleep, and must not scribble on the runner's tty."""
+    calls = {"slept": [], "said": []}
+    monkeypatch.setattr(hooks.time, "sleep", calls["slept"].append)
+    monkeypatch.setattr(hooks, "_announce", calls["said"].append)
+    return calls
+
+
+def test_session_does_not_settle_by_default(memory_dir, monkeypatch):
+    """The stall is opt-in. An unset CCMEMORY_MCP_SETTLE_SECONDS must cost a
+    fresh session zero wall-clock — this is the default every box runs."""
+    write_memory(memory_dir, "foo")
+    monkeypatch.delenv("CCMEMORY_MCP_SETTLE_SECONDS", raising=False)
+    calls = _record_settle(monkeypatch)
+    _capture(monkeypatch, {"session_id": "s1", "source": "startup"})
+    assert hooks.session_handler() == 0
+    assert calls["slept"] == []
+    assert calls["said"] == []
+
+
+def test_session_settles_for_mcp_on_startup_when_opted_in(memory_dir, monkeypatch):
+    write_memory(memory_dir, "foo")
+    calls = _record_settle(monkeypatch)
+    out = _capture(monkeypatch, {"session_id": "s1", "source": "startup"},
+                   env={"CCMEMORY_MCP_SETTLE_SECONDS": "12"})
+    assert hooks.session_handler() == 0
+    assert calls["slept"] == [12.0]
+    assert "MCPs to settle" in calls["said"][0]
+    # The stall must not cost the injection it exists to make useful.
+    assert "memory_search" in json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
+
+
+def test_session_does_not_settle_on_compact_even_when_opted_in(memory_dir, monkeypatch):
+    """compact/clear reuse the live process — the MCP servers connected long
+    ago. Opting in must not buy a stall on those."""
+    write_memory(memory_dir, "foo")
+    calls = _record_settle(monkeypatch)
+    _capture(monkeypatch, {"session_id": "s1", "source": "compact"},
+             env={"CCMEMORY_MCP_SETTLE_SECONDS": "12"})
+    assert hooks.session_handler() == 0
+    assert calls["slept"] == []
+
+
+def test_session_settle_disabled_by_explicit_zero(memory_dir, monkeypatch):
+    write_memory(memory_dir, "foo")
+    calls = _record_settle(monkeypatch)
+    _capture(monkeypatch, {"session_id": "s1", "source": "startup"},
+             env={"CCMEMORY_MCP_SETTLE_SECONDS": "0"})
+    assert hooks.session_handler() == 0
+    assert calls["slept"] == []
+
+
+def test_session_settle_env_override(memory_dir, monkeypatch):
+    write_memory(memory_dir, "foo")
+    calls = _record_settle(monkeypatch)
+    _capture(monkeypatch, {"session_id": "s1", "source": "startup"},
+             env={"CCMEMORY_MCP_SETTLE_SECONDS": "3.5"})
+    assert hooks.session_handler() == 0
+    assert calls["slept"] == [3.5]
+
+
+def test_session_settle_garbage_env_falls_back_to_default(memory_dir, monkeypatch):
+    """An unparseable value must not stall and must not crash the hook — it
+    falls back to the off-by-default value."""
+    write_memory(memory_dir, "foo")
+    calls = _record_settle(monkeypatch)
+    _capture(monkeypatch, {"session_id": "s1", "source": "startup"},
+             env={"CCMEMORY_MCP_SETTLE_SECONDS": "soon"})
+    assert hooks.session_handler() == 0
+    assert calls["slept"] == []
+
+
 def test_session_noop_when_no_memory_dir(tmp_path, monkeypatch):
     # A startup dir with no .ccmemory/ (and no legacy store) → nothing to emit.
     monkeypatch.chdir(tmp_path)

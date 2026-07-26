@@ -1,6 +1,6 @@
 """ccmemory - persistent memory for Claude Code, file-of-truth + FTS5 index."""
 
-__version__ = "0.13.1"
+__version__ = "0.14.0"
 
 from .store import Store, Memory
 

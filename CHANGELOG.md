@@ -2,6 +2,24 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.14.0
+
+**ccmemory 0.14.0: opt-in MCP settle stall at SessionStart.**
+`CCMEMORY_MCP_SETTLE_SECONDS=12` makes the SessionStart hook announce
+`[ccmemory] waiting 12s for MCPs to settle…` and hold Claude Code that long
+before returning, giving background MCP connects time to land before turn 1.
+
+Unset by default, which is the point. The stall is a blind wall-clock wait —
+no hook can gate on MCP status (SessionStart completes before the `init`
+event that reports `mcp_servers`; no post-connect hook phase exists;
+`alwaysLoad`, removed in v0.13.2, was a deadline that proceeds anyway). It
+buys a probability while charging every fresh session on the box, so the
+operator opts in per box rather than the bundle deciding for them.
+
+Stalls only on `startup`/`resume`; `compact`/`clear` reuse the live process
+and never wait. Unparseable or non-positive values are no-ops. See
+`ccmemory/docs/mcp-settle.md`.
+
 ## v0.13.3
 
 **Bundled temp-file rule rewritten: test scripts and debug harnesses go in the

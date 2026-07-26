@@ -2,6 +2,45 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.14.0
+
+**Opt-in MCP settle stall in the SessionStart hook.** Set
+`CCMEMORY_MCP_SETTLE_SECONDS=12` and the hook announces
+`[ccmemory] waiting 12s for MCPs to settle…` and then holds Claude Code for
+that long before returning, so background MCP connects have a chance to
+finish before turn 1. Unset — the default on every box — it does nothing and
+costs nothing (~200 ms baseline hook time, unchanged).
+
+Why a blind timer: no hook can gate on MCP status. SessionStart completes
+before the `init` event that reports `mcp_servers`, there is no
+post-MCP-connect hook phase (claude-code#26112), and `alwaysLoad` was a
+deadline that starts the session anyway (removed in ccenv v0.13.2). Polling
+for readiness is not implementable from a hook, so the only lever left is
+wall-clock.
+
+Why it ships off: it buys a probability, not a guarantee, and charges every
+fresh session on the box — every `claude` invocation, every ccloop relay,
+every scheduled run — whether or not that session was ever at risk. That
+trade belongs to the operator, who can turn it on for a box where they have
+actually seen the tools miss the first turn.
+
+Details:
+
+- Stalls only on `source` `startup`/`resume`. `compact` and `clear` reuse the
+  live process, where the servers connected long ago — stalling there is pure
+  latency, and it would land mid-work rather than at launch.
+- `0`, negative, or unparseable → no stall, no crash.
+- The announcement goes to stderr *and*, best-effort, to `/dev/tty`. Hook
+  stderr only reaches transcript mode, so an unexplained 12-second freeze at
+  launch would otherwise read as a hang. No tty (ccloop, cron) → stderr alone.
+- Keep any value well under Claude Code's 60s default hook timeout: a
+  timed-out hook is killed and the protocol injection dies with it.
+- Projects with no resolvable memory dir return before the stall is
+  considered.
+
+See `docs/mcp-settle.md`. Also fixes the `hooks.py` module docstring, which
+still claimed "all three handlers" and omitted `session` entirely.
+
 ## v0.13.1
 
 The v0.13.0 remedy for a missing `memory_list` assumed a tool that is

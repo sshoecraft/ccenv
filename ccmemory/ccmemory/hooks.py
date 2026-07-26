@@ -1,8 +1,10 @@
 """Hook handlers — entry points invoked by Claude Code via settings.json.
 
-All three handlers are fail-open: any error → exit 0 → allow the operation.
-Memory is a quality-of-life layer; it must never block real work.
+All handlers are fail-open: any error → exit 0 → allow the operation. Memory
+is a quality-of-life layer; it must never block real work. The one exception
+is ``inject``, which fails SHUT — no injection beats an unbounded one.
 
+- ``session``: stall for MCP connect + inject the protocol (SessionStart)
 - ``stop``   : regen MEMORY.md from frontmatter (Stop event)
 - ``guard``  : block Write/Edit on MEMORY.md (PreToolUse)
 - ``inject`` : surface relevant prior lessons when Reading a file (PreToolUse)
@@ -13,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from .store import Store
@@ -287,6 +290,59 @@ def _compaction_nudge(memory_dir: Path) -> str:
         return ""
 
 
+#: Seconds the SessionStart hook stalls before returning, to let MCP servers
+#: finish connecting while Claude Code is still waiting on the hook. Set via
+#: CCMEMORY_MCP_SETTLE_SECONDS; 0 or negative disables the stall.
+#:
+#: OFF by default, and it stays off: the stall is a blind wall-clock wait and
+#: cannot be anything else — SessionStart completes BEFORE the init event that
+#: reports `mcp_servers`, and there is no post-MCP-connect hook phase
+#: (anthropics/claude-code#26112), so no hook can gate on actual connection
+#: status. It buys a probability, not a guarantee, and charges every session
+#: start on the box for it. That is a trade only the operator can make, on a
+#: box where they have actually seen the tools miss the first turn.
+#:
+#: Keep any value well under Claude Code's 60s default hook timeout — a hook
+#: that times out is killed, and the protocol injection is lost with it.
+MCP_SETTLE_SECONDS_DEFAULT = 0.0
+
+#: Only these SessionStart sources mean a fresh process with MCP servers still
+#: connecting. `compact` and `clear` reuse the live process, where the servers
+#: connected long ago — stalling there is pure latency for no benefit.
+SETTLE_SOURCES = ("startup", "resume")
+
+
+def _announce(msg: str) -> None:
+    """Surface a line to the human mid-hook.
+
+    Hook stderr only reaches transcript mode, so also write the controlling
+    terminal directly when there is one — an unexplained multi-second freeze
+    at session start reads as a hang. Best-effort: no tty (ccloop, headless,
+    cron) → stderr alone, never an exception.
+    """
+    sys.stderr.write(msg + "\n")
+    sys.stderr.flush()
+    try:
+        with open("/dev/tty", "w") as tty:
+            tty.write(msg + "\n")
+            tty.flush()
+    except Exception:
+        pass
+
+
+def _settle_for_mcp(source: str) -> None:
+    """Stall so late-connecting MCP servers are registered by the first turn."""
+    raw = os.environ.get("CCMEMORY_MCP_SETTLE_SECONDS")
+    try:
+        seconds = float(raw) if raw is not None else MCP_SETTLE_SECONDS_DEFAULT
+    except ValueError:
+        seconds = MCP_SETTLE_SECONDS_DEFAULT
+    if seconds <= 0 or source not in SETTLE_SOURCES:
+        return
+    _announce(f"[ccmemory] waiting {seconds:g}s for MCPs to settle…")
+    time.sleep(seconds)
+
+
 #: Rolling retention window for injection_ledger rows (see Store.prune_ledger).
 #: Not a session-lifetime guarantee — a session alive longer than this could
 #: theoretically re-inject a slug — but it dwarfs a ccloop iteration (hours)
@@ -295,8 +351,9 @@ LEDGER_RETENTION_DAYS = 30
 
 
 def session_handler() -> int:
-    """SessionStart: inject the ccmemory protocol as additionalContext, and
-    perform injection-ledger maintenance (compact/clear reset + prune).
+    """SessionStart: stall for MCP connect, inject the ccmemory protocol as
+    additionalContext, and perform injection-ledger maintenance (compact/clear
+    reset + prune).
 
     Only fires when ccmemory is actually wired up for this project (memory
     dir resolvable). Otherwise no-op so we don't pollute the system prompt
@@ -310,6 +367,9 @@ def session_handler() -> int:
 
     session_id = payload.get("session_id") or ""
     source = payload.get("source") or ""
+
+    _settle_for_mcp(source)
+
     try:
         with Store(d) as store:
             # Post compact/clear, whatever context held the earlier teasers
