@@ -367,33 +367,161 @@ class Store:
     def all_memories(self) -> Iterable[sqlite3.Row]:
         return self.db.execute("SELECT name, path, type, description, mtime FROM mem ORDER BY type, name")
 
-    def list_all(self, *, type_filter: str | None = None) -> list[dict]:
-        """Return all memories' metadata, newest first. No query, no ranking.
+    def folded_names(self) -> set[str]:
+        """Raw slugs already represented by a ``compiled-`` article.
 
-        Same dict shape as ``search()`` minus bm25/score: caller gets
-        name/path/type/description/age_days. For "what memories exist" —
-        the answer search() can't give without a non-empty query.
+        Compaction is additive by design (see compile.py): a compile pass
+        writes a ``compiled-<topic>`` article that wikilinks its inputs and
+        leaves the raw files alone. That means the raw notes it folded in are
+        already represented in a denser form — but nothing ever stopped
+        listing them, so every compile pass made ``list_all`` BIGGER. The
+        wikilinks recorded in ``mem_edges`` are the retirement record we
+        already have; this reads it.
+
+        ``ALWAYS_LIST_TYPES`` and untyped memories are NEVER folded, whatever
+        cites them — the same rule that exempts them from budget trimming.
+        They carry behavior, conventions, preferences and durable reference
+        facts (the exact thing the session-start listing exists to surface)
+        and there are few enough of them that keeping all of them costs
+        nothing: 89 entries on a 1,695-memory store.
+        """
+        return {n for n in self.cited_names()
+                if not self._is_always_listed(self._row_type(n))}
+
+    def cited_names(self) -> set[str]:
+        """Every existing raw memory cited by a ``compiled-`` article.
+
+        No type exclusions — this is the raw "has this been compiled at all?"
+        signal, which is what ``compile.count_backlog`` needs. ``folded_names``
+        layers the listing policy on top.
+        """
+        rows = self.db.execute(
+            """
+            SELECT DISTINCT e.dst_name
+            FROM mem_edges e
+            JOIN mem c ON c.name = e.src_name
+            JOIN mem d ON d.name = e.dst_name
+            WHERE c.name LIKE 'compiled-%'
+              AND d.name NOT LIKE 'compiled-%'
+            """
+        ).fetchall()
+        return {r["dst_name"] for r in rows}
+
+    def _row_type(self, name: str) -> str:
+        row = self.db.execute("SELECT type FROM mem WHERE name = ?", (name,)).fetchone()
+        return (row["type"] or "") if row else ""
+
+    def raw_names(self) -> set[str]:
+        """Every indexed memory that is not itself a ``compiled-`` article."""
+        return {r["name"] for r in self.db.execute(
+            "SELECT name FROM mem WHERE name NOT LIKE 'compiled-%'")}
+
+    #: Types never folded and never budget-trimmed out of a listing. These are
+    #: the memories that aren't reachable any other way: the PreToolUse
+    #: auto-injection only fires on a file Read, so behavior/preference/convention
+    #: memories are invisible unless the listing carries them.
+    ALWAYS_LIST_TYPES = ("user", "feedback", "reference")
+
+    @classmethod
+    def _is_always_listed(cls, mtype: str | None) -> bool:
+        """One predicate for both exemptions — never folded AND never trimmed.
+
+        Untyped memories count: an unclassified memory is not evidence that it
+        is unimportant, and there are never many of them.
+        """
+        return not mtype or mtype in cls.ALWAYS_LIST_TYPES
+
+    @staticmethod
+    def _entry_tokens(entry: dict) -> int:
+        # Same ceil(chars/4) estimator claim_injections uses, applied to the
+        # JSON-ish weight of one listing entry.
+        chars = len(entry["name"] or "") + len(entry["description"] or "") + 30
+        return max(1, -(-chars // 4))
+
+    def list_all(
+        self,
+        *,
+        type_filter: str | None = None,
+        include_folded: bool = False,
+        token_budget: int = 0,
+        limit: int = 0,
+    ) -> tuple[list[dict], dict]:
+        """Return metadata for memories, newest first, plus what was withheld.
+
+        Returns ``(entries, counts)`` where counts has total/shown/folded/
+        withheld. ``path`` is deliberately NOT included: it was 43% of the
+        payload on a large store and nothing can use it — ``memory_get`` keys
+        on name.
+
+        Bounded by construction. An unbounded listing is not viable at scale:
+        on a 1,695-memory store it came to ~171k tokens, and the session
+        protocol makes this the mandatory first call of every session. Order
+        of precedence when trimming:
+
+        1. ``ALWAYS_LIST_TYPES`` and untyped memories are emitted in full —
+           never folded, never trimmed.
+        2. Everything else (in practice ``project``) fills the remaining
+           budget newest-first.
+
+        ``token_budget``/``limit`` of 0 mean unbounded. ``include_folded``
+        brings back memories already covered by a compiled article.
         """
         if type_filter:
             rows = self.db.execute(
-                "SELECT name, path, type, description, mtime FROM mem WHERE type = ? ORDER BY mtime DESC",
+                "SELECT name, type, description, mtime FROM mem WHERE type = ? ORDER BY mtime DESC",
                 (type_filter,),
             ).fetchall()
         else:
             rows = self.db.execute(
-                "SELECT name, path, type, description, mtime FROM mem ORDER BY mtime DESC"
+                "SELECT name, type, description, mtime FROM mem ORDER BY mtime DESC"
             ).fetchall()
+
         now = time.time()
-        return [
+        entries = [
             {
                 "name": r["name"],
-                "path": r["path"],
                 "type": r["type"],
                 "description": r["description"],
                 "age_days": max(0.0, (now - r["mtime"]) / 86400.0),
             }
             for r in rows
         ]
+        total = len(entries)
+
+        folded_count = 0
+        if not include_folded:
+            folded = self.folded_names()
+            if folded:
+                kept = [e for e in entries if e["name"] not in folded]
+                folded_count = total - len(kept)
+                entries = kept
+
+        priority = [e for e in entries if self._is_always_listed(e["type"])]
+        rest = [e for e in entries if not self._is_always_listed(e["type"])]
+
+        spent = sum(self._entry_tokens(e) for e in priority) if token_budget else 0
+        shown = list(priority)
+        for e in rest:
+            if limit and len(shown) >= limit:
+                break
+            if token_budget:
+                cost = self._entry_tokens(e)
+                if spent + cost > token_budget:
+                    break
+                spent += cost
+            shown.append(e)
+
+        # Restore newest-first across the whole result; the priority/rest split
+        # is a budgeting device, not an ordering the caller should see.
+        shown.sort(key=lambda e: e["age_days"])
+
+        counts = {
+            "total": total,
+            "shown": len(shown),
+            "folded": folded_count,
+            "withheld": total - folded_count - len(shown),
+        }
+        return shown, counts
 
     def claim_injections(
         self,

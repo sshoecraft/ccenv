@@ -1,6 +1,7 @@
 """Tests for memory compaction backlog detection + status (no LLM, no claude -p)."""
 
 import os
+import time
 
 import pytest
 
@@ -29,20 +30,47 @@ def test_backlog_all_raw_when_no_compiled(memory_dir):
 def test_compiled_articles_excluded_from_raw(memory_dir):
     write_memory(memory_dir, "note-a", mtime=100)
     write_memory(memory_dir, "note-b", mtime=200)
-    # A compiled article newer than the raw notes clears the backlog.
-    write_memory(memory_dir, "compiled-topic", mtime=300)
+    # Citing both inputs is what clears the backlog.
+    write_memory(memory_dir, "compiled-topic", body="[[note-a]] [[note-b]]", mtime=300)
     b = compile_mod.count_backlog(memory_dir)
     assert b["total_raw"] == 2          # compiled-* is not raw
     assert b["has_compiled"] is True
-    assert b["backlog"] == 0            # both raw notes predate the compiled article
+    assert b["backlog"] == 0
 
 
-def test_backlog_counts_only_notes_newer_than_compiled(memory_dir):
-    write_memory(memory_dir, "old-note", mtime=100)
-    write_memory(memory_dir, "compiled-topic", mtime=200)
-    write_memory(memory_dir, "new-note", mtime=300)  # added after last compile
+def test_backlog_counts_uncited_notes_regardless_of_mtime(memory_dir):
+    """The mtime heuristic this replaced assumed a compile pass covers
+    everything older than itself. It doesn't — on a real 1,695-memory store it
+    reported 249 while 431 notes had never been cited by any article, so 182
+    were invisible to the nudge forever. Citation is the exact signal."""
+    write_memory(memory_dir, "old-but-never-folded", mtime=100)
+    write_memory(memory_dir, "old-and-folded", mtime=100)
+    write_memory(memory_dir, "compiled-topic", body="[[old-and-folded]]", mtime=200)
+    write_memory(memory_dir, "new-note", mtime=300)
     b = compile_mod.count_backlog(memory_dir)
-    assert b["backlog"] == 1           # only new-note is unfolded
+    # Under the old rule this was 1 (only new-note). Both uncited notes count.
+    assert b["backlog"] == 2
+    assert b["total_raw"] == 3
+
+
+def test_backlog_quiets_down_once_everything_is_cited(memory_dir):
+    write_memory(memory_dir, "a")
+    write_memory(memory_dir, "b")
+    assert compile_mod.count_backlog(memory_dir)["backlog"] == 2
+    write_memory(memory_dir, "compiled-topic", body="folded [[a]] and [[b]]")
+    assert compile_mod.count_backlog(memory_dir)["backlog"] == 0
+
+
+def test_select_prefers_never_cited_candidates(memory_dir):
+    now = time.time()
+    write_memory(memory_dir, "already-folded", mtime=now - 1)
+    write_memory(memory_dir, "never-folded", mtime=now - 100 * 86400)
+    write_memory(memory_dir, "compiled-topic", body="[[already-folded]]", mtime=now)
+    status = compile_mod.compile_status(memory_dir, max_inputs=5)
+    # Newest-first would have picked already-folded; recompiling it would add an
+    # article without retiring anything.
+    assert "never-folded" in status["candidate_names"]
+    assert "already-folded" not in status["candidate_names"]
 
 
 def test_memory_md_and_appledouble_ignored(memory_dir):

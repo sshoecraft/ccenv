@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -40,6 +41,73 @@ def _resolve_dir() -> Path:
     # on every machine — no per-project manual step. Idempotent.
     paths.ensure_gitignore(d)
     return d
+
+
+#: Token ceiling for one memory_list payload. The session protocol makes
+#: memory_list the mandatory first call of EVERY session, so its cost is paid
+#: before the user's first message and, under ccloop, again on every relay. An
+#: unbounded listing measured ~171k tokens (86% of a 200k window) on a
+#: 1,695-memory store. Small stores never reach this and are unaffected.
+DEFAULT_LIST_TOKEN_BUDGET = 6000
+
+
+def list_token_budget() -> int:
+    """Per-call memory_list token ceiling; 0 disables bounding entirely."""
+    raw = os.environ.get("CCMEMORY_LIST_TOKEN_BUDGET")
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return DEFAULT_LIST_TOKEN_BUDGET
+
+
+def _list_note(memory_dir, counts: dict, *, include_folded: bool) -> str:
+    """What was withheld and what to do about it — carried IN-BAND.
+
+    Two jobs. First, truncation must never be silent: a listing that quietly
+    drops 1,500 entries reads as "that is everything this project knows".
+
+    Second, this is where the compaction directive goes. The SessionStart
+    reminder that suggests compacting is demonstrably ignored, and the MCP
+    server has no model of its own to compact with (the claude -p path was
+    removed from compile.py because it bills metered credit). But the caller
+    of memory_list IS a model, at session start, with the skill available and
+    free to run. So the ask rides back on the payload it already reads.
+    """
+    parts = []
+    if counts["folded"]:
+        parts.append(
+            f"{counts['folded']} memories are already folded into `compiled-` "
+            "articles and are not listed; they remain fully searchable via "
+            "memory_search/memory_get, or pass include_folded=true."
+        )
+    if counts["withheld"]:
+        parts.append(
+            f"{counts['withheld']} further memories were withheld to stay within "
+            "the listing token budget. All user/feedback/reference memories are "
+            "always listed in full; the withheld entries are project notes, "
+            "newest-first — reach them with memory_search(<topic>) or raise "
+            "CCMEMORY_LIST_TOKEN_BUDGET."
+        )
+    if include_folded:
+        parts.append("include_folded=true: folded memories are included in this listing.")
+
+    try:
+        from . import compile as compile_mod
+        b = compile_mod.count_backlog(Path(memory_dir))
+        if b["backlog"] >= b["threshold"]:
+            parts.append(
+                f"COMPACTION DUE: {b['backlog']} memories have never been folded "
+                f"into a compiled- article (threshold {b['threshold']}). Run the "
+                "`compile-memories` skill in THIS session — it is free (no "
+                "claude -p, no metered credit), and until it runs this backlog "
+                "keeps growing and this listing keeps degrading."
+            )
+    except Exception:
+        pass
+
+    return " ".join(parts)
 
 
 def _text(s: str) -> list[dict]:
@@ -77,6 +145,8 @@ def build_app():
             "type": "object",
             "properties": {
                 "type": {"type": "string", "enum": ["user", "feedback", "project", "reference"], "description": "optional type filter"},
+                "include_folded": {"type": "boolean", "description": "also return memories already folded into a compiled- article (default false)", "default": False},
+                "limit": {"type": "integer", "description": "max entries to return; 0 = budget-bounded only", "default": 0},
             },
         },
         "memory_get": {
@@ -116,10 +186,19 @@ def build_app():
 
             if name == "memory_list":
                 type_filter = arguments.get("type") or None
+                include_folded = bool(arguments.get("include_folded") or False)
+                limit = int(arguments.get("limit") or 0)
                 with Store(d) as s:
                     s.reindex()
-                    results = s.list_all(type_filter=type_filter)
-                return _text(json.dumps(results, indent=2, default=str))
+                    results, counts = s.list_all(
+                        type_filter=type_filter,
+                        include_folded=include_folded,
+                        token_budget=list_token_budget(),
+                        limit=limit,
+                    )
+                    note = _list_note(d, counts, include_folded=include_folded)
+                payload = {**counts, "note": note, "memories": results}
+                return _text(json.dumps(payload, indent=2, default=str))
 
             if name == "memory_get":
                 slug = arguments.get("name") or ""
@@ -153,7 +232,18 @@ def build_app():
             if name == "memory_stats":
                 with Store(d) as s:
                     s.reindex()
-                    return _text(json.dumps(s.stats(), indent=2))
+                    st = s.stats()
+                    # Surface listing pressure BEFORE it hurts: an unbounded
+                    # store degrades silently until session-start cost is
+                    # already unpayable.
+                    full, _ = s.list_all(include_folded=True)
+                    st["folded"] = len(s.folded_names())
+                    st["list_tokens_unbounded"] = sum(s._entry_tokens(e) for e in full)
+                    bounded, counts = s.list_all(token_budget=list_token_budget())
+                    st["list_tokens_actual"] = sum(s._entry_tokens(e) for e in bounded)
+                    st["list_budget"] = list_token_budget()
+                    st["list_counts"] = counts
+                    return _text(json.dumps(st, indent=2))
 
             if name == "memory_regen_index":
                 result = index_gen.write(d)
@@ -174,7 +264,7 @@ def build_app():
 
     @app.tool(
         name="memory_list",
-        description="List all memories (metadata only — name, type, description, age, path), newest first. Use when you need every memory, not a ranked subset. Optional type filter (user|feedback|project|reference).",
+        description="List memories (metadata only — name, type, description, age), newest first. Use when you need the inventory, not a ranked subset. Always returns every user/feedback/reference memory in full; project notes fill a token budget, newest-first. Memories already folded into a `compiled-` article are omitted (they stay searchable) unless include_folded=true. The returned `note` field states exactly what was withheld — read it. Optional type filter (user|feedback|project|reference).",
         schema=SCHEMAS["memory_list"],
     )
     def memory_list(**kwargs):
@@ -198,7 +288,7 @@ def build_app():
 
     @app.tool(
         name="memory_stats",
-        description="Counts by type, DB size, and DB path.",
+        description="Counts by type, DB size, DB path, and memory_list cost (bounded vs unbounded tokens, folded count).",
         schema=SCHEMAS["memory_stats"],
     )
     def memory_stats(**kwargs):

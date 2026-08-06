@@ -470,3 +470,54 @@ def test_resume_continues_numbering(project, isolated_home, fake_claude, monkeyp
     # Resume the same run; it should add a 2nd session (numbering continues).
     runner.cmd_resume(run.name, ensure_hook=False)
     assert run.joinpath("sessions.log").read_text().count("\n") == 2
+
+
+def _make_run_dir(tmp_path, criteria=""):
+    d = tmp_path / "proj" / ".ccloop" / "runs" / "rid-1"
+    d.mkdir(parents=True)
+    (d / "resume.md").write_text("BODY-SENTINEL\n", encoding="utf-8")
+    (d / "criteria.md").write_text(criteria + "\n", encoding="utf-8")
+    return d
+
+
+def _write_state_hook(run_dir, body="#!/bin/sh\necho STATE-SENTINEL\n"):
+    hook = run_dir.parent.parent / "state.sh"
+    hook.write_text(body, encoding="utf-8")
+    hook.chmod(0o755)
+    return hook
+
+
+def test_build_prompt_without_state_hook_is_unchanged(tmp_path, monkeypatch):
+    monkeypatch.delenv("CCLOOP_STATE_HOOK", raising=False)
+    d = _make_run_dir(tmp_path)
+    out = runner._build_prompt(d / "resume.md", 1, "RID")
+    assert out == runner.PREAMBLE_LEGACY.format(iter=1) + "BODY-SENTINEL\n"
+
+
+def test_build_prompt_appends_state_block_after_body(tmp_path, monkeypatch):
+    monkeypatch.delenv("CCLOOP_STATE_HOOK", raising=False)
+    d = _make_run_dir(tmp_path)
+    _write_state_hook(d)
+    out = runner._build_prompt(d / "resume.md", 1, "RID")
+    assert "STATE-SENTINEL" in out
+    assert "## Current project state" in out
+    # Forward-looking state comes AFTER the backward-looking resume body.
+    assert out.index("BODY-SENTINEL") < out.index("STATE-SENTINEL")
+
+
+def test_build_prompt_state_block_in_criteria_mode(tmp_path, monkeypatch):
+    monkeypatch.delenv("CCLOOP_STATE_HOOK", raising=False)
+    d = _make_run_dir(tmp_path, criteria="all tests pass")
+    _write_state_hook(d)
+    out = runner._build_prompt(d / "resume.md", 4, "RID")
+    assert "all tests pass" in out
+    assert out.index("all tests pass") < out.index("BODY-SENTINEL") < out.index("STATE-SENTINEL")
+
+
+def test_build_prompt_survives_broken_state_hook(tmp_path, monkeypatch):
+    monkeypatch.delenv("CCLOOP_STATE_HOOK", raising=False)
+    d = _make_run_dir(tmp_path)
+    _write_state_hook(d, "#!/bin/sh\necho oops >&2\nexit 9\n")
+    out = runner._build_prompt(d / "resume.md", 1, "RID")
+    assert "BODY-SENTINEL" in out
+    assert "exited 9" in out

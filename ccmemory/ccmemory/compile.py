@@ -82,17 +82,6 @@ def _is_compiled(p: Path) -> bool:
     return p.name.startswith(COMPILED_PREFIX)
 
 
-def _raw_memory_files(memory_dir: Path) -> list[Path]:
-    """Raw (uncompiled) memory files: *.md under the memory dir, excluding the
-    generated index, AppleDouble sidecars, and already-compiled articles."""
-    out = []
-    for p in memory_dir.rglob("*.md"):
-        if p.name == "MEMORY.md" or p.name.startswith("._") or _is_compiled(p):
-            continue
-        out.append(p)
-    return out
-
-
 def _newest_compiled_mtime(memory_dir: Path) -> float | None:
     mts = [p.stat().st_mtime for p in memory_dir.rglob("*.md")
            if _is_compiled(p) and not p.name.startswith("._")]
@@ -100,22 +89,29 @@ def _newest_compiled_mtime(memory_dir: Path) -> float | None:
 
 
 def count_backlog(memory_dir: Path) -> dict[str, Any]:
-    """Count raw memories not yet folded into a compiled article.
+    """Count raw memories that no compiled article cites.
 
-    The backlog is raw memories newer than the most recent compiled article
-    (or every raw memory when nothing has been compiled yet). Counting the
-    backlog rather than the total is what keeps the SessionStart nudge from
-    firing forever — compiled articles are additive and never delete the raw
-    files, so a total-count check would never quiet down after compaction.
+    Counted from the wikilink edges a compile pass writes, NOT from mtimes.
+    The previous definition — raw memories newer than the most recent compiled
+    article — assumed every pass covers everything older than itself. It
+    doesn't: on a 1,695-memory store that heuristic reported 249 while the
+    true never-cited count was 431. The 182-memory gap was permanently
+    invisible to the nudge, because those notes are older than the newest
+    article but were never actually folded into any of them.
+
+    Citation is the right signal and it's already recorded: a compile pass
+    wikilinks the inputs it folded, so an uncited raw memory is exactly one
+    that has never been compiled. This still quiets down after compaction
+    (citing an input retires it) without ever going quiet about work that was
+    genuinely skipped.
     """
     newest = _newest_compiled_mtime(memory_dir)
-    raw = _raw_memory_files(memory_dir)
-    if newest is None:
-        backlog = len(raw)
-    else:
-        backlog = sum(1 for p in raw if p.stat().st_mtime > newest)
+    with Store(memory_dir) as s:
+        s.reindex()
+        raw = s.raw_names()
+        cited = s.cited_names()
     return {
-        "backlog": backlog,
+        "backlog": len(raw - cited),
         "total_raw": len(raw),
         "has_compiled": newest is not None,
         "threshold": threshold(),
@@ -133,17 +129,26 @@ def _build_input(memories: list[dict]) -> str:
 def _select(memory_dir: Path, *, topic: str | None, max_inputs: int) -> list[dict]:
     with Store(memory_dir) as s:
         s.reindex()
+        cited = s.cited_names()
         if topic:
-            picks = [p for p in s.search(topic, limit=max_inputs) if not p["name"].startswith(COMPILED_PREFIX)]
+            picks = [p for p in s.search(topic, limit=max_inputs * 3)
+                     if not p["name"].startswith(COMPILED_PREFIX)]
+            # Never-compiled notes first: recompiling an already-folded note
+            # adds an article without retiring anything, which is how the
+            # backlog grew while 120 compile passes ran.
+            picks.sort(key=lambda p: p["name"] in cited)
+            picks = picks[:max_inputs]
         else:
             picks = []
             for row in s.db.execute(
                 "SELECT name, path, type, description, mtime FROM mem "
-                "WHERE type = 'project' ORDER BY mtime DESC LIMIT ?",
-                (max_inputs,),
+                "WHERE type = 'project' AND name NOT LIKE 'compiled-%' "
+                "ORDER BY mtime DESC"
             ):
-                if row["name"].startswith(COMPILED_PREFIX):
+                if row["name"] in cited:
                     continue
+                if len(picks) >= max_inputs:
+                    break
                 age_days = max(0.0, (time.time() - row["mtime"]) / 86400.0)
                 picks.append({
                     "name": row["name"], "path": row["path"], "type": row["type"],

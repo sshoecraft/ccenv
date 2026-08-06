@@ -181,15 +181,32 @@ topic) instead.
 ## REQUIRED first action of every session
 
 Before responding to the user's first message, call `memory_list()` once.
-This returns the metadata (name + one-line description + age) for every
-memory stored for this project. It is cheap (descriptions only, no
-bodies) and load-bearing: many memories capture *behavior*, *conventions*,
-*decisions*, or *user preferences* that are NOT tied to any specific file
-path. The PreToolUse-on-Read auto-injection (described below) only fires
-when you Read a project file with a path-related query, so concept and
-behavior memories are otherwise invisible to you. You will not know they
-exist. You will re-derive lessons that are already captured, or repeat
-mistakes the user already corrected.
+This returns metadata only (name + one-line description + age), never
+bodies, and it is load-bearing: many memories capture *behavior*,
+*conventions*, *decisions*, or *user preferences* that are NOT tied to any
+specific file path. The PreToolUse-on-Read auto-injection (described below)
+only fires when you Read a project file with a path-related query, so
+concept and behavior memories are otherwise invisible to you. You will not
+know they exist. You will re-derive lessons that are already captured, or
+repeat mistakes the user already corrected.
+
+The listing is **bounded**, and what it withholds is stated in the `note`
+field of its own response — read that field, don't skip it:
+
+- Every `user`, `feedback` and `reference` memory is always returned in
+  full. Those are the ones nothing else surfaces.
+- `project` notes fill a token budget, newest first
+  (`CCMEMORY_LIST_TOKEN_BUDGET`, default 6000).
+- Memories already folded into a `compiled-<topic>` article are omitted —
+  the article represents them. They are NOT deleted and remain fully
+  reachable via `memory_search` / `memory_get`, or with
+  `memory_list(include_folded=true)`.
+- `shown` / `total` / `folded` / `withheld` come back as explicit counts.
+  A listing that shows 150 of 1,695 is not "everything this project knows",
+  and you must not treat it as such.
+
+If the note says COMPACTION DUE, act on it in this session rather than
+deferring: the backlog only grows, and every session pays for it.
 
 After that initial memory_list, use the decision rules below for the
 rest of the session.
@@ -226,13 +243,16 @@ read like a clean session.
 Three tools, three different shapes of question. Picking the wrong one
 wastes tokens or returns nothing:
 
-- **`memory_list(type?)`** — returns metadata for **every** memory,
-  newest first. Use this when the question is about the *inventory*
-  itself: "what memories do you have", "what's stored for this
-  project", "show me everything", "list all feedback memories", "what
-  do you remember about this project". `memory_search` CANNOT answer
-  these — it's BM25 and silently returns nothing for empty or generic
-  queries. If the user is asking "what" rather than "find X", use list.
+- **`memory_list(type?, include_folded?, limit?)`** — returns the
+  memory *inventory*, newest first, bounded as described above. Use this
+  when the question is about the inventory itself: "what memories do you
+  have", "what's stored for this project", "show me everything", "list
+  all feedback memories", "what do you remember about this project".
+  `memory_search` CANNOT answer these — it's BM25 and silently returns
+  nothing for empty or generic queries. If the user is asking "what"
+  rather than "find X", use list. For a genuinely exhaustive inventory
+  pass `include_folded=true`, and be aware that on a large store that is
+  the expensive call the default deliberately avoids.
 - **`memory_search(query)`** — returns ranked metadata for memories
   matching specific search terms. Use this when you have an actual
   topic: "what do we know about XFS double-frees", "any prior lessons
@@ -280,11 +300,14 @@ def _compaction_nudge(memory_dir: Path) -> str:
         if b["backlog"] < b["threshold"]:
             return ""
         return (
-            f"\n\n---\n📦 Memory compaction available: {b['backlog']} uncompiled "
-            f"memories (threshold {b['threshold']}). Consider invoking the "
-            f"`compile-memories` skill to fold related raw notes into a denser "
-            f"`compiled-<topic>` article. It runs in THIS interactive session — "
-            f"no `claude -p`, no metered Agent-SDK credit."
+            f"\n\n---\n📦 Memory compaction due: {b['backlog']} of {b['total_raw']} "
+            f"memories have never been folded into a `compiled-` article "
+            f"(threshold {b['threshold']}). Invoke the `compile-memories` skill "
+            f"to fold related raw notes into a denser `compiled-<topic>` article. "
+            f"It runs in THIS interactive session — no `claude -p`, no metered "
+            f"Agent-SDK credit. Compacting also shrinks every future "
+            f"`memory_list`: citing a note in a compiled article retires it from "
+            f"the listing while leaving it searchable."
         )
     except Exception:
         return ""

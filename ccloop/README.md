@@ -156,6 +156,62 @@ ccloop --prune --force              # actually delete converged runs
 removes only runs with `DONE` (or empty) resume files. State lives under
 `.ccloop/runs/<run-id>/`.
 
+### Current project state (the state hook)
+
+The resume digest ccloop builds between sessions is entirely
+**backward-looking**: what the last session did, which files it touched,
+what it said last. Nothing in it describes what the project looks like
+**now** — no defect ledger, no board, no version. So a fresh session's
+whole answer to "what should I work on" is *continue whatever the last
+session was doing*.
+
+Hand-maintained state documents don't fix this: a document the outgoing
+session has to remember to update eventually stops being updated, and a
+stale one is worse than none.
+
+So ccloop generates the forward-looking half too. Drop an executable at
+`.ccloop/state.sh` in your project and ccloop runs it at the start of
+**every** session — including the first one of a run — and appends its
+stdout to the prompt as a `## Current project state` section, marked as
+superseding the backward-looking digest above it. No script means no
+section and a byte-identical prompt.
+
+The script is yours to write; ccloop only supplies the plumbing. A
+version that reads a defect ledger:
+
+```sh
+#!/bin/bash
+python3 - <<'PY'
+import json
+d = json.load(open('tests/criteria/OPEN_DEFECTS.json'))
+rank = {'critical': 0, 'high': 1, 'major': 2, 'minor': 3}
+o = [x for x in d['defects'] if x['status'] == 'OPEN']
+o.sort(key=lambda x: rank.get(str(x.get('severity', '')).split()[0], 9))
+print(f"OPEN DEFECTS: {len(o)} — work in this order unless you state why not\n")
+for i, x in enumerate(o, 1):
+    print(f"{i}. [{str(x.get('severity','?')).split()[0]}] {x['id']}")
+    print(f"   next: {str(x.get('next') or '—')[:200]}\n")
+PY
+./showstat.sh 2>/dev/null | tail -3
+```
+
+The hook runs with **cwd set to the project root** and gets
+`CCLOOP_RUN_ID`, `CCLOOP_RUN_DIR`, `CCLOOP_SESSION_NUM` and
+`CCLOOP_PROJECT_ROOT` in its environment.
+
+A broken hook can never stop a run. Not-executable, nonzero exit, timeout
+and empty-output all render **into the block** (so they're visible in the
+session transcript) and log one warning line to ccloop's stderr; a
+nonzero exit still keeps whatever stdout it produced, flagged as possibly
+incomplete. Output over `CCLOOP_STATE_HOOK_MAX_BYTES` is truncated with a
+visible marker rather than silently cut.
+
+To preview exactly what a session will see:
+
+```sh
+python3 tests/render_prompt_preview.py --hook /path/to/state.sh
+```
+
 ### Safety guards
 
 ccloop will abort with a clear message rather than spin forever if:
@@ -207,6 +263,9 @@ abort after N failed launches instead.
 | `CCLOOP_MAX_BUDGET_USD` | (unset) | Passed to `claude --max-budget-usd` |
 | `CCLOOP_CLAUDE_BIN` | `claude` | Path or name of the claude binary to invoke |
 | `CCLOOP_CLAUDE_EXTRA_ARGS` | (unset) | Extra args appended to every claude invocation (whitespace-split) |
+| `CCLOOP_STATE_HOOK` | `<project>/.ccloop/state.sh` | Executable whose stdout becomes the `## Current project state` prompt section; absent = no section |
+| `CCLOOP_STATE_HOOK_TIMEOUT` | 30 | SIGKILL the state hook after N seconds; 0 disables the timeout |
+| `CCLOOP_STATE_HOOK_MAX_BYTES` | 8000 | Truncate state-hook stdout past this many bytes (with a visible marker); 0 disables |
 
 ccloop always sets `DISABLE_AUTO_COMPACT=1` on the spawned session —
 compaction mid-loop scrambles state in ways that defeat the resume

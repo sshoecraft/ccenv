@@ -200,6 +200,11 @@ from the box it runs on.
 
 ## History
 
+- **v0.18.1** — bundled temp-file rule rewritten again. v0.13.3 still framed
+  the split as temporary-vs-reusable, and "this one is throwaway" kept winning:
+  scripts of every kind landed in /tmp. The rule now splits on *kind*, not on a
+  predicted lifetime — scripts always go in the repo (`tests/` for harnesses,
+  `tools/`/`scripts/` for utilities), /tmp is for data only.
 - **v0.16.0** — retired-component cleanup: `retired_residue()` /
   `run_retired_cleanup()` plus `--check-retired`, `--no-retired-cleanup` and
   `--purge-retired-state`. Removes the "uninstall everything first" step from

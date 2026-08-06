@@ -5,6 +5,7 @@
 - [no-per-component-venvs](no-per-component-venvs.md) — ccenv installs via pip3 install --user; pipx is the PEP668 fallback for MANUAL per-component installs, but install.sh itself uses --break-system-pack…
 - [no-version-history-in-claude-md](no-version-history-in-claude-md.md) — Version history goes in CHANGELOG.md, not CLAUDE.md. CLAUDE.md is for purpose/architecture/conventions, never for changelog content.
 - [one-line-copy-paste-commands](one-line-copy-paste-commands.md) — Copy-paste shell commands in install output MUST be one physical line — never split with backslash continuations
+- [scripts-never-go-in-tmp](scripts-never-go-in-tmp.md) — Temp-file rule splits on KIND not lifetime: every script goes in the repo (tests/ or tools/scripts/); /tmp is for data only. ccenv v0.18.1.
 - [test-destructive-scripts-against-fixtures-only](test-destructive-scripts-against-fixtures-only.md) — When testing a destructive script, --dry-run + a /tmp fixture ONLY. Never pass -y on the live system, even scoped by --only, even when the user plans…
 
 ## project

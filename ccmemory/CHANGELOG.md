@@ -2,6 +2,63 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.16.0
+
+**`memory_list` is bounded, and compaction finally reduces something.**
+
+`memory_list()` is the mandatory first call of every session and had no cap of
+any kind. Measured on a 1,695-memory store: **684,407 chars ≈ 171,000 tokens,
+85.6% of a 200k context window**, paid before the user's first message and
+again on every ccloop relay.
+
+Worse, compaction was making it *bigger*. That store had 120 `compiled-*`
+articles citing 1,144 of its 1,575 raw memories — and still listed every one of
+them. `compile.py` states the design: raw inputs stay, the article is purely
+additive. So 120 compile passes added 120 entries and retired zero. It reads as
+"compaction never happens"; it happened 120 times with the payoff designed out.
+
+The retirement record already existed and went unread: a compile pass wikilinks
+its inputs, and `Store._upsert` records every wikilink in `mem_edges`.
+
+- `Store.cited_names()` / `folded_names()` — raw memories already represented by
+  a `compiled-` article. `list_all()` omits them by default.
+- `list_all()` now returns `(entries, counts)` with explicit
+  `total`/`shown`/`folded`/`withheld`, takes `include_folded` / `token_budget` /
+  `limit`, and **drops `path`** from entries — 43% of the payload and unusable,
+  since `memory_get` keys on name.
+- `ALWAYS_LIST_TYPES` (`user`, `feedback`, `reference`) and untyped memories are
+  never folded and never trimmed — one predicate governs both. 90 entries on
+  that store; exactly what the session-start call exists to surface.
+- `memory_list` returns an object (`{total, shown, folded, withheld, note,
+  memories}`) instead of a bare array. Truncation is never silent.
+- The `note` carries the compaction directive **in-band**. The SessionStart
+  reminder is demonstrably ignored, and the MCP server has no model of its own
+  (the `claude -p` path was removed from `compile.py` because it bills metered
+  credit). The caller of `memory_list` *is* a model, at session start, with the
+  free skill available — so the ask rides back on the payload it already reads.
+- `CCMEMORY_LIST_TOKEN_BUDGET` (default 6000); 0 restores unbounded listing.
+- `memory_stats` reports `list_tokens_actual`, `list_tokens_unbounded`,
+  `folded` and `list_counts`.
+
+Net on that store: **1,695 entries / 171,101 tokens → 123 entries / 5,961
+tokens**, with all 90 load-bearing memories retained. Nothing is deleted, moved
+or rewritten; folded memories stay searchable via `memory_search`,
+`memory_get`, auto-injection, or `memory_list(include_folded=true)`.
+
+**`count_backlog` counts citations, not mtimes.** It defined the backlog as raw
+memories newer than the newest compiled article — assuming each pass covers
+everything older. It reported 249 on that store while 432 had never been cited;
+183 were invisible to the nudge permanently. Now counted from `mem_edges`, and
+`_select()` prefers never-cited candidates so repeated passes drain the backlog
+instead of recompiling recent notes.
+
+`SESSION_PROTOCOL` drops the false "it is cheap" claim and documents the
+bounding. `skills/compile-memories/SKILL.md` promotes input citation from
+stylistic to mandatory — an uncited input is neither retired nor cleared from
+the backlog, however thoroughly its content was folded in.
+
+See `docs/list-budget.md`.
+
 ## v0.15.0
 
 **The settle stall now announces itself before it is felt.** v0.14.0 wrote

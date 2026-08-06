@@ -52,7 +52,12 @@ reports `backlog`, `threshold`, and `candidate_names`.
    > 2. Extracts every decision, lesson, and recurring failure mode — deduplicated
    >    and chronologically ordered when timing matters.
    > 3. Cross-references the source memories using their literal slugs as wikilinks
-   >    (e.g. `[[pythonuserbase-in-zshenv]]`).
+   >    (e.g. `[[pythonuserbase-in-zshenv]]`). MANDATORY — cite EVERY input you
+   >    folded in, with its exact slug. These wikilinks are the retirement record:
+   >    `memory_list` omits a raw note precisely because a compiled article cites
+   >    it, and `count_backlog` counts a note as compiled precisely when it is
+   >    cited. An input you fold in but do not cite stays in the backlog and keeps
+   >    costing every session tokens forever.
    > 4. Is terse. Engineering prose, no platitudes, no headers like "## Summary".
 
 5. **Write it** with `memory_write`:
@@ -67,8 +72,11 @@ reports `backlog`, `threshold`, and `candidate_names`.
    article is searchable immediately and the Stop hook regenerates `MEMORY.md`.
 
 6. **Do NOT delete the raw memories.** The compiled article is additive — the raw notes stay
-   as the source of truth. Writing the `compiled-<topic>` article is what quiets the backlog
-   nudge (it counts raw memories newer than the most recent compiled article).
+   as the source of truth, fully searchable via `memory_search` / `memory_get`. What changes
+   is that a cited note is no longer listed by `memory_list` (the article represents it), so
+   compaction is what actually reduces per-session listing cost. Citing is the whole
+   mechanism: an uncited note is neither retired from the listing nor cleared from the
+   backlog, no matter how thoroughly you folded its content in.
 
 7. **Report** to the user: which raw memories you folded in, the new article name, and a
    one-line description. Offer to compile another topic cluster if the backlog is still high.

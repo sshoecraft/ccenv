@@ -56,6 +56,12 @@ session within that run gets a **session-id** (UUID, passed via
 same project safe.
 
 ```
+.ccloop/
+  ├─ state.sh           ← optional project state hook (see state.py)
+  └─ runs/<run-id>/
+```
+
+```
 .ccloop/runs/<run-id>/
   ├─ task.md            ← original task (written once, never modified)
   ├─ resume.md          ← current handoff (rewritten between sessions)
@@ -181,6 +187,37 @@ original task (carried verbatim), approximate context tokens at the last
 turn, tool-use counts, files written/edited, the last 20 bash commands,
 and the last assistant text turn. Emits markdown used as the next
 session's prompt body.
+
+This is the **backward-looking** half of a handoff — every field except
+the original task is derived from what the previous session did. The
+forward-looking half (what the project looks like *now*) is `state.py`.
+
+### `state.py` — project state hook
+
+Runs `<project>/.ccloop/state.sh` (override: `CCLOOP_STATE_HOOK`) and
+wraps its stdout as a `## Current project state` section appended to the
+prompt after the resume body.
+
+Why it exists: nothing in `resume.md` describes current project state, so
+a fresh session's only steer is "continue what the last session was
+doing". Projects were expected to close that with a hand-maintained state
+document, but a document the outgoing model must remember to update
+eventually stops being updated — and a stale one is worse than none. The
+fix is to generate the forward half the same way the backward half is
+already generated. ccloop supplies the plumbing; the project supplies the
+script (typically reading a defect ledger or board).
+
+Executed with cwd = project root and `CCLOOP_RUN_ID` / `CCLOOP_RUN_DIR` /
+`CCLOOP_SESSION_NUM` / `CCLOOP_PROJECT_ROOT` in the environment; timeout
+`CCLOOP_STATE_HOOK_TIMEOUT` (30s), output capped at
+`CCLOOP_STATE_HOOK_MAX_BYTES` (8000) with a **visible** truncation marker.
+
+`state_block()` never raises — it sits on the path that builds every
+session's prompt, so a project's broken shell script must not be able to
+stop a run. Not-executable / nonzero exit / timeout / empty output each
+render *into* the block (diagnosable from the session transcript alone)
+and log one warning to ccloop's stderr; a nonzero exit still keeps the
+stdout it produced, flagged as possibly incomplete.
 
 ### `transcript.py` — transcript helpers
 
@@ -496,6 +533,17 @@ earlier design probes):
   guards (`Prompt is too long`, stuck detection) provide the safety net.
 - **Prompt delivery**: final argv element (resume is bounded; oversize
   surfaces as the context-wall guard).
+- **State hook runs at prompt build, not at summarize**: `_build_prompt`
+  fires before *every* session including session 1 and every launch
+  retry, so the block is computed seconds before the session reads it and
+  can never be a stale leftover. Building it in `summarize()` would skip
+  session 1 entirely and would freeze the last-computed block into
+  `resume.md` whenever a transcript is missing — the exact staleness
+  failure the hook exists to eliminate. It also keeps `summarize.py` a
+  pure transcript transform.
+- **State hook is an executable only**, never a static file fallback: a
+  hand-written state file is the failure mode being fixed, so ccloop
+  declines to make it convenient.
 
 ## Testing
 

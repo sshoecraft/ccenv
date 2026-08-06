@@ -2,6 +2,108 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.18.1
+
+**Bundled temp-file rule: split on kind, not on predicted lifetime.**
+
+v0.13.3 phrased the rule as "anything that might be used again goes in
+`tests/`, truly temporary files go in /tmp". That put the decision on a
+judgment call the model reliably got wrong — every script arrived with a story
+about why *this* one was throwaway, and it went to /tmp, which is wiped on
+reboot.
+
+The rule no longer asks for that prediction. Scripts are categorically not temp
+files: test harnesses, debug probes and repro cases go in the project's
+`tests/`; utilities and ops helpers go in `tools/` or `scripts/`. /tmp is for
+*data* only — scratch output, downloaded blobs, throwaway fixtures, intermediate
+dumps.
+
+Edited in `/src/ccenv/CLAUDE.md`, the verbatim source of the `[CCENV MANAGED]`
+region, and mirrored into the installed `~/.claude/CLAUDE.md` so it takes effect
+before the next install run.
+
+## v0.18.0
+
+**ccmemory: `memory_list` is bounded, and compaction finally reduces
+something.**
+
+`memory_list()` is the mandatory first call of every session and had no cap.
+Measured on a 1,695-memory store: **≈171,000 tokens — 85.6% of a 200k context
+window** — spent before the user's first message, and again on every ccloop
+relay.
+
+Compaction was making it worse, not better. That store had 120 `compiled-*`
+articles citing 1,144 of its 1,575 raw memories, and listed every one of them
+anyway: compiled articles are additive by design, so 120 passes added 120
+entries and retired zero. The retirement record already existed and went
+unread — each pass wikilinks its inputs, and those links are recorded in
+`mem_edges`.
+
+`memory_list` now omits raw memories already cited by a compiled article, drops
+the unusable `path` field (43% of the payload), and fills a token budget
+newest-first. `user`/`feedback`/`reference` and untyped memories are never
+folded and never trimmed. Truncation is never silent: the response carries
+explicit `total`/`shown`/`folded`/`withheld` counts plus a `note` saying what
+was withheld and how to reach it — and, when the backlog is over threshold, the
+compaction directive itself, in-band where the model must read it.
+
+Net: **1,695 entries / 171,101 tokens → 123 entries / 5,961 tokens**, all 90
+load-bearing memories retained. No memory file is created, modified, moved or
+deleted; folded memories stay fully searchable.
+
+Also: `count_backlog` counted raw memories newer than the newest compiled
+article, reporting 249 where 432 had never been cited — 183 invisible to the
+nudge forever. It now counts citations.
+
+ccmemory 0.15.0 → 0.16.0. See `ccmemory/docs/list-budget.md`.
+
+## v0.17.0
+
+**ccloop generates the forward-looking half of a handoff too: an optional
+project state hook injects current project state into every session's
+prompt.**
+
+Everything `summarize.py` puts in `resume.md` is backward-looking, and five
+of its six sections are derived from the previous session's transcript:
+original task, previous-session metadata, files edited, last 20 bash
+commands, last text turn, continue. Nothing in it describes what the project
+looks like *now* — not a defect ledger, not a board, not a version. So a
+fresh session's entire answer to "what should I work on" was *here is what
+the last session was doing, continue it*.
+
+The intended fix was a hand-maintained state document referenced from the
+task text. That doesn't hold: a document the outgoing model has to remember
+to update eventually isn't updated, and a stale one is worse than none. One
+observed run's state document froze at v0.11.302 while the tree ran on to
+v0.11.397 — every session after that was steered by a month-old snapshot.
+
+ccloop now generates the forward half the same way it already generates the
+backward half:
+
+- Drop an executable at `<project>/.ccloop/state.sh` (override with
+  `CCLOOP_STATE_HOOK`). ccloop runs it at the start of **every** session —
+  including session 1 of a run and every launch retry — and appends its
+  stdout as a `## Current project state` section, explicitly marked as
+  superseding the backward-looking digest above it.
+- The hook runs with cwd = project root and gets `CCLOOP_RUN_ID`,
+  `CCLOOP_RUN_DIR`, `CCLOOP_SESSION_NUM` and `CCLOOP_PROJECT_ROOT`.
+- No hook means no section and a byte-identical prompt — nothing changes for
+  projects that don't opt in.
+- Runs at prompt-build time, not at summarize time, so the block is computed
+  seconds before the session reads it and can never be a stale leftover.
+  `summarize.py` stays a pure transcript transform.
+- A broken hook can never stop a run. Not-executable, nonzero exit, timeout
+  and empty output each render into the block (visible in the session
+  transcript) and log one warning to ccloop's stderr; a nonzero exit still
+  keeps whatever stdout it produced, flagged as possibly incomplete.
+- Output past `CCLOOP_STATE_HOOK_MAX_BYTES` (8000) is truncated with a
+  visible marker naming the knob — a silent cap reads as "that's the whole
+  ledger" when it isn't. Timeout is `CCLOOP_STATE_HOOK_TIMEOUT` (30s).
+- `tests/render_prompt_preview.py` prints the exact prompt a session would
+  receive, so a hook can be checked without spending a session.
+
+ccloop 0.10.1 → 0.11.0.
+
 ## v0.16.0
 
 **install.sh removes retired-component residue by itself; the

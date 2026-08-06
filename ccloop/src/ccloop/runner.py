@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import install, stream, summarize
+from . import install, state, stream, summarize
 from . import transcript as tx
 
 
@@ -366,14 +366,21 @@ Then return to the criteria.
 """
 
 
-def _build_prompt(resume_file, iteration):
+def _build_prompt(resume_file, iteration, run_id=""):
     body = Path(resume_file).read_text(encoding="utf-8", errors="replace")
     run_dir = Path(resume_file).parent
+    # The resume body is the BACKWARD half of the handoff (what the last
+    # session did); the state block is the FORWARD half (what the project
+    # looks like right now). It goes last so it's the freshest thing the
+    # session reads, and it's built here — not in summarize() — so session 1
+    # of a run gets it too and it can never be a stale leftover.
+    tail = state.state_block(run_dir, run_id, iteration, log=log)
     if _has_criteria(run_dir):
         criteria = _criteria_path(run_dir).read_text(encoding="utf-8", errors="replace").strip()
         marker = str(_criteria_met_path(run_dir))
-        return PREAMBLE_CRITERIA.format(iter=iteration, criteria=criteria, marker=marker) + body
-    return PREAMBLE_LEGACY.format(iter=iteration) + body
+        return (PREAMBLE_CRITERIA.format(iter=iteration, criteria=criteria, marker=marker)
+                + body + tail)
+    return PREAMBLE_LEGACY.format(iter=iteration) + body + tail
 
 
 def _build_command(cfg, session_id, prompt_file=None, interactive=False):
@@ -747,7 +754,7 @@ def loop(run_id, run_dir, ensure_hook=True, interactive=False, model=None, effor
 
             # The handoff prompt is built once per session number; it does not
             # change across launch-failure retries (resume.md is untouched).
-            prompt_text = _build_prompt(resume_file, iteration)
+            prompt_text = _build_prompt(resume_file, iteration, run_id)
             prompt_file = run_dir / f"session-{iteration}.prompt"
             prompt_file.write_text(prompt_text, encoding="utf-8")
 

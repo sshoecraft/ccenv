@@ -1,6 +1,10 @@
 ## Development Guidelines
-- Test scripts, debug harnesses, or ANY file that might be used again in the future: put it in the project's `tests/` directory (create it if it doesn't exist) - NOT /tmp, which is wiped on reboot and loses the work
-- ONLY truly temporary files that will NEVER be used again go in /tmp - do not scatter throwaway files elsewhere in the project directory
+- **A script is never a temp file.** Anything executable you write — test harness, debug probe, repro case, one-off migration, data-munger, convenience helper — goes in the repo, NOT /tmp. /tmp is wiped on reboot and the work is gone.
+  - Test scripts, debug harnesses, repro cases → the project's `tests/` directory
+  - Utilities, ops/build helpers, anything that could be run again by hand → the project's `tools/` or `scripts/` directory (use whichever the project already has; create `scripts/` if it has neither)
+  - Create the directory if it doesn't exist. Do NOT talk yourself out of this — "it's just a quick throwaway" is exactly how reusable work gets deleted. If there is ANY chance the script gets run a second time, it goes in the repo.
+- **/tmp is for data, not code.** Only genuinely transient, regenerable, never-read-again *data* belongs there: scratch output, downloaded blobs, throwaway fixtures, intermediate dumps.
+- Do not scatter files of either kind loosely in the project root — use the directories above.
 
 ## Python Guidelines
 - when running ANY python command ALWAYS use python3 unless told otherwise!
