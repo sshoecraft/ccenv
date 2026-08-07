@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import install, state, stream, summarize
+from . import handoff, install, state, stream, summarize
 from . import transcript as tx
 
 
@@ -366,6 +366,29 @@ Then return to the criteria.
 """
 
 
+HANDOFF_INSTRUCTION = """## Maintain your handoff file
+
+    {path}
+
+Keep it current AS YOU WORK — not at the end. A session that fills its context
+or dies mid-tool never gets the chance to write a parting summary, and ccloop
+can only hand on what is already on disk when the session stops.
+
+Rewrite the whole file (don't append) whenever your understanding changes:
+what you are doing, what you have established, what you tried that did NOT
+work, and the single next concrete step. Keep it under ~100 lines — this is a
+handoff, not a log.
+
+ccloop freshness-checks it. If the file was not written during your session,
+the next session is told plainly that it is stale and falls back to scraping
+your transcript. An unmaintained file costs the handoff; it does not silently
+pass off old intent as current.
+
+---
+
+"""
+
+
 def _build_prompt(resume_file, iteration, run_id=""):
     body = Path(resume_file).read_text(encoding="utf-8", errors="replace")
     run_dir = Path(resume_file).parent
@@ -375,12 +398,16 @@ def _build_prompt(resume_file, iteration, run_id=""):
     # session reads, and it's built here — not in summarize() — so session 1
     # of a run gets it too and it can never be a stale leftover.
     tail = state.state_block(run_dir, run_id, iteration, log=log)
+    # Ahead of the resume body: the session has to know it owns this file
+    # before it reads what the last session left, or it treats handoff
+    # maintenance as someone else's job and the file goes stale.
+    hand = HANDOFF_INSTRUCTION.format(path=handoff.handoff_path(run_dir))
     if _has_criteria(run_dir):
         criteria = _criteria_path(run_dir).read_text(encoding="utf-8", errors="replace").strip()
         marker = str(_criteria_met_path(run_dir))
         return (PREAMBLE_CRITERIA.format(iter=iteration, criteria=criteria, marker=marker)
-                + body + tail)
-    return PREAMBLE_LEGACY.format(iter=iteration) + body + tail
+                + hand + body + tail)
+    return PREAMBLE_LEGACY.format(iter=iteration) + hand + body + tail
 
 
 def _build_command(cfg, session_id, prompt_file=None, interactive=False):
@@ -897,7 +924,8 @@ def loop(run_id, run_dir, ensure_hook=True, interactive=False, model=None, effor
             if have_transcript:
                 try:
                     new_resume = summarize.summarize(
-                        transcript_file, task, run_id, iteration
+                        transcript_file, task, run_id, iteration,
+                        run_dir=run_dir, session_started=start,
                     )
                     tmp = resume_file.with_suffix(".md.tmp")
                     tmp.write_text(new_resume, encoding="utf-8")

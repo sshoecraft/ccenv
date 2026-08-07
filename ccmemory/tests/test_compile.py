@@ -18,6 +18,47 @@ def test_threshold_default_and_env(monkeypatch):
     assert compile_mod.threshold() == compile_mod.DEFAULT_THRESHOLD
 
 
+def test_compilable_and_always_listed_types_are_complementary():
+    # The drift that broke mxfs: _select ingested only 'project' while
+    # count_backlog counted every type, so 'reference' was in neither the
+    # compilable set nor the exempt set. It could not be retired from a
+    # listing and it could not be drained from the backlog — 144 permanently
+    # stuck memories against a threshold of 20. Any new type must land in
+    # exactly one of these tuples.
+    from ccmemory.store import Store
+
+    known = {"user", "feedback", "project", "reference"}
+    assert set(Store.ALWAYS_LIST_TYPES).isdisjoint(compile_mod.COMPILABLE_TYPES)
+    assert set(Store.ALWAYS_LIST_TYPES) | set(compile_mod.COMPILABLE_TYPES) == known
+
+
+def test_backlog_counts_only_what_a_compile_pass_can_act_on(memory_dir):
+    # An unsilenceable alarm is a broken alarm. Types _select will never ingest
+    # must not be counted, or the backlog has a floor above the threshold and
+    # the nudge fires forever no matter how much compaction runs.
+    write_memory(memory_dir, "pref", type="user")
+    for i in range(3):
+        write_memory(memory_dir, f"corrected{i}", type="feedback")
+    write_memory(memory_dir, "note", type="project")
+    write_memory(memory_dir, "fact", type="reference")
+
+    b = compile_mod.count_backlog(memory_dir)
+    assert b["backlog"] == 2, "only the project + reference notes are actionable"
+    assert b["total_raw"] == 2
+
+    # And compacting those two drives it to zero — the floor is reachable.
+    write_memory(memory_dir, "compiled-topic", body="[[note]] [[fact]]")
+    assert compile_mod.count_backlog(memory_dir)["backlog"] == 0
+
+
+def test_select_offers_reference_notes_as_candidates(memory_dir):
+    write_memory(memory_dir, "note", type="project")
+    write_memory(memory_dir, "fact", type="reference")
+    write_memory(memory_dir, "pref", type="user")
+    picks = compile_mod._select(memory_dir, topic=None, max_inputs=10)
+    assert {p["name"] for p in picks} == {"note", "fact"}
+
+
 def test_backlog_all_raw_when_no_compiled(memory_dir):
     for i in range(3):
         write_memory(memory_dir, f"note{i}")

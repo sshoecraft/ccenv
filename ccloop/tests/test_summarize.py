@@ -23,9 +23,12 @@ def test_summary_has_expected_sections(tmp_path):
     assert "Refactor auth" in out
     assert "Files written or edited" in out
     assert "/p/auth.py" in out
-    assert "pytest -q" in out
     assert "I refactored the auth module" in out
     assert "sid" in out  # session id derived from filename
+    # Bash commands were removed in 0.20.0: a third of the document's tokens
+    # for 20 commands clipped to 160 chars, which nothing downstream used.
+    assert "pytest -q" not in out
+    assert "Last 20 bash commands" not in out
 
 
 def test_summary_handles_empty_transcript(tmp_path):

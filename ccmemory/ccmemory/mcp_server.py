@@ -51,6 +51,13 @@ def _resolve_dir() -> Path:
 DEFAULT_LIST_TOKEN_BUDGET = 6000
 
 
+#: Tokens held back from the entry budget for the payload envelope — the
+#: counts object and the `note`, which runs to ~760 chars on a store with
+#: folded/withheld/COMPACTION-DUE clauses all firing. Budgeting only the
+#: entries left this unmodelled and every listing overshot by ~210 tokens.
+LIST_ENVELOPE_TOKENS = 300
+
+
 def list_token_budget() -> int:
     """Per-call memory_list token ceiling; 0 disables bounding entirely."""
     raw = os.environ.get("CCMEMORY_LIST_TOKEN_BUDGET")
@@ -85,10 +92,20 @@ def _list_note(memory_dir, counts: dict, *, include_folded: bool) -> str:
     if counts["withheld"]:
         parts.append(
             f"{counts['withheld']} further memories were withheld to stay within "
-            "the listing token budget. All user/feedback/reference memories are "
-            "always listed in full; the withheld entries are project notes, "
-            "newest-first — reach them with memory_search(<topic>) or raise "
+            "the listing token budget. The budget is spent in tiers: "
+            "user/feedback first, then `compiled-` articles, then raw "
+            "project/reference newest-first — so the withheld entries are the "
+            "oldest raw notes. Reach them with memory_search(<topic>) or raise "
             "CCMEMORY_LIST_TOKEN_BUDGET."
+        )
+    if counts.get("load_bearing_withheld"):
+        parts.append(
+            f"WARNING: {counts['load_bearing_withheld']} user/feedback memories did "
+            "not fit even in the first budget tier. These record behavior and "
+            "corrections and have no topic to search for, so unlike the notes "
+            "above they are NOT recoverable with memory_search — you are missing "
+            "instructions you cannot know to ask about. Raise "
+            "CCMEMORY_LIST_TOKEN_BUDGET, or call memory_list(type=\"feedback\")."
         )
     if include_folded:
         parts.append("include_folded=true: folded memories are included in this listing.")
@@ -188,17 +205,22 @@ def build_app():
                 type_filter = arguments.get("type") or None
                 include_folded = bool(arguments.get("include_folded") or False)
                 limit = int(arguments.get("limit") or 0)
+                budget = list_token_budget()
+                entry_budget = max(1, budget - LIST_ENVELOPE_TOKENS) if budget else 0
                 with Store(d) as s:
                     s.reindex()
                     results, counts = s.list_all(
                         type_filter=type_filter,
                         include_folded=include_folded,
-                        token_budget=list_token_budget(),
+                        token_budget=entry_budget,
                         limit=limit,
                     )
                     note = _list_note(d, counts, include_folded=include_folded)
                 payload = {**counts, "note": note, "memories": results}
-                return _text(json.dumps(payload, indent=2, default=str))
+                # Compact separators, not indent=2. Pretty-printing cost ~96
+                # chars per entry in indentation and line breaks alone — 29% of
+                # the payload on mxfs — for a document only a model reads.
+                return _text(json.dumps(payload, separators=(",", ":"), default=str))
 
             if name == "memory_get":
                 slug = arguments.get("name") or ""
@@ -238,10 +260,22 @@ def build_app():
                     # already unpayable.
                     full, _ = s.list_all(include_folded=True)
                     st["folded"] = len(s.folded_names())
-                    st["list_tokens_unbounded"] = sum(s._entry_tokens(e) for e in full)
-                    bounded, counts = s.list_all(token_budget=list_token_budget())
-                    st["list_tokens_actual"] = sum(s._entry_tokens(e) for e in bounded)
-                    st["list_budget"] = list_token_budget()
+                    # Both token figures are payload costs, envelope included,
+                    # so they are directly comparable to each other and to
+                    # list_budget. Mixing entries-only and payload-inclusive
+                    # numbers in the same object invites exactly the wrong read.
+                    st["list_tokens_unbounded"] = (
+                        sum(s._entry_tokens(e) for e in full) + LIST_ENVELOPE_TOKENS)
+                    budget = list_token_budget()
+                    entry_budget = max(1, budget - LIST_ENVELOPE_TOKENS) if budget else 0
+                    bounded, counts = s.list_all(token_budget=entry_budget)
+                    # Must be the cost of the payload memory_list actually
+                    # ships, envelope included — this field exists to be
+                    # trusted as a budget check, and reporting entries-only
+                    # is what let a 14.9k listing self-report as 10.4k.
+                    st["list_tokens_actual"] = (
+                        sum(s._entry_tokens(e) for e in bounded) + LIST_ENVELOPE_TOKENS)
+                    st["list_budget"] = budget
                     st["list_counts"] = counts
                     return _text(json.dumps(st, indent=2))
 

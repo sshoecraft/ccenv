@@ -43,6 +43,26 @@ def test_files_edited_dedups_in_order(tmp_path):
     assert tx.files_edited(t) == ["/x/y.py"]
 
 
+def test_files_edited_is_capped_and_keeps_the_most_recent(tmp_path):
+    # This scraper was the only unbounded one — bash_commands caps at 20x160
+    # and last_text at 4,000 chars, but a session touching a thousand files put
+    # all thousand into every later prompt of the run.
+    t = tmp_path / "t.jsonl"
+    write_transcript(t, [
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Write",
+             "input": {"file_path": f"/x/f{i:04d}.py"}, "id": str(i)}
+            for i in range(200)
+        ], "usage": {"input_tokens": 1, "cache_creation_input_tokens": 0,
+                      "cache_read_input_tokens": 0, "output_tokens": 1}}},
+    ])
+    out = tx.files_edited(t)
+    assert len(out) == 60
+    assert out[-1] == "/x/f0199.py"
+    assert out[0] == "/x/f0140.py"
+    assert tx.files_edited(t, last=0) == [f"/x/f{i:04d}.py" for i in range(200)]
+
+
 def test_bash_commands_flatten_newlines(tmp_path):
     t = tmp_path / "t.jsonl"
     write_transcript(t, sample_events())

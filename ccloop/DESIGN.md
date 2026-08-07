@@ -58,6 +58,7 @@ same project safe.
 ```
 .ccloop/
   ├─ state.sh           ← optional project state hook (see state.py)
+  ├─ handoff.md         ← optional session-maintained handoff (see handoff.py)
   └─ runs/<run-id>/
 ```
 
@@ -184,13 +185,44 @@ relays at the hard threshold).
 
 Pure data transform, no LLM call. Extracts from the transcript JSONL:
 original task (carried verbatim), approximate context tokens at the last
-turn, tool-use counts, files written/edited, the last 20 bash commands,
-and the last assistant text turn. Emits markdown used as the next
-session's prompt body.
+turn, tool-use counts, and files written/edited (capped at 60). Emits
+markdown used as the next session's prompt body.
+
+The last assistant text turn is included only as a **fallback**, when
+`handoff.py` reports no fresh handoff. It hit its 4,000-char cap on
+essentially every session, which means it was never a summary — just
+whatever fell in the last 4k chars of output. It stays because it is the
+only thing that works when a session crashes without writing a handoff.
+
+The last-20-bash-commands section was removed in 0.20.0: a third of the
+document's tokens for 20 commands clipped to 160 chars, which nothing
+downstream consumed. The transcript path is in the document for detail.
 
 This is the **backward-looking** half of a handoff — every field except
 the original task is derived from what the previous session did. The
 forward-looking half (what the project looks like *now*) is `state.py`.
+`handoff.py` is the session's own account, which is neither.
+
+### `handoff.py` — session-maintained handoff
+
+Reads `<project>/.ccloop/handoff.md` (override: `CCLOOP_HANDOFF_FILE`,
+size cap `CCLOOP_HANDOFF_MAX_BYTES`, default 6000) and emits a
+`## Handoff from the previous session` section. The prompt instructs each
+session to keep the file current as it works.
+
+Two things a scraper cannot do: say what the session was *trying* to do,
+and survive a crash. The file is on disk before the session stops, so a
+session that dies with zero assistant turns still hands off what it wrote.
+
+**Freshness is checked, never assumed.** The file's mtime is compared to
+the session's start time (30s slack). A file the just-ended session did
+not touch is rendered under an explicit STALE marker naming its age, and
+does not suppress the scraped fallback. This is the same failure `state.py`
+documents — a hand-maintained document stops being maintained — and the
+reason the handoff is a *tier* rather than a replacement: a stale handoff
+is byte-identical to a fresh one, so the reader has to be told which it is.
+With no start time to compare against, the result is `stale`; defaulting
+the other way would let a caller assert currency it never checked.
 
 ### `state.py` — project state hook
 

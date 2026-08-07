@@ -175,6 +175,11 @@ def _parse_frontmatter_fallback(front: str) -> dict:
     return out
 
 
+#: Name prefix marking a memory as a compaction article rather than a raw note.
+#: Defined here rather than in compile.py because compile.py imports Store —
+#: the listing needs the prefix to tier articles and cannot import back.
+COMPILED_PREFIX = "compiled-"
+
 #: Filename of the derived SQLite index inside a .ccmemory/ store. No leading
 #: dot — the store dir is already hidden, so dot-hiding the file was redundant
 #: and produced the confusing ._.memory_index.db sidecar on xattr-less volumes.
@@ -379,11 +384,15 @@ class Store:
         already have; this reads it.
 
         ``ALWAYS_LIST_TYPES`` and untyped memories are NEVER folded, whatever
-        cites them — the same rule that exempts them from budget trimming.
-        They carry behavior, conventions, preferences and durable reference
-        facts (the exact thing the session-start listing exists to surface)
-        and there are few enough of them that keeping all of them costs
-        nothing: 89 entries on a 1,695-memory store.
+        cites them — the same rule that gives them first claim on the budget.
+        They carry behavior, conventions and preferences: the exact thing the
+        session-start listing exists to surface, and the exact thing no other
+        retrieval path reaches. There are few enough of them that keeping all
+        of them costs nothing — 20 entries on mxfs's 1,848-memory store.
+
+        Keep that tuple SMALL. Every type listed there is a type nothing can
+        ever retire; ``reference`` sat in it until 0.19.0 and grew to 160
+        permanently-pinned entries.
         """
         return {n for n in self.cited_names()
                 if not self._is_always_listed(self._row_type(n))}
@@ -416,26 +425,63 @@ class Store:
         return {r["name"] for r in self.db.execute(
             "SELECT name FROM mem WHERE name NOT LIKE 'compiled-%'")}
 
-    #: Types never folded and never budget-trimmed out of a listing. These are
-    #: the memories that aren't reachable any other way: the PreToolUse
+    #: Types never folded, and given first claim on the listing budget. These
+    #: are the memories that aren't reachable any other way: the PreToolUse
     #: auto-injection only fires on a file Read, so behavior/preference/convention
     #: memories are invisible unless the listing carries them.
-    ALWAYS_LIST_TYPES = ("user", "feedback", "reference")
+    #:
+    #: ``reference`` was in this tuple until 0.19.0 and is the reason the
+    #: listing broke. It was exempt from folding AND from trimming, while
+    #: compile.py would only ever ingest ``project`` — so nothing in the system
+    #: could retire a reference memory, at any point, ever. It is a durable
+    #: *fact* about the environment, which is what BM25 search retrieves well;
+    #: it does not need pinning the way a behavioral correction does. On mxfs
+    #: the pinned set had reached 160 entries / ~14.9k tokens and had crowded
+    #: every project note out of the listing entirely.
+    #:
+    #: Kept complementary to compile.COMPILABLE_TYPES — every type must be one
+    #: or the other, or memories land in a backlog nothing can drain.
+    ALWAYS_LIST_TYPES = ("user", "feedback")
+
+    #: Cumulative share of the listing budget available after each tier fills.
+    #: Cumulative, so a tier that underspends donates the remainder downward
+    #: instead of stranding it. Order is "what can a session not recover any
+    #: other way":
+    #:   1. user/feedback (and untyped) — behavior, preferences, corrections
+    #:   2. ``compiled-`` articles — the dense representative of everything
+    #:      folded. Ranking these purely by mtime put 2 of mxfs's 132 articles
+    #:      in the listing: 1,494 notes were retired in favour of articles that
+    #:      were then themselves withheld, so the session saw neither.
+    #:   3. raw project/reference, newest-first — recent working context.
+    LIST_TIER_SHARES = (0.25, 0.70, 1.00)
 
     @classmethod
     def _is_always_listed(cls, mtype: str | None) -> bool:
-        """One predicate for both exemptions — never folded AND never trimmed.
+        """One predicate for both exemptions — never folded, budgeted first.
 
         Untyped memories count: an unclassified memory is not evidence that it
         is unimportant, and there are never many of them.
         """
         return not mtype or mtype in cls.ALWAYS_LIST_TYPES
 
-    @staticmethod
-    def _entry_tokens(entry: dict) -> int:
+    #: Chars of JSON envelope every listing entry pays regardless of content,
+    #: in the compact wire format mcp_server emits:
+    #: ``{"name":"","type":"","description":"","age_days":0.0},``
+    #: — braces, keys, quotes, separators, and the 1-decimal age float.
+    #: Measured against real payloads, not guessed. The previous constant (30)
+    #: modelled name+description only and under-counted by 1.42x, which is how
+    #: a 6,000-token budget shipped a 14,921-token listing while reporting
+    #: 10,490. test_entry_tokens_tracks_real_wire_size guards the drift.
+    ENTRY_ENVELOPE_CHARS = 56
+
+    @classmethod
+    def _entry_tokens(cls, entry: dict) -> int:
         # Same ceil(chars/4) estimator claim_injections uses, applied to the
-        # JSON-ish weight of one listing entry.
-        chars = len(entry["name"] or "") + len(entry["description"] or "") + 30
+        # serialized weight of one listing entry.
+        chars = (len(entry["name"] or "")
+                 + len(entry["type"] or "")
+                 + len(entry["description"] or "")
+                 + cls.ENTRY_ENVELOPE_CHARS)
         return max(1, -(-chars // 4))
 
     def list_all(
@@ -455,13 +501,20 @@ class Store:
 
         Bounded by construction. An unbounded listing is not viable at scale:
         on a 1,695-memory store it came to ~171k tokens, and the session
-        protocol makes this the mandatory first call of every session. Order
-        of precedence when trimming:
+        protocol makes this the mandatory first call of every session.
 
-        1. ``ALWAYS_LIST_TYPES`` and untyped memories are emitted in full —
-           never folded, never trimmed.
-        2. Everything else (in practice ``project``) fills the remaining
-           budget newest-first.
+        The budget is spent across three tiers with CUMULATIVE caps
+        (``LIST_TIER_SHARES``), newest-first inside each tier. Cumulative caps
+        mean an underspending tier donates its remainder to the tiers below it,
+        so no share is ever stranded.
+
+        Every tier is trimmable, including the first. Before 0.19.0 the
+        always-listed types were charged against ``spent`` but never trimmed,
+        which meant the budget could not bind: once they alone exceeded it the
+        loop broke on the very first project note. mxfs listed 180 exempt
+        entries for ~14.9k tokens against a 6k budget and withheld 100% of its
+        project notes AND 100% of its compiled articles — a listing that was
+        simultaneously way over budget and empty of anything current.
 
         ``token_budget``/``limit`` of 0 mean unbounded. ``include_folded``
         brings back memories already covered by a compiled article.
@@ -482,7 +535,10 @@ class Store:
                 "name": r["name"],
                 "type": r["type"],
                 "description": r["description"],
-                "age_days": max(0.0, (now - r["mtime"]) / 86400.0),
+                # 1 decimal: the raw float serializes as 0.9319928526712788 —
+                # 18 chars of noise per entry that nothing reads at that
+                # precision, and that ENTRY_ENVELOPE_CHARS would have to model.
+                "age_days": round(max(0.0, (now - r["mtime"]) / 86400.0), 1),
             }
             for r in rows
         ]
@@ -496,23 +552,36 @@ class Store:
                 folded_count = total - len(kept)
                 entries = kept
 
-        priority = [e for e in entries if self._is_always_listed(e["type"])]
-        rest = [e for e in entries if not self._is_always_listed(e["type"])]
+        tiers = (
+            [e for e in entries if self._is_always_listed(e["type"])],
+            [e for e in entries if not self._is_always_listed(e["type"])
+             and e["name"].startswith(COMPILED_PREFIX)],
+            [e for e in entries if not self._is_always_listed(e["type"])
+             and not e["name"].startswith(COMPILED_PREFIX)],
+        )
 
-        spent = sum(self._entry_tokens(e) for e in priority) if token_budget else 0
-        shown = list(priority)
-        for e in rest:
-            if limit and len(shown) >= limit:
-                break
-            if token_budget:
-                cost = self._entry_tokens(e)
-                if spent + cost > token_budget:
+        shown: list[dict] = []
+        spent = 0
+        for tier, share in zip(tiers, self.LIST_TIER_SHARES):
+            cap = int(token_budget * share) if token_budget else 0
+            for e in tier:
+                if limit and len(shown) >= limit:
                     break
-                spent += cost
-            shown.append(e)
+                if token_budget:
+                    cost = self._entry_tokens(e)
+                    if spent + cost > cap:
+                        break
+                    spent += cost
+                shown.append(e)
 
-        # Restore newest-first across the whole result; the priority/rest split
-        # is a budgeting device, not an ordering the caller should see.
+        # How much of tier 1 did not fit. Reported separately because it is the
+        # one loss the caller cannot compensate for with memory_search: a
+        # behavioral correction has no topic to search for.
+        load_bearing_withheld = len(tiers[0]) - sum(
+            1 for e in shown if self._is_always_listed(e["type"]))
+
+        # Restore newest-first across the whole result; the tier split is a
+        # budgeting device, not an ordering the caller should see.
         shown.sort(key=lambda e: e["age_days"])
 
         counts = {
@@ -520,6 +589,7 @@ class Store:
             "shown": len(shown),
             "folded": folded_count,
             "withheld": total - folded_count - len(shown),
+            "load_bearing_withheld": load_bearing_withheld,
         }
         return shown, counts
 

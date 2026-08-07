@@ -193,17 +193,22 @@ repeat mistakes the user already corrected.
 The listing is **bounded**, and what it withholds is stated in the `note`
 field of its own response — read that field, don't skip it:
 
-- Every `user`, `feedback` and `reference` memory is always returned in
-  full. Those are the ones nothing else surfaces.
-- `project` notes fill a token budget, newest first
-  (`CCMEMORY_LIST_TOKEN_BUDGET`, default 6000).
+- The token budget (`CCMEMORY_LIST_TOKEN_BUDGET`, default 6000) is spent in
+  tiers, newest-first inside each: `user`/`feedback` first (behavior and
+  corrections — nothing else surfaces these), then `compiled-<topic>`
+  articles, then raw `project`/`reference` notes. An underspending tier
+  donates its remainder to the ones below it.
 - Memories already folded into a `compiled-<topic>` article are omitted —
   the article represents them. They are NOT deleted and remain fully
   reachable via `memory_search` / `memory_get`, or with
   `memory_list(include_folded=true)`.
 - `shown` / `total` / `folded` / `withheld` come back as explicit counts.
-  A listing that shows 150 of 1,695 is not "everything this project knows",
+  A listing that shows 90 of 1,848 is not "everything this project knows",
   and you must not treat it as such.
+- `load_bearing_withheld` is the one count you cannot work around. It means
+  `user`/`feedback` memories did not fit even in the first tier, so you are
+  missing instructions you have no way to know to search for. If it is
+  non-zero, say so and call `memory_list(type="feedback")`.
 
 If the note says COMPACTION DUE, act on it in this session rather than
 deferring: the backlog only grows, and every session pays for it.

@@ -2,6 +2,120 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.20.0
+
+**ccloop: the resume document spent 83% of its tokens on scraped session
+exhaust, and had nothing at all to hand off when a session crashed.**
+
+Measured across mxfs's run history, a resume ran ~1,900–2,100 tokens:
+`Last 20 bash commands` cost 465–803 (a third of the document, for 20 commands
+clipped to 160 chars), and `Last text from previous session` hit its 4,000-char
+cap on essentially every session — meaning it was never a summary, just
+whatever fell in the last 4k chars of assistant output, usually tool-result
+commentary. `Files written or edited` cost ~40 tokens, 2%.
+
+- **`Last 20 bash commands` removed.** Nothing downstream used it; the
+  transcript path is in the document for anyone who wants detail.
+- **New handoff tier.** The session maintains `<project>/.ccloop/handoff.md`
+  as it works, and ccloop concatenates it. Its own account of where it got to
+  beats anything a scraper can reconstruct — and because it is on disk *before*
+  the session stops, it survives the case a scraper cannot: a session that dies
+  with zero assistant turns now still hands off what it wrote along the way.
+- **Freshness is checked, not assumed.** `state.py` already recorded why the
+  forward-looking half became a computed hook: "a document the outgoing model
+  has to remember to update eventually stops being updated, and a stale one is
+  worse than none". That held up on inspection — mxfs's hand-maintained
+  `state.md` had gone 7 days without a write across 36 ccloop runs while the
+  `state.sh` beside it ran fresh every session. So a handoff whose mtime
+  predates the session that just ended is rendered under an explicit STALE
+  marker naming its age, and does **not** suppress the scraped fallback. A
+  stale handoff is byte-identical to a fresh one; only the mtime separates
+  them, and the reader must be told which it is.
+- **`Last text from previous session` is now the fallback**, used whenever
+  there is no fresh handoff. It is not dropped: it is the only thing that works
+  when a session crashes without writing one.
+- **`Files written or edited` kept**, and capped at 60 (`transcript.py`). It
+  was the only unbounded scraper — `bash_commands` caps at 20×160 and
+  `last_text` at 4,000 chars — so a session touching a thousand files put all
+  thousand into every later prompt of the run.
+
+Measured on a real mxfs transcript, against the 2,074-token resume ccloop
+actually produced for it:
+
+| | tokens | saving |
+|---|---|---|
+| before | 2,074 | — |
+| after, no handoff file | 1,284 | 38% |
+| after, fresh handoff | 396 | 80% |
+
+Config: `CCLOOP_HANDOFF_FILE` relocates the file, `CCLOOP_HANDOFF_MAX_BYTES`
+(default 6000) caps what is embedded — truncation is marked in-band, as with
+the state hook. No handoff file means no section and the previous behavior
+minus the bash block, so this costs nothing to a project that ignores it.
+
+Note for anyone reading the original proposal: there is no "cutoff hook" that
+generates the resume. `summarize()` runs in the runner after a session exits
+(`runner.py`), and the relay is event-driven on the wall event — the token
+cutoff is only an early-relay knob.
+
+## v0.19.0
+
+**ccmemory: `memory_list` could not bind its own budget, and `reference`
+memories could never be retired from it.**
+
+Measured on the mxfs store (1,848 memories): `memory_list` shipped ~14.9k
+tokens against a 6,000-token budget while reporting 10,490, and the listing
+contained **zero** project notes and **zero** compiled articles — 180 entries,
+all `reference`/`feedback`/`user`. As the mandatory first call of every
+session, that cost was paid before the user's first message, and again on
+every ccloop relay, to deliver nothing current.
+
+Four interacting defects:
+
+- `Store.list_all` seeded `spent` with the entire always-listed set and then
+  trimmed only the remainder. Once those types alone exceeded the budget the
+  trim loop broke on the first project note, so the budget both failed to cap
+  the payload and starved every other tier. The budget is now spent across
+  three tiers with cumulative caps (`LIST_TIER_SHARES`) and **every** tier is
+  trimmable, including the first.
+- `reference` was in `ALWAYS_LIST_TYPES` — exempt from folding — while
+  `compile._select` would only ingest `type='project'`. Nothing in the system
+  could retire a reference memory at any point, ever; mxfs had accumulated 160.
+  `reference` is now foldable and compilable. It remains fully reachable via
+  `memory_search`/`memory_get`, which is what durable facts are suited to.
+- `compiled-` articles competed with raw notes on mtime alone, so 2 of mxfs's
+  132 articles made the listing: 1,494 notes were folded away in favour of
+  articles that were then withheld, and the session saw neither. Articles now
+  hold their own budget tier (45 listed on mxfs).
+- `_entry_tokens` modelled `name + description + 30` while the server shipped
+  `json.dumps(indent=2)`, under-counting the real payload by 1.42x, and
+  `memory_stats.list_tokens_actual` inherited the error. The estimator now
+  models the wire format, the listing serializes compactly with `age_days`
+  rounded to 1 decimal, and the note/counts envelope is budgeted
+  (`LIST_ENVELOPE_TOKENS`) instead of shipping unmodelled.
+
+Also: `count_backlog` counted every type while only `project` was actionable,
+so mxfs carried a backlog floor of 144 against a threshold of 20 — the
+compaction nudge fired every session and no amount of compacting could silence
+it. It now counts only `COMPILABLE_TYPES`, which is asserted complementary to
+`ALWAYS_LIST_TYPES` so the two cannot drift apart again.
+
+New count `load_bearing_withheld` reports `user`/`feedback` memories that did
+not fit even in the first tier — the one loss `memory_search` cannot recover,
+since a behavioral correction has no topic to search for.
+
+Measured after, same stores, full serialized payload against a 6,000 budget:
+
+| store | before | after |
+|---|---|---|
+| mxfs (1,848) | 180 shown, ~14.9k tok, 0 project, 0 articles | 90 shown, 5,935 tok, 45 articles |
+| wowbot (142) | 77 shown, ~5.9k tok | 87 shown, 5,886 tok |
+| ccenv (28) | 28 shown, ~2.0k tok | 28 shown, 1,792 tok |
+
+Existing stores need one compaction pass to fully benefit: `reference` notes
+have never been compile candidates, so they are uncited until a pass folds
+them. mxfs's backlog reads 167 actionable (was 186 counted / 42 actionable).
+
 ## v0.18.1
 
 **Bundled temp-file rule: split on kind, not on predicted lifetime.**

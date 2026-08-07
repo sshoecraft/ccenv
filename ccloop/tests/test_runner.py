@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from ccloop import runner
+from ccloop import handoff, runner
 
 
 @pytest.fixture(autouse=True)
@@ -491,7 +491,21 @@ def test_build_prompt_without_state_hook_is_unchanged(tmp_path, monkeypatch):
     monkeypatch.delenv("CCLOOP_STATE_HOOK", raising=False)
     d = _make_run_dir(tmp_path)
     out = runner._build_prompt(d / "resume.md", 1, "RID")
-    assert out == runner.PREAMBLE_LEGACY.format(iter=1) + "BODY-SENTINEL\n"
+    expected_handoff = runner.HANDOFF_INSTRUCTION.format(
+        path=handoff.handoff_path(d))
+    assert out == (runner.PREAMBLE_LEGACY.format(iter=1)
+                   + expected_handoff + "BODY-SENTINEL\n")
+
+
+def test_build_prompt_names_the_handoff_file_before_the_body(tmp_path, monkeypatch):
+    # The session has to know it owns the file before it reads the last
+    # session's leavings, or handoff maintenance reads as someone else's job.
+    monkeypatch.delenv("CCLOOP_STATE_HOOK", raising=False)
+    monkeypatch.delenv("CCLOOP_HANDOFF_FILE", raising=False)
+    d = _make_run_dir(tmp_path)
+    out = runner._build_prompt(d / "resume.md", 1, "RID")
+    assert str(handoff.handoff_path(d)) in out
+    assert out.index("Maintain your handoff file") < out.index("BODY-SENTINEL")
 
 
 def test_build_prompt_appends_state_block_after_body(tmp_path, monkeypatch):

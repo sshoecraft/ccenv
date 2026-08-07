@@ -266,6 +266,13 @@ abort after N failed launches instead.
 | `CCLOOP_STATE_HOOK` | `<project>/.ccloop/state.sh` | Executable whose stdout becomes the `## Current project state` prompt section; absent = no section |
 | `CCLOOP_STATE_HOOK_TIMEOUT` | 30 | SIGKILL the state hook after N seconds; 0 disables the timeout |
 | `CCLOOP_STATE_HOOK_MAX_BYTES` | 8000 | Truncate state-hook stdout past this many bytes (with a visible marker); 0 disables |
+| `CCLOOP_HANDOFF_FILE` | `<project>/.ccloop/handoff.md` | File the session maintains as it works; concatenated into the next prompt. Absent = no section |
+| `CCLOOP_HANDOFF_MAX_BYTES` | 6000 | Truncate the handoff past this many bytes (with a visible marker); 0 disables |
+
+The handoff file is **freshness-checked**: if the session that just ended
+did not write it, the next session gets it under an explicit STALE marker
+and the scraped fallback stays in the document. An unmaintained handoff
+costs you the handoff; it never silently passes off old intent as current.
 
 ccloop always sets `DISABLE_AUTO_COMPACT=1` on the spawned session —
 compaction mid-loop scrambles state in ways that defeat the resume

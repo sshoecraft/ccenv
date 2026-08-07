@@ -33,6 +33,41 @@ def test_budget_default_and_env(monkeypatch):
     assert mcp_server.list_token_budget() == 0
 
 
+def test_whole_serialized_payload_fits_the_budget(memory_dir):
+    # The budget is a promise about what lands in the context window, so it has
+    # to cover the bytes actually shipped — entries AND the note/counts
+    # envelope. Budgeting entries alone overshot by ~210 tokens on every call.
+    monkey_budget = 2000
+    for i in range(400):
+        write_memory(memory_dir, f"proj{i:03d}", type="project",
+                     description="d" * 140)
+    import os
+    os.environ["CCMEMORY_LIST_TOKEN_BUDGET"] = str(monkey_budget)
+    try:
+        raw = call("memory_list")
+    finally:
+        del os.environ["CCMEMORY_LIST_TOKEN_BUDGET"]
+    shipped = -(-len(raw) // 4)
+    assert shipped <= monkey_budget, \
+        f"memory_list shipped {shipped} tokens against a {monkey_budget} budget"
+    # And it is not trivially satisfied by shipping almost nothing.
+    assert json.loads(raw)["shown"] > 10
+
+
+def test_stats_reports_the_cost_of_the_real_payload(memory_dir):
+    for i in range(200):
+        write_memory(memory_dir, f"proj{i:03d}", type="project",
+                     description="d" * 140)
+    raw = call("memory_list")
+    st = json.loads(call("memory_stats"))
+    shipped = -(-len(raw) // 4)
+    # Within 10% of the bytes that actually went out. memory_stats is what a
+    # session consults to decide whether listing is affordable; a field that
+    # under-reports by 1.4x is worse than no field.
+    assert 0.9 <= st["list_tokens_actual"] / shipped <= 1.1, \
+        f"stats says {st['list_tokens_actual']}, payload was {shipped}"
+
+
 def test_list_returns_counts_and_memories(memory_dir):
     write_memory(memory_dir, "a")
     write_memory(memory_dir, "b")

@@ -28,13 +28,19 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .store import Store
+from .store import COMPILED_PREFIX, Store
 
-
-# Marker that identifies an already-compiled article (memory_write has no
-# subdir support, so compiled articles live at the memory-dir root under this
-# name prefix rather than in a compiled/ subdirectory).
-COMPILED_PREFIX = "compiled-"
+#: Types a compile pass will ingest, and therefore the only types compaction
+#: can ever retire from a listing. MUST stay complementary to
+#: Store.ALWAYS_LIST_TYPES — a type in neither tuple lands in a backlog that
+#: nothing can drain and that the nudge will complain about forever.
+#:
+#: ``reference`` was added in 0.19.0. Before that, _select filtered to
+#: ``project`` alone while count_backlog counted every type, so mxfs carried a
+#: backlog of 186 of which only 42 were actionable: a hard floor of 144 against
+#: a threshold of 20. The nudge fired every session and no amount of compacting
+#: could ever silence it.
+COMPILABLE_TYPES = ("project", "reference")
 
 # Default uncompiled-backlog count at/above which the SessionStart hook
 # suggests running the compile-memories skill. Matches the default
@@ -104,12 +110,21 @@ def count_backlog(memory_dir: Path) -> dict[str, Any]:
     that has never been compiled. This still quiets down after compaction
     (citing an input retires it) without ever going quiet about work that was
     genuinely skipped.
+
+    Counts only ``COMPILABLE_TYPES`` — what a compile pass can actually act on.
+    Counting types _select will never ingest produces a backlog with a floor
+    above the threshold, so the nudge fires every session and compacting cannot
+    silence it. mxfs sat at a floor of 144 against a threshold of 20 for the
+    entire life of the feature. An unsilenceable alarm is a broken alarm.
     """
     newest = _newest_compiled_mtime(memory_dir)
     with Store(memory_dir) as s:
         s.reindex()
-        raw = s.raw_names()
         cited = s.cited_names()
+        placeholders = ",".join("?" * len(COMPILABLE_TYPES))
+        raw = {r["name"] for r in s.db.execute(
+            f"SELECT name FROM mem WHERE type IN ({placeholders}) "
+            "AND name NOT LIKE 'compiled-%'", COMPILABLE_TYPES)}
     return {
         "backlog": len(raw - cited),
         "total_raw": len(raw),
@@ -140,10 +155,12 @@ def _select(memory_dir: Path, *, topic: str | None, max_inputs: int) -> list[dic
             picks = picks[:max_inputs]
         else:
             picks = []
+            placeholders = ",".join("?" * len(COMPILABLE_TYPES))
             for row in s.db.execute(
                 "SELECT name, path, type, description, mtime FROM mem "
-                "WHERE type = 'project' AND name NOT LIKE 'compiled-%' "
-                "ORDER BY mtime DESC"
+                f"WHERE type IN ({placeholders}) AND name NOT LIKE 'compiled-%' "
+                "ORDER BY mtime DESC",
+                COMPILABLE_TYPES,
             ):
                 if row["name"] in cited:
                     continue

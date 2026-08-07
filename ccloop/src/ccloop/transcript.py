@@ -188,8 +188,14 @@ def last_text(path, limit=4000):
     return text[-limit:] if len(text) > limit else text
 
 
-def files_edited(path):
-    """Distinct file paths touched by Write/Edit/MultiEdit/NotebookEdit, in order."""
+def files_edited(path, last=60):
+    """Distinct file paths touched by Write/Edit/MultiEdit/NotebookEdit, in order.
+
+    Capped at the ``last`` most recently touched. Every other scraper here has
+    always been bounded (``bash_commands`` at 20x160, ``last_text`` at 4,000
+    chars); this one was not, so a session that touched a thousand files could
+    put an unbounded list into every subsequent prompt of the run.
+    """
     seen = []
     edit_tools = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
     for event in iter_events(path):
@@ -200,7 +206,7 @@ def files_edited(path):
             fp = inp.get("file_path") or inp.get("notebook_path")
             if fp and fp not in seen:
                 seen.append(fp)
-    return seen
+    return seen[-last:] if last and len(seen) > last else seen
 
 
 def bash_commands(path, last=20, width=160):
