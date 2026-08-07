@@ -1,6 +1,6 @@
 [project]
 name = "ccenvmcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Stdlib-only Python 3.9+ MCP server shim — a drop-in for the tools-only slice of the official mcp SDK, without its 3.10 floor"
 readme = {text = "See docs/mcp.md for the protocol surface and rationale.", content-type = "text/plain"}
 requires-python = ">=3.9"

@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from ccloop import cli
@@ -29,6 +31,35 @@ def test_version(capsys):
     from ccloop import __version__
     assert cli.main(["--version"]) == 0
     assert __version__ in capsys.readouterr().out
+
+
+def test_version_is_not_hardcoded_in_the_package():
+    # The old test (import __version__, assert it appears in the output) is
+    # tautological: it passes no matter how far the hardcoded string has
+    # drifted from pyproject.toml, which is exactly how `ccloop --version`
+    # spent two releases reporting 0.10.1 while the installed dist was 0.12.0.
+    # Pin the property that actually matters — there is only ONE source of
+    # truth, and it is the package metadata.
+    from pathlib import Path
+
+    import ccloop
+
+    src = Path(ccloop.__file__).read_text(encoding="utf-8")
+    assert "_dist_version" in src, "__version__ must come from package metadata"
+    assert not re.search(r'^__version__\s*=\s*["\']', src, re.M), \
+        "__version__ is hardcoded again — it will drift from pyproject.toml"
+
+
+def test_version_matches_installed_distribution():
+    from importlib.metadata import PackageNotFoundError, version
+
+    from ccloop import __version__
+
+    try:
+        assert __version__ == version("ccloop")
+    except PackageNotFoundError:
+        # Source checkout with no installed dist — the honest fallback.
+        assert __version__ == "0+unknown"
 
 
 def test_unknown_option(capsys):

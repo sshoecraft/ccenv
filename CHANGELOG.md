@@ -2,6 +2,44 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.20.1
+
+**`--version` lied in two components, and the test that covered it could not
+have noticed.**
+
+`__version__` was a hardcoded string in each package's `__init__.py` while
+`pyproject.toml` carried the real number. Both drifted two minor versions:
+
+| | `--version` printed | installed dist |
+|---|---|---|
+| ccloop | 0.10.1 | 0.12.0 |
+| ccmemory | 0.15.0 | 0.17.0 |
+
+The drift predates v0.20.0 — both were already one release stale before that
+bump made it two. It surfaced while verifying an install, which is the worst
+moment for a version command to be wrong: a stale number reads as "the install
+did not take", and sends you debugging an install that already succeeded.
+
+`__version__` now derives from `importlib.metadata.version()` in ccloop,
+ccmemory and ccenvmcp, falling back to `0+unknown` when running from a source
+checkout with no installed distribution. Deleting the second source of truth is
+the fix; remembering to bump both places is not — that is what failed twice.
+
+ccenvmcp had not drifted (it has only ever been 0.1.0) but got the same
+treatment: the defect is the duplicated source, not the number in it.
+`importlib.metadata` is stdlib from 3.8, so this holds under ccenvmcp's 3.9
+floor and adds no dependency.
+
+Note that `--version` now reports what is **installed**, not what is in the
+source tree — the two differ until you reinstall, and installed is the one you
+want when you are verifying a deploy.
+
+The old ccloop test imported `__version__` and asserted it appeared in the
+command's output, which passes no matter how far the constant has drifted.
+Replaced in all three components with tests that pin the actual property:
+`__init__.py` must not hardcode a version, and `__version__` must equal the
+installed distribution's.
+
 ## v0.20.0
 
 **ccloop: the resume document spent 83% of its tokens on scraped session
