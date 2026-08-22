@@ -81,8 +81,9 @@ WRAP_UP = (
     "Heads up — you've reached the ccloop relay boundary. Good stopping "
     "point: please wrap up the current sub-step, then end with a brief "
     "text summary. Remaining work will continue in a fresh session with "
-    "full transcript access — no need to write any handoff document, the "
-    "loop wrapper produces it from your transcript automatically."
+    "full transcript access — it is handed the path to this session's "
+    "transcript and reads it directly, so there is no handoff document, "
+    "state file or parting summary for you to write."
 )
 
 

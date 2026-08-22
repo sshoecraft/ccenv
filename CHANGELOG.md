@@ -2,6 +2,97 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.22.0
+
+**New `settings` install step: the harness no longer swaps models out from
+under a session on a fresh box.**
+
+Claude Code has two paths that change the model mid-session. The *refusal
+fallback* re-runs a turn on a different model when the selected one refuses,
+and the flag-driven switch does the same on a model flag. Both are silent: the
+session you started is not the session you are talking to, and nothing in the
+transcript says so. Every new box had to be hand-fixed after install.
+
+`install_ccenv_settings()` now runs right after the base `CLAUDE.md` is
+assembled and seeds `~/.claude/settings.json`:
+
+- `env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK = "1"` — the env block is what
+  Claude Code applies to *every* session regardless of how it was launched.
+- `switchModelsOnFlag = false` — belt and braces. If the env var ever fails to
+  propagate (a launcher that scrubs env, a context that doesn't inherit the
+  shell), this still blocks the switch, at the cost of a dialog.
+
+**Seeded, not owned.** A key already present in `settings.json` is the user's
+deliberate choice and is left exactly as it is, whatever its value — the run
+reports `already set, left alone: <key>=<value>` and does not rewrite the
+file at all when both keys exist. Only a missing key is written. Everything
+else in the file survives, including the hook registrations written by the
+component steps that run afterwards.
+
+Skippable like any other core component (`--skip settings` / `--only
+settings`). Tests: `tests/test_settings_step.sh` lifts the function out of
+`install.sh` by name and runs it against throwaway `/tmp` HOME fixtures — 19
+assertions, no installer side effects.
+
+## v0.21.0
+
+**The handoff document is gone. Sessions are pointed at the previous session's
+transcript instead.**
+
+v0.20.0 added a session-maintained handoff document under `<project>/.ccloop/`,
+and every session's prompt opened by instructing it to keep that file current
+*as it worked* — "rewrite the whole file whenever your understanding changes". That
+is a continuous write tax, paid in output tokens, on every session of every
+run, to produce from memory a worse copy of a document Claude Code was already
+writing to disk for free: the session transcript.
+
+The transcript is strictly better on every axis that mattered:
+
+| | handoff document | transcript |
+|---|---|---|
+| cost to produce | rewritten by the model, repeatedly, all run | free — the harness writes it |
+| can go stale | yes, silently (0.20.0 needed mtime checks and a STALE marker) | no — it *is* the session |
+| completeness | whatever the model remembered to write | every prompt, tool call, result and reply |
+| survives a crash | only what was flushed before the crash | same, and it is written continuously |
+
+So the wrapper's job is to name the file, and the session's job is to read it.
+Each prompt now opens with the previous session's transcript path, its size,
+its line count, and a suggested `Read` offset near the tail (reading a
+multi-megabyte JSONL from line 1 is how you spend the context you were just
+handed), plus a `grep` example for going deeper. It states plainly that no
+handoff document, state file, or parting summary is wanted.
+
+**The pointer is deterministic, in two tiers** (`runner.prior_session_block`):
+
+1. `sessions.log` holds this run's session-ids in order, so the last one whose
+   transcript is still on disk is exactly the session that just ended. Walked
+   backwards, so a missing transcript falls through instead of blanking the
+   block.
+2. Session 1 has no predecessor in the run, so it falls back to the newest
+   non-empty transcript in `~/.claude/projects/<cwd-slug>/`, excluding this
+   run's own ids — the session you were in when you set the run up. It is
+   labelled as background, not as instructions.
+
+Neither tier finding a file omits the block entirely. A session told to read a
+path that does not exist burns a tool call and learns to distrust the preamble.
+
+This also resolves a contradiction shipped in 0.20.0: the relay `WRAP_UP`
+message told the session "no need to write any handoff document" at the exact
+moment the preamble was telling it to maintain one.
+
+Removed: `handoff.py`, `CCLOOP_HANDOFF_FILE`, `CCLOOP_HANDOFF_MAX_BYTES`, the
+freshness/STALE machinery, and the `## Handoff from the previous session`
+resume section. Any such file left in a project's `.ccloop/` is now inert —
+nothing reads it, and its name appears nowhere in this tree, so no session can
+read the name and go looking for the file. Delete it or keep it as personal
+notes. With the
+handoff tier gone, `## Last text from previous session` is unconditional again
+(it was suppressed when a fresh handoff existed).
+
+New: `transcript.project_dir`, `transcript.latest_transcript`,
+`transcript.line_count`. `summarize.summarize` drops its `run_dir` and
+`session_started` parameters, which existed only to feed the handoff tier.
+
 ## v0.20.1
 
 **`--version` lied in two components, and the test that covered it could not
@@ -54,8 +145,9 @@ commentary. `Files written or edited` cost ~40 tokens, 2%.
 
 - **`Last 20 bash commands` removed.** Nothing downstream used it; the
   transcript path is in the document for anyone who wants detail.
-- **New handoff tier.** The session maintains `<project>/.ccloop/handoff.md`
-  as it works, and ccloop concatenates it. Its own account of where it got to
+- **New handoff tier.** The session maintains a handoff document under
+  `<project>/.ccloop/` as it works, and ccloop concatenates it. (Reverted in
+  v0.21.0; the filename is not repeated here, so nothing goes looking for it.) Its own account of where it got to
   beats anything a scraper can reconstruct — and because it is on disk *before*
   the session stops, it survives the case a scraper cannot: a session that dies
   with zero assistant turns now still hands off what it wrote along the way.

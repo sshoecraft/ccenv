@@ -138,6 +138,30 @@ has no memory. A project that genuinely needs the tools present at turn 1 should
 assert that in its own startup steps, where it can be checked and reported,
 rather than relying on a flag that quietly proceeds degraded.
 
+## The `settings` step — model-stability knobs (v0.22.0)
+
+`install_ccenv_settings()` runs immediately after the base `CLAUDE.md` is
+assembled and seeds two keys in `~/.claude/settings.json`:
+
+| key | value | why |
+|---|---|---|
+| `env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK` | `"1"` | the refusal fallback re-runs a turn on a *different* model when the selected one refuses — a silent mid-session model swap that nothing in the transcript records |
+| `switchModelsOnFlag` | `false` | belt and braces: if the env var fails to propagate (a launcher that scrubs env, a context that does not inherit the shell), this still blocks the switch — at the cost of a dialog |
+
+Both are **seeded, not owned**. A key that is already present is left exactly
+as it is, whatever its value, and the run says so (`already set, left alone:
+switchModelsOnFlag=true`). Only a *missing* key is written, and the file is
+only rewritten when something was actually added — a run where both keys exist
+does not touch the file's mtime. Everything else in `settings.json` survives,
+including the hook registrations the later component steps write into the same
+file.
+
+Skippable like any core component: `./install.sh --skip settings`.
+
+Tests: `tests/test_settings_step.sh` — the function is lifted out of
+`install.sh` by name and evaluated against throwaway `/tmp` HOME fixtures, so
+the suite runs the real code without running the installer.
+
 ## Retired-component cleanup (v0.16.0)
 
 `ccprospect`, `ccinsight` and `ccteam` were retired in v0.13.0. install.sh
@@ -200,6 +224,10 @@ from the box it runs on.
 
 ## History
 
+- **v0.22.0** — `settings` step: seeds
+  `env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1` and `switchModelsOnFlag=false`
+  in `~/.claude/settings.json`, so a fresh box does not silently swap models
+  mid-session. Present keys are never overwritten.
 - **v0.18.1** — bundled temp-file rule rewritten again. v0.13.3 still framed
   the split as temporary-vs-reusable, and "this one is throwaway" kept winning:
   scripts of every kind landed in /tmp. The rule now splits on *kind*, not on a

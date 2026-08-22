@@ -14,6 +14,8 @@ Everything is built in a temp tree; nothing under ~/.ccloop is touched.
 """
 
 import argparse
+import json
+import os
 import shutil
 import sys
 import tempfile
@@ -24,6 +26,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ccloop import runner  # noqa: E402
+from ccloop import transcript as tx  # noqa: E402
 
 
 def main():
@@ -46,6 +49,22 @@ def main():
             encoding="utf-8",
         )
         (run_dir / "criteria.md").write_text(args.criteria + "\n", encoding="utf-8")
+
+        # Stage a prior session so the transcript-pointer block renders. HOME
+        # is redirected into the temp tree first, so this reads a synthetic
+        # transcript instead of whatever real sessions exist under ~/.claude.
+        os.environ["HOME"] = str(tmp / "home")
+        prior = tx.transcript_path("preview-previous-session")
+        prior.parent.mkdir(parents=True, exist_ok=True)
+        prior.write_text(
+            "".join(
+                json.dumps({"type": "assistant", "message": {"content": []}}) + "\n"
+                for _ in range(1400)
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "sessions.log").write_text(
+            "preview-previous-session\n", encoding="utf-8")
 
         if not args.no_hook:
             hook = run_dir.parent.parent / "state.sh"

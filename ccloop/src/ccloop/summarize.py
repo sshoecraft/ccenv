@@ -3,6 +3,13 @@
 Pure data transform, no LLM calls. ccloop runs this between sessions to
 produce the next session's prompt from the prior session's transcript.
 
+This document is an ORIENTATION LAYER, not the handoff. The handoff is the
+transcript itself: the prompt preamble points the next session straight at
+``<session-id>.jsonl`` (see ``runner.prior_session_block``), which holds
+every prompt, tool call and result in full. Everything here is a cheap index
+into that file — enough to know where the work was without paying to re-read
+it, and enough to survive a session that never gets read.
+
 What this file does NOT include, and why:
 
 ``Last 20 bash commands`` was removed in 0.20.0. Measured across mxfs's run
@@ -10,12 +17,12 @@ history it cost 465-803 tokens — roughly a third of the whole resume — to
 deliver 20 commands clipped to 160 chars each. Nothing downstream ever needed
 them; the transcript path is in the document for anyone who does.
 
-``Last text from previous session`` is now conditional. It hit its 4,000-char
-cap on essentially every session, meaning it was never a summary — it was
-whatever happened to fall in the last 4k chars of assistant output, usually
-tool-result commentary. It stays as the FALLBACK when the session left no fresh
-handoff of its own, because something is better than nothing, and it is the
-only thing that works when a session crashes without writing one.
+A session-maintained handoff document was added in 0.20.0 and removed in
+0.21.0. It made every session pay a continuous write tax — rewrite the whole
+file whenever your understanding changes — to reproduce, badly and from
+memory, what Claude Code was already writing to disk for free. Its path is
+deliberately not named anywhere in this tree: a session that reads the name
+goes looking for the file. See ``0.21.0`` in the bundle CHANGELOG.
 
 ``Files written or edited`` stays. It costs ~40 tokens (2% of the document),
 it is derived so it cannot go stale, and it is the only durable answer to
@@ -24,18 +31,11 @@ it is derived so it cannot go stale, and it is the only durable answer to
 
 import os
 
-from . import handoff as ho
 from . import transcript as tx
 
 
-def summarize(transcript_file, task, run_id="unknown", session_num="?",
-              run_dir=None, session_started=None):
-    """Return a markdown resume document built from a session transcript.
-
-    ``task`` is the original task text. ``run_dir`` and ``session_started``
-    enable the handoff tier: without them the scraped fallback is always used,
-    which is the safe direction — see ``handoff.read_handoff``.
-    """
+def summarize(transcript_file, task, run_id="unknown", session_num="?"):
+    """Return a markdown resume document built from a session transcript."""
     session_id = os.path.basename(str(transcript_file))
     if session_id.endswith(".jsonl"):
         session_id = session_id[: -len(".jsonl")]
@@ -56,25 +56,11 @@ def summarize(transcript_file, task, run_id="unknown", session_num="?",
     else:
         files_block = "_(none)_"
 
-    handoff_block, handoff_is_fresh = ("", False)
-    if run_dir is not None:
-        handoff_block, handoff_is_fresh = ho.handoff_block(run_dir, session_started)
-
-    # A fresh handoff is the session's own account and supersedes the scrape.
-    # A stale or missing one does not, so the fallback stays.
-    if handoff_is_fresh:
-        text_section = ""
+    text = tx.last_text(transcript_file)
+    if text.strip():
+        text_block = text
     else:
-        text = tx.last_text(transcript_file)
-        if text.strip():
-            text_block = text
-        else:
-            text_block = "_(no text turn — session may have crashed mid-tool)_"
-        text_section = f"""
-## Last text from previous session
-
-{text_block}
-"""
+        text_block = "_(no text turn — session may have crashed mid-tool)_"
 
     return f"""# Resume — run {run_id}, after session {session_num}
 
@@ -92,11 +78,15 @@ def summarize(transcript_file, task, run_id="unknown", session_num="?",
 ## Files written or edited in the previous session
 
 {files_block}
-{handoff_block}{text_section}
+
+## Last text from previous session
+
+{text_block}
+
 ## Continue
 
-Continue the original task from where the previous session stopped. The
-previous session's transcript is at the path noted above — you may Read
-it if you need full detail on what was done. (Loop mechanics and how to
-signal DONE are in the wrapper preamble above this summary.)
+Continue the original task from where the previous session stopped. This
+summary is only an index — the full record is the transcript at the path
+above, and the preamble ahead of this document tells you how to read it.
+(Loop mechanics and how to signal DONE are in that preamble too.)
 """

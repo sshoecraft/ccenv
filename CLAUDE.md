@@ -54,7 +54,6 @@ If you find yourself about to run `git`, STOP and ask the user what they want in
 - No "simple" functions when troubleshooting - fix the actual code
 - Don't create _new or _old etc ... just use the same filenames! if you need to make a backup copy whatever your working on to XXX.backup
 - DO NOT EVER edit the Makefile without being told to do so
-- DO NOT use any file in an "old" directory
 - NEVER EVER "fallback" to hardcoded responses or text
 
 **CODING STYLE**:

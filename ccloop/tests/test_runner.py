@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from ccloop import handoff, runner
+from ccloop import runner
+from ccloop import transcript as tx
 
 
 @pytest.fixture(autouse=True)
@@ -480,6 +481,18 @@ def _make_run_dir(tmp_path, criteria=""):
     return d
 
 
+def _write_transcript(home, session_id, lines=10):
+    """A transcript for ``session_id`` where Claude Code would have put it."""
+    path = tx.transcript_path(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "".join(
+        json.dumps({"type": "assistant", "message": {"content": []}}) + "\n"
+        for _ in range(lines)
+    )
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
 def _write_state_hook(run_dir, body="#!/bin/sh\necho STATE-SENTINEL\n"):
     hook = run_dir.parent.parent / "state.sh"
     hook.write_text(body, encoding="utf-8")
@@ -487,28 +500,32 @@ def _write_state_hook(run_dir, body="#!/bin/sh\necho STATE-SENTINEL\n"):
     return hook
 
 
-def test_build_prompt_without_state_hook_is_unchanged(tmp_path, monkeypatch):
+def test_build_prompt_with_no_prior_transcript_is_body_only(
+        tmp_path, isolated_home, monkeypatch):
+    # Nothing to point at (no run session, no project transcript) means no
+    # block at all — never a path that doesn't exist.
     monkeypatch.delenv("CCLOOP_STATE_HOOK", raising=False)
     d = _make_run_dir(tmp_path)
     out = runner._build_prompt(d / "resume.md", 1, "RID")
-    expected_handoff = runner.HANDOFF_INSTRUCTION.format(
-        path=handoff.handoff_path(d))
-    assert out == (runner.PREAMBLE_LEGACY.format(iter=1)
-                   + expected_handoff + "BODY-SENTINEL\n")
+    assert out == runner.PREAMBLE_LEGACY.format(iter=1) + "BODY-SENTINEL\n"
 
 
-def test_build_prompt_names_the_handoff_file_before_the_body(tmp_path, monkeypatch):
-    # The session has to know it owns the file before it reads the last
-    # session's leavings, or handoff maintenance reads as someone else's job.
+def test_build_prompt_points_at_prior_transcript_before_the_body(
+        tmp_path, isolated_home, monkeypatch):
+    # The pointer to the full record has to land before the scrape of it, or
+    # the session treats the summary as everything there is.
     monkeypatch.delenv("CCLOOP_STATE_HOOK", raising=False)
-    monkeypatch.delenv("CCLOOP_HANDOFF_FILE", raising=False)
     d = _make_run_dir(tmp_path)
-    out = runner._build_prompt(d / "resume.md", 1, "RID")
-    assert str(handoff.handoff_path(d)) in out
-    assert out.index("Maintain your handoff file") < out.index("BODY-SENTINEL")
+    prior = _write_transcript(isolated_home, "sid-prev", lines=500)
+    (d / "sessions.log").write_text("sid-prev\n", encoding="utf-8")
+    out = runner._build_prompt(d / "resume.md", 2, "RID")
+    assert str(prior) in out
+    assert out.index("Read the previous session's transcript") < out.index("BODY-SENTINEL")
+    # And it tells the session NOT to write the thing this replaced.
+    assert "do NOT need to write a handoff document" in out
 
 
-def test_build_prompt_appends_state_block_after_body(tmp_path, monkeypatch):
+def test_build_prompt_appends_state_block_after_body(tmp_path, isolated_home, monkeypatch):
     monkeypatch.delenv("CCLOOP_STATE_HOOK", raising=False)
     d = _make_run_dir(tmp_path)
     _write_state_hook(d)
@@ -519,7 +536,7 @@ def test_build_prompt_appends_state_block_after_body(tmp_path, monkeypatch):
     assert out.index("BODY-SENTINEL") < out.index("STATE-SENTINEL")
 
 
-def test_build_prompt_state_block_in_criteria_mode(tmp_path, monkeypatch):
+def test_build_prompt_state_block_in_criteria_mode(tmp_path, isolated_home, monkeypatch):
     monkeypatch.delenv("CCLOOP_STATE_HOOK", raising=False)
     d = _make_run_dir(tmp_path, criteria="all tests pass")
     _write_state_hook(d)
@@ -528,7 +545,7 @@ def test_build_prompt_state_block_in_criteria_mode(tmp_path, monkeypatch):
     assert out.index("all tests pass") < out.index("BODY-SENTINEL") < out.index("STATE-SENTINEL")
 
 
-def test_build_prompt_survives_broken_state_hook(tmp_path, monkeypatch):
+def test_build_prompt_survives_broken_state_hook(tmp_path, isolated_home, monkeypatch):
     monkeypatch.delenv("CCLOOP_STATE_HOOK", raising=False)
     d = _make_run_dir(tmp_path)
     _write_state_hook(d, "#!/bin/sh\necho oops >&2\nexit 9\n")

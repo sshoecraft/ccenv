@@ -1,77 +1,48 @@
 ---
 name: handoff-docs-must-be-freshness-stamped
-description: ccloop 0.20.0: a hand-maintained handoff is a TIER, never a replacement. mxfs state.md sat 7d stale across 36 runs; only mtime separates stale from f…
+description: REVERSED in v0.21.0 — the handoff doc itself was the mistake, not its freshness. Kept for the durable half: hand-maintained docs die; scraper caps.
 metadata:
   type: project
-tags: [ccloop, handoff, summarize, invariant]
+tags: [ccloop, handoff, summarize, superseded]
 ---
 
-## The pattern, twice now
+# SUPERSEDED — see `never-make-sessions-maintain-handoff-docs`
 
-`state.py` (v0.14.0) already recorded it: *"a document the outgoing model has
-to remember to update eventually stops being updated, and a stale one is worse
-than none."* That is why the forward-looking half of the handoff became a
-computed hook (`state.sh`) instead of a hand-maintained `state.md`.
+ccenv v0.21.0 deleted the handoff module, its two `CCLOOP_HANDOFF_*` env vars,
+the freshness/STALE machinery, and the prompt instruction that told every
+session to maintain a handoff document under `<project>/.ccloop/`.
 
-An mxfs session then proposed replacing the *backward* half — generated
-`summarize()` output — with a hand-maintained `handoff.md`. Same idea, same
-trap, one module over.
+**The filename is deliberately not written down** — here or anywhere in the
+ccenv tree. A session that reads the name goes looking for the file, and the
+whole point of 0.21.0 is that no session should ever touch one.
 
-**Evidence, from the project making the proposal:**
+The 0.20.0 reasoning below was internally sound and still wrong at the root:
+it asked *"how do we make a model-maintained handoff trustworthy"* when the
+answer was *"don't have one"*. The per-session transcript Claude Code already
+writes is complete, free, and cannot go stale. ccloop now names that file in
+the prompt (`runner.prior_session_block`) and asks nothing of the session.
+The user's verdict on the write-tax: "cost me millions in tokens."
 
-```
-/src/mxfs/state.md          mtime 2026-07-31   7 days stale
-/src/mxfs/.ccloop/state.sh  mtime 2026-08-03   runs fresh every session
-```
+**Still true and worth keeping** from the original finding:
 
-36 ccloop run directories in that window. The hand-maintained document was
-already dead; the computed one was fine.
+- A document the outgoing model has to remember to update stops being updated.
+  Hard evidence: mxfs `state.md` sat 7 days stale across 36 ccloop runs while
+  `state.sh` beside it ran fresh every session. This is why `state.py` is a
+  computed hook — that decision stands.
+- A stale hand-written document is byte-identical to a fresh one; only mtime
+  separates them. If you ever *must* consume one, stamp it. (v0.21.0's answer
+  is to not consume one.)
+- Render a problem INTO the block, never swallow it (`state.py` discipline).
+- Audit every scraper for a cap. `files_edited` was the only unbounded one —
+  capped at 60. `last_text` caps at 4,000 chars, and hitting that cap on every
+  session is what proves it was never a summary.
+- `Last 20 bash commands` (465-803 tok, a third of the resume) was correctly
+  cut in 0.20.0 and stays cut.
+- Mechanism: `summarize()` runs in the runner AFTER a session exits; the relay
+  is event-driven on the wall event. There is no "cutoff hook" that generates
+  the resume — the token cutoff is only an early-relay knob.
 
-## The invariant
-
-**A hand-maintained handoff is a TIER, never a replacement for generated
-content.** The asymmetry that matters:
-
-- A generated summary can be unhelpful, but it is *derived*, so it can never
-  be stale.
-- A stale hand-written handoff is **byte-identical to a fresh one**. Nothing in
-  the content distinguishes them. Only the mtime does.
-
-So: compare mtime against the session's start time and render a stale file
-under an explicit marker naming its age. Never let it suppress the generated
-fallback. And when there is no start time to compare against, report `stale` —
-defaulting the other way lets any caller that forgets to thread the timestamp
-silently assert currency it never checked.
-
-Same discipline `state.py` uses for hook failures: render the problem INTO the
-block, never swallow it.
-
-## What was actually worth cutting
-
-Measured across mxfs resumes (~1,900-2,100 tok each):
-
-| section | tokens | verdict |
-|---|---|---|
-| `Last text from previous session` | 1,001 every time | keep as FALLBACK |
-| `Last 20 bash commands` | 465-803 | **cut** |
-| `Files written or edited` | ~40 | **keep** |
-
-`last_text` hitting 1,001 on every session means it hit its 4,000-char cap
-every time — it was never a summary, just the tail of assistant chatter. Still
-the only thing that works when a session crashes without writing a handoff.
-
-`files_edited` was the sole *unbounded* scraper (bash caps at 20x160, last_text
-at 4,000 chars). Capped at 60. When auditing scrapers, check every one for a
-cap — the one without it is the one nobody thought about.
-
-## Mechanism correction worth keeping
-
-There is no "cutoff hook" that generates the resume. `summarize()` runs in the
-runner AFTER a session exits (`runner.py`), and the relay is event-driven on
-the wall event — the token cutoff is only an early-relay knob. Proposals that
-describe ccloop as summarizing "at cutoff" are describing a component that does
-not exist.
-
-## Result
-
-2,074 tok → 1,284 (no handoff) → 396 (fresh handoff), on a real mxfs transcript.
+**Dead with 0.21.0:** the tiering rules, the mtime-vs-session-start freshness
+check, the STALE marker, and the "1,284 tok (no handoff) → 396 (fresh handoff)"
+result — that measurement priced only the prompt, never the output tokens the
+session burned rewriting the file all run.

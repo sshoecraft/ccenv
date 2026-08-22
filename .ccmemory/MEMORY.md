@@ -1,6 +1,8 @@
 ## feedback
 - [bump-top-level-bundle-version-not-just-subdir](bump-top-level-bundle-version-not-just-subdir.md) — When fixing a component in /src/ccenv, bump the TOP-LEVEL bundle VERSION + CHANGELOG.md — the bundle is what installs, not the component subdir.
 - [install-claude-md-component-owned](install-claude-md-component-owned.md) — Top-level install.sh owns only the BASE ~/.claude/CLAUDE.md (in a [CCENV MANAGED] marker region); each component owns/appends its own section.
+- [installer-seeds-settings-never-overwrites](installer-seeds-settings-never-overwrites.md) — install.sh settings step SEEDS keys — a key already present in ~/.claude/settings.json is the user's choice and is never overwritten, only reported.
+- [never-make-sessions-maintain-handoff-docs](never-make-sessions-maintain-handoff-docs.md) — NEVER instruct a session to write/update a handoff doc. The transcript is the handoff — point at it. ccenv v0.21.0 ripped this out of ccloop.
 - [no-git-checkout-to-undo-own-edits](no-git-checkout-to-undo-own-edits.md) — NEVER run git for ANY reason without explicit direction — including read-only checks (status/diff/log). The ban has no exceptions.
 - [no-per-component-venvs](no-per-component-venvs.md) — ccenv installs via pip3 install --user; pipx is the PEP668 fallback for MANUAL per-component installs, but install.sh itself uses --break-system-pack…
 - [no-version-history-in-claude-md](no-version-history-in-claude-md.md) — Version history goes in CHANGELOG.md, not CLAUDE.md. CLAUDE.md is for purpose/architecture/conventions, never for changelog content.
@@ -20,7 +22,7 @@
 - [ccprospect-aitrader-first-cycle](ccprospect-aitrader-first-cycle.md) — ccprospect live pilot, first cycle (2026-07-12): both aitrader agents ran P1/P2 correctly; opus filed a real anticipatory contract (p-0001 Mon-open p…
 - [ccprospect-module-created](ccprospect-module-created.md) — ccprospect v0.1.0 (bundle v0.8.0): prospective-memory sibling of ccmemory — immutable contracts + events.jsonl fold, evaluate-on-wake, counterfactual…
 - [claude-code-does-not-reap-task-output-files](claude-code-does-not-reap-task-output-files.md) — Claude Code does NOT delete a Bash background task's .output file when the command finishes — it persists for the whole session. Presence != liveness.
-- [handoff-docs-must-be-freshness-stamped](handoff-docs-must-be-freshness-stamped.md) — ccloop 0.20.0: a hand-maintained handoff is a TIER, never a replacement. mxfs state.md sat 7d stale across 36 runs; only mtime separates stale from f…
+- [handoff-docs-must-be-freshness-stamped](handoff-docs-must-be-freshness-stamped.md) — REVERSED in v0.21.0 — the handoff doc itself was the mistake, not its freshness. Kept for the durable half: hand-maintained docs die; scraper caps.
 - [list-budget-must-trim-every-tier](list-budget-must-trim-every-tier.md) — ccmemory 0.19.0: a budget exempting a type from BOTH trimming and folding is not a budget. reference was write-only for 160 entries on mxfs.
 - [prescribed-remedy-must-not-assume-its-own-tool-exists](prescribed-remedy-must-not-assume-its-own-tool-exists.md) — Injected protocol text that prescribes a tool (ToolSearch) must gate on that tool existing — ccmemory v0.13.0 turned a silent failure into a dead-end…
 - [pythonuserbase-banner-platform-gated](pythonuserbase-banner-platform-gated.md) — install.sh's REQUIRED-setup banner is gated on the platform's DEFAULT user-base; silent on Linux, fires on macOS+Homebrew Python

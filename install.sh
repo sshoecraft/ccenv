@@ -2,6 +2,8 @@
 # ccenv — install the Claude Code env/harness + overlay system
 #
 # Core components (installed in this order):
+#   settings    — model-stability knobs in ~/.claude/settings.json
+#                 (CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1, switchModelsOnFlag=false)
 #   ccproject   — three-layer project awareness skill + global CLAUDE.md snippet
 #   gitsync     — SessionStart hook that warns when the repo is out of sync with GitHub
 #   ccenvmcp    — stdlib-only MCP shim (foundation; lets the MCP servers run on Python 3.9)
@@ -94,7 +96,7 @@ while [ $# -gt 0 ]; do
         --check-retired) CHECK_RETIRED_ONLY=1; shift ;;
         --no-retired-cleanup) DO_RETIRED_CLEANUP=0; shift ;;
         --purge-retired-state) PURGE_RETIRED_STATE=1; shift ;;
-        -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
         *) echo "unknown flag: $1" >&2; exit 1 ;;
     esac
 done
@@ -798,6 +800,72 @@ assemble_ccenv_base_claude_md() {
     info "installed base $GLOBAL_CLAUDE_MD"
 }
 
+# ----------------------------------------------------------------------------
+# Core: settings — the harness-level knobs ccenv owns in ~/.claude/settings.json
+#
+# Both of these exist to stop Claude Code silently swapping the model out from
+# under a session:
+#
+#   env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK = "1"
+#       The harness's refusal fallback re-runs a turn on a different model when
+#       the selected one refuses. That is a silent model switch mid-session —
+#       the session you started is not the session you are talking to, and
+#       nothing in the transcript says so. Disabled.
+#
+#   switchModelsOnFlag = false
+#       Belt and braces for the same failure: if the env var ever fails to
+#       propagate (a launcher that scrubs env, a context that does not inherit
+#       the shell), this setting still prevents the switch — at the cost of a
+#       dialog instead of a silent swap.
+#
+# These are SEEDED, not owned: each key is written only when it is absent. A
+# key that is already present — whatever its value — is the user's deliberate
+# choice and is left exactly as it is (reported, not overwritten). Everything
+# else in settings.json is likewise untouched (the file also carries hook
+# registrations written by the component steps below).
+# ----------------------------------------------------------------------------
+install_ccenv_settings() {
+    step settings "enforcing model-stability knobs in ~/.claude/settings.json"
+    python3 - <<'PY'
+import json
+from pathlib import Path
+
+sp = Path.home() / ".claude" / "settings.json"
+sp.parent.mkdir(parents=True, exist_ok=True)
+
+data = {}
+if sp.exists():
+    try:
+        data = json.loads(sp.read_text() or "{}")
+    except json.JSONDecodeError:
+        data = {}
+
+changed = []
+kept = []
+
+env = data.setdefault("env", {})
+if "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK" in env:
+    kept.append("env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=%s"
+                % json.dumps(env["CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"]))
+else:
+    env["CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"] = "1"
+    changed.append("env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1")
+
+if "switchModelsOnFlag" in data:
+    kept.append("switchModelsOnFlag=%s" % json.dumps(data["switchModelsOnFlag"]))
+else:
+    data["switchModelsOnFlag"] = False
+    changed.append("switchModelsOnFlag=false")
+
+if changed:
+    sp.write_text(json.dumps(data, indent=2) + "\n")
+    for c in changed:
+        print("  set " + c)
+for k in kept:
+    print("  already set, left alone: " + k)
+PY
+}
+
 # Retired-component residue is cleared BEFORE the CLAUDE.md region is
 # reassembled and before anything is installed: the uninstaller strips the
 # retired components' own CLAUDE.md sections, so doing it after would leave
@@ -811,6 +879,10 @@ if [ "$DO_RETIRED_CLEANUP" = "1" ]; then
 fi
 
 assemble_ccenv_base_claude_md
+
+if should_install settings; then
+    install_ccenv_settings
+fi
 
 # Make sure pip can build PEP 621 packages before we install any of them.
 ensure_build_toolchain

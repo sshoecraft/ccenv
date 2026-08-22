@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import handoff, install, state, stream, summarize
+from . import install, state, stream, summarize
 from . import transcript as tx
 
 
@@ -366,27 +366,107 @@ Then return to the criteria.
 """
 
 
-HANDOFF_INSTRUCTION = """## Maintain your handoff file
+PRIOR_SESSION_INSTRUCTION = """## Read the previous session's transcript
 
     {path}
 
-Keep it current AS YOU WORK — not at the end. A session that fills its context
-or dies mid-tool never gets the chance to write a parting summary, and ccloop
-can only hand on what is already on disk when the session stops.
+{origin}
 
-Rewrite the whole file (don't append) whenever your understanding changes:
-what you are doing, what you have established, what you tried that did NOT
-work, and the single next concrete step. Keep it under ~100 lines — this is a
-handoff, not a log.
+It is the COMPLETE record of that session — every prompt, tool call, tool
+result and reply — already written to disk by Claude Code, at no cost to
+anyone. Size: {size}, {lines} lines of JSONL, one JSON event per line. The
+summary below this block is a scrape of that file, not a substitute for it.
 
-ccloop freshness-checks it. If the file was not written during your session,
-the next session is told plainly that it is stale and falls back to scraping
-your transcript. An unmaintained file costs the handoff; it does not silently
-pass off old intent as current.
+Read it before you start work, and read it the way you would read any large
+file — do NOT slurp the whole thing:
+
+- Start at the end. `Read` it with `offset` around {offset}; the tail carries
+  what the session was actually doing when it stopped.
+- Then grep it for specifics when you need the reasoning behind something:
+  `grep -n 'some_symbol' {path}`.
+
+You do NOT need to write a handoff document, a state file, or an end-of-session
+summary for whoever comes next. Your transcript IS the handoff — ccloop hands
+the next session this same pointer to it, automatically. Spend your tokens on
+the task.
 
 ---
 
 """
+
+ORIGIN_RUN = "That is the session that just handed off to you."
+ORIGIN_PROJECT = (
+    "That is the most recent Claude Code session in this project. It is NOT\n"
+    "part of this run — this is the run's first session — so read it as\n"
+    "background on where the project stood, not as instructions to you."
+)
+
+
+def _fmt_size(num_bytes):
+    if num_bytes >= 1 << 20:
+        return f"{num_bytes / (1 << 20):.1f} MB"
+    if num_bytes >= 1 << 10:
+        return f"{num_bytes / (1 << 10):.0f} KB"
+    return f"{num_bytes} bytes"
+
+
+def prior_session_transcript(run_dir):
+    """``(path, origin)`` of the transcript the next session should read.
+
+    Deterministic, in two tiers. ``sessions.log`` holds this run's session ids
+    in order, so the last one with a transcript still on disk is exactly the
+    session that just ended — no scanning, no mtime guessing. Walking backwards
+    rather than taking the last line means a transcript that was deleted or
+    never written falls through to the one before it instead of killing the
+    block entirely.
+
+    Session 1 has no such predecessor, so it falls back to the newest
+    transcript in the project's Claude Code directory: the session the user was
+    in when they set the run up. Returns ``(None, "")`` when the project has no
+    transcripts at all.
+    """
+    ids = []
+    try:
+        text = (Path(run_dir) / "sessions.log").read_text(
+            encoding="utf-8", errors="replace")
+        ids = [line.strip() for line in text.splitlines() if line.strip()]
+    except OSError:
+        pass
+
+    for session_id in reversed(ids):
+        path = tx.transcript_path(session_id)
+        if path.is_file():
+            return path, ORIGIN_RUN
+
+    path = tx.latest_transcript(exclude=ids)
+    if path is not None:
+        return path, ORIGIN_PROJECT
+    return None, ""
+
+
+def prior_session_block(run_dir):
+    """The prompt section pointing at the previous session's transcript.
+
+    Empty string when there is nothing to point at — a first session in a
+    project Claude Code has never run in. Never fabricate a path here: a
+    session told to read a file that does not exist burns a tool call and
+    learns to distrust the whole preamble.
+    """
+    path, origin = prior_session_transcript(run_dir)
+    if path is None:
+        return ""
+    try:
+        size = _fmt_size(path.stat().st_size)
+    except OSError:
+        return ""
+    lines = tx.line_count(path)
+    if not lines:
+        return ""
+    # Land the suggested offset a few hundred lines from the end: far enough
+    # back to cover the last stretch of work, never past the end of the file.
+    offset = max(1, lines - 300)
+    return PRIOR_SESSION_INSTRUCTION.format(
+        path=path, origin=origin, size=size, lines=lines, offset=offset)
 
 
 def _build_prompt(resume_file, iteration, run_id=""):
@@ -398,10 +478,10 @@ def _build_prompt(resume_file, iteration, run_id=""):
     # session reads, and it's built here — not in summarize() — so session 1
     # of a run gets it too and it can never be a stale leftover.
     tail = state.state_block(run_dir, run_id, iteration, log=log)
-    # Ahead of the resume body: the session has to know it owns this file
-    # before it reads what the last session left, or it treats handoff
-    # maintenance as someone else's job and the file goes stale.
-    hand = HANDOFF_INSTRUCTION.format(path=handoff.handoff_path(run_dir))
+    # Ahead of the resume body: the pointer to the full transcript has to land
+    # before the scrape of it, so the session reaches for the source rather
+    # than treating the summary as all there is.
+    hand = prior_session_block(run_dir)
     if _has_criteria(run_dir):
         criteria = _criteria_path(run_dir).read_text(encoding="utf-8", errors="replace").strip()
         marker = str(_criteria_met_path(run_dir))
@@ -925,7 +1005,6 @@ def loop(run_id, run_dir, ensure_hook=True, interactive=False, model=None, effor
                 try:
                     new_resume = summarize.summarize(
                         transcript_file, task, run_id, iteration,
-                        run_dir=run_dir, session_started=start,
                     )
                     tmp = resume_file.with_suffix(".md.tmp")
                     tmp.write_text(new_resume, encoding="utf-8")

@@ -34,6 +34,23 @@ disk per session. ccloop extracts what was done, builds the next
 session's prompt, and hands off. Claude never has to write a handoff
 document; it just works, and optionally writes `DONE` when finished.
 
+### No handoff document
+
+Each session's prompt names the previous session's transcript by absolute
+path — with its size, line count, and a suggested read offset near the
+tail — and tells the session to read it. The pointer is deterministic:
+this run's `sessions.log` gives the exact predecessor, and session 1 falls
+back to the newest transcript in `~/.claude/projects/<cwd-slug>/`, i.e.
+the session you were in when you set the run up.
+
+Nothing is asked of the session in return. It does not write a handoff
+file, a state file, or a parting summary; the transcript already is one,
+Claude Code writes it for free, and it cannot go stale. 0.20.0 briefly
+shipped a session-maintained handoff document under `.ccloop/` — a
+continuous write tax on every session to reproduce, worse, a file that
+already existed. It was removed in 0.21.0, and its filename is left
+unwritten here on purpose: name it and some session goes looking for it.
+
 ## Requirements
 
 - `claude` CLI on `PATH`
@@ -266,13 +283,12 @@ abort after N failed launches instead.
 | `CCLOOP_STATE_HOOK` | `<project>/.ccloop/state.sh` | Executable whose stdout becomes the `## Current project state` prompt section; absent = no section |
 | `CCLOOP_STATE_HOOK_TIMEOUT` | 30 | SIGKILL the state hook after N seconds; 0 disables the timeout |
 | `CCLOOP_STATE_HOOK_MAX_BYTES` | 8000 | Truncate state-hook stdout past this many bytes (with a visible marker); 0 disables |
-| `CCLOOP_HANDOFF_FILE` | `<project>/.ccloop/handoff.md` | File the session maintains as it works; concatenated into the next prompt. Absent = no section |
-| `CCLOOP_HANDOFF_MAX_BYTES` | 6000 | Truncate the handoff past this many bytes (with a visible marker); 0 disables |
 
-The handoff file is **freshness-checked**: if the session that just ended
-did not write it, the next session gets it under an explicit STALE marker
-and the scraped fallback stays in the document. An unmaintained handoff
-costs you the handoff; it never silently passes off old intent as current.
+`CCLOOP_HANDOFF_FILE` and `CCLOOP_HANDOFF_MAX_BYTES` were removed in
+0.21.0 along with the session-maintained handoff document they configured
+— see *No handoff document* above. Any such file left over from 0.20.x in
+a project's `.ccloop/` is inert; delete it or keep it as notes, ccloop
+neither reads it nor names it.
 
 ccloop always sets `DISABLE_AUTO_COMPACT=1` on the spawned session —
 compaction mid-loop scrambles state in ways that defeat the resume

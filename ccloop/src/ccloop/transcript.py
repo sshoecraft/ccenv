@@ -19,9 +19,68 @@ def cwd_slug(cwd=None):
     return re.sub(r"[^A-Za-z0-9-]", "-", real)
 
 
+def project_dir(cwd=None):
+    """Directory holding every Claude Code transcript recorded under ``cwd``."""
+    return Path.home() / ".claude" / "projects" / cwd_slug(cwd)
+
+
 def transcript_path(session_id, cwd=None):
     """Absolute path to the transcript JSONL for ``session_id`` under ``cwd``."""
-    return Path.home() / ".claude" / "projects" / cwd_slug(cwd) / f"{session_id}.jsonl"
+    return project_dir(cwd) / f"{session_id}.jsonl"
+
+
+def latest_transcript(cwd=None, exclude=()):
+    """Newest non-empty transcript for ``cwd``, or ``None``.
+
+    This is the deterministic answer to "what was the previous Claude Code
+    session in this project" when the run has no session of its own to point
+    at yet — session 1, where the only prior context is whatever session the
+    user was in when they set the task up. ``exclude`` skips session ids
+    (bare, no ``.jsonl``) that must not be treated as prior work, i.e. this
+    run's own sessions.
+
+    Zero-byte files are skipped: Claude Code creates the transcript at session
+    start, so an empty one is a session that produced nothing.
+    """
+    skip = {str(s) for s in exclude}
+    newest = None
+    newest_mtime = None
+    try:
+        entries = list(project_dir(cwd).iterdir())
+    except OSError:
+        return None
+    for path in entries:
+        if path.suffix != ".jsonl" or path.stem in skip:
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        if not st.st_size:
+            continue
+        if newest_mtime is None or st.st_mtime > newest_mtime:
+            newest, newest_mtime = path, st.st_mtime
+    return newest
+
+
+def line_count(path):
+    """Number of lines in ``path``, or ``None`` if it can't be read.
+
+    Counted over raw bytes rather than by parsing: this exists only to tell a
+    session where the end of its predecessor's transcript is, so it can Read
+    from an offset instead of slurping a multi-megabyte file.
+    """
+    total = 0
+    try:
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(1 << 20)
+                if not chunk:
+                    break
+                total += chunk.count(b"\n")
+    except OSError:
+        return None
+    return total
 
 
 def iter_events(path):

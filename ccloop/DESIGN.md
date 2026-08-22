@@ -58,7 +58,6 @@ same project safe.
 ```
 .ccloop/
   ├─ state.sh           ← optional project state hook (see state.py)
-  ├─ handoff.md         ← optional session-maintained handoff (see handoff.py)
   └─ runs/<run-id>/
 ```
 
@@ -188,11 +187,17 @@ original task (carried verbatim), approximate context tokens at the last
 turn, tool-use counts, and files written/edited (capped at 60). Emits
 markdown used as the next session's prompt body.
 
-The last assistant text turn is included only as a **fallback**, when
-`handoff.py` reports no fresh handoff. It hit its 4,000-char cap on
-essentially every session, which means it was never a summary — just
-whatever fell in the last 4k chars of output. It stays because it is the
-only thing that works when a session crashes without writing a handoff.
+This document is an **index, not the handoff**. The handoff is the
+previous session's transcript; the prompt points the next session straight
+at it (see *the prior-session pointer* below). Everything here is cheap
+orientation — enough to know where the work was, and enough to survive a
+session whose transcript never gets read.
+
+The last assistant text turn is included unconditionally. It hits its
+4,000-char cap on essentially every session, so it is not a summary — it
+is whatever fell in the last 4k chars of output — but it is the cheapest
+possible "what was I just saying", and it is the only thing that works
+when a session crashes with no readable tail.
 
 The last-20-bash-commands section was removed in 0.20.0: a third of the
 document's tokens for 20 commands clipped to 160 chars, which nothing
@@ -201,28 +206,43 @@ downstream consumed. The transcript path is in the document for detail.
 This is the **backward-looking** half of a handoff — every field except
 the original task is derived from what the previous session did. The
 forward-looking half (what the project looks like *now*) is `state.py`.
-`handoff.py` is the session's own account, which is neither.
 
-### `handoff.py` — session-maintained handoff
+### The prior-session pointer — `runner.prior_session_block`
 
-Reads `<project>/.ccloop/handoff.md` (override: `CCLOOP_HANDOFF_FILE`,
-size cap `CCLOOP_HANDOFF_MAX_BYTES`, default 6000) and emits a
-`## Handoff from the previous session` section. The prompt instructs each
-session to keep the file current as it works.
+Ahead of the resume body, every prompt names the previous session's
+transcript by absolute path, with its size, its line count, and a
+suggested `offset` near the tail.
 
-Two things a scraper cannot do: say what the session was *trying* to do,
-and survive a crash. The file is on disk before the session stops, so a
-session that dies with zero assistant turns still hands off what it wrote.
+Located deterministically, in two tiers:
 
-**Freshness is checked, never assumed.** The file's mtime is compared to
-the session's start time (30s slack). A file the just-ended session did
-not touch is rendered under an explicit STALE marker naming its age, and
-does not suppress the scraped fallback. This is the same failure `state.py`
-documents — a hand-maintained document stops being maintained — and the
-reason the handoff is a *tier* rather than a replacement: a stale handoff
-is byte-identical to a fresh one, so the reader has to be told which it is.
-With no start time to compare against, the result is `stale`; defaulting
-the other way would let a caller assert currency it never checked.
+1. **This run.** `sessions.log` holds the run's session-ids in order, so
+   the last one whose transcript is still on disk *is* the session that
+   just ended. Walked backwards, so a deleted or never-written transcript
+   falls through to the one before it rather than killing the block.
+2. **The project.** Session 1 has no predecessor in the run, so it falls
+   back to the newest non-empty transcript in
+   `~/.claude/projects/<cwd-slug>/`, excluding this run's own ids — that
+   is the session the user was in when they set the run up. Labelled as
+   background, not as instructions.
+
+If neither tier finds a file, the block is omitted entirely. A session
+told to read a path that does not exist burns a tool call and learns to
+distrust the rest of the preamble.
+
+**Why a pointer and not a document.** 0.20.0 shipped a session-maintained
+handoff document under `.ccloop/` that each session was instructed to keep
+current *as it worked* — rewrite the whole file whenever your
+understanding changes. Removed in 0.21.0, and its filename is deliberately
+not repeated anywhere in this tree: name it and some session goes looking
+for it. It charged every session a
+continuous write tax to reproduce, from memory and worse, what Claude
+Code was already writing to disk for free. The transcript has no staleness
+problem (it cannot lag the session that wrote it), no maintenance
+problem, and no token cost to produce. The freshness machinery that
+0.20.0 needed — mtime vs. session start, STALE markers, a scraped
+fallback for when the file went unmaintained — was all overhead for a
+document that never had to exist. The wrapper's job is to name the file;
+the session's job is to read it.
 
 ### `state.py` — project state hook
 
