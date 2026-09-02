@@ -5,6 +5,15 @@ import time
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def no_hook_sleep(monkeypatch):
+    """Default the in-hook wait sleep OFF for the existing suite.
+
+    keepgoing now absorbs the wait by sleeping inside the hook; without this
+    every pending-background test would sleep the full budget."""
+    monkeypatch.setenv("CCLOOP_WAIT_SLEEP", "0")
+
 from ccloop import keepgoing
 
 
@@ -511,3 +520,108 @@ def test_pending_falls_back_to_mtime_without_procfs(tmp_path, monkeypatch):
     os.utime(stale, (old, old))
 
     assert keepgoing._pending_background_task_count(sess) == 1
+
+
+def _wait_env(monkeypatch, tmp_path, budget):
+    resume = tmp_path / "resume.md"
+    resume.write_text("body\n")
+    monkeypatch.setenv("CCLOOP_RUN_ID", "r1")
+    monkeypatch.setenv("CCLOOP_SESSION_ID", "s1")
+    monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
+    monkeypatch.setenv("CCLOOP_WAIT_SLEEP", str(budget))
+    return resume.parent
+
+
+def test_hook_absorbs_the_wait_instead_of_refeeding(monkeypatch, tmp_path):
+    """The whole point: with live background work the hook SLEEPS rather than
+    returning at once. An instant re-feed makes the model pay a full request per
+    cycle to emit one word ("Waiting.") and stop again — ~20 requests on a
+    10-minute build, strictly worse than the blocking foreground wait it
+    replaced."""
+    _wait_env(monkeypatch, tmp_path, 20)
+    slept = {"n": 0}
+    monkeypatch.setattr(keepgoing.time, "sleep",
+                        lambda s: slept.__setitem__("n", slept["n"] + 1))
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 1)
+    rc, out = run(monkeypatch, {"session_id": "s1"})
+    assert slept["n"] >= 1, "hook returned without sleeping — the spin is back"
+    assert json.loads(out)["decision"] == "block"
+
+
+def test_finished_work_unblocks_into_a_real_turn(monkeypatch, tmp_path):
+    """When the work completes inside the budget the model gets a turn with the
+    result ready — not another 'still running' no-op."""
+    _wait_env(monkeypatch, tmp_path, 30)
+    state = {"n": 2}
+    monkeypatch.setattr(keepgoing.time, "sleep", lambda s: state.__setitem__("n", 0))
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count",
+                        lambda _s: state["n"])
+    rc, out = run(monkeypatch, {"session_id": "s1"})
+    payload = json.loads(out)
+    assert payload["decision"] == "block"
+    assert "finished" in payload["reason"].lower()
+
+
+def test_finished_work_does_not_consume_the_continue_cap(monkeypatch, tmp_path):
+    """A wait cycle is bounded by external work, not model pathology, so it must
+    not eat the CCLOOP_MAX_CONTINUES budget that catches a spinning model."""
+    run_dir = _wait_env(monkeypatch, tmp_path, 30)
+    state = {"n": 1}
+    monkeypatch.setattr(keepgoing.time, "sleep", lambda s: state.__setitem__("n", 0))
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count",
+                        lambda _s: state["n"])
+    run(monkeypatch, {"session_id": "s1"})
+    assert not list(run_dir.glob("keepgoing-*.count")), "wait bumped the continue cap"
+
+
+def test_zero_budget_restores_the_immediate_refeed(monkeypatch, tmp_path):
+    _wait_env(monkeypatch, tmp_path, 0)
+    slept = {"n": 0}
+    monkeypatch.setattr(keepgoing.time, "sleep",
+                        lambda s: slept.__setitem__("n", slept["n"] + 1))
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 1)
+    rc, out = run(monkeypatch, {"session_id": "s1"})
+    assert slept["n"] == 0
+    assert "ccloop wait" in json.loads(out)["systemMessage"]
+
+
+def test_interactive_session_is_allowed_to_simply_wait(monkeypatch, tmp_path):
+    """THE point. An interactive session with live background work must be
+    allowed to stop: the TUI idles at the prompt, the process stays alive,
+    nothing relays, and the harness's completion notification wakes it — at
+    zero requests. Blocking here charged a request per cycle to re-feed a model
+    whose only honest answer was 'still waiting'."""
+    _wait_env(monkeypatch, tmp_path, 50)
+    monkeypatch.setenv("CCLOOP_INTERACTIVE", "1")
+    slept = {"n": 0}
+    monkeypatch.setattr(keepgoing.time, "sleep",
+                        lambda s: slept.__setitem__("n", slept["n"] + 1))
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 1)
+    rc, out = run(monkeypatch, {"session_id": "s1"})
+    assert rc == 0
+    assert out.strip() == "", "hook emitted a decision — the stop was not allowed"
+    assert slept["n"] == 0, "hook slept instead of letting the session wait"
+
+
+def test_headless_still_blocks_because_a_stop_exits_the_process(monkeypatch, tmp_path):
+    """Headless `-p` has different stop semantics: an allowed stop exits the
+    process and ccloop relays, losing the running task. There the hook must
+    still block (absorbing the wait by sleeping)."""
+    _wait_env(monkeypatch, tmp_path, 20)
+    monkeypatch.delenv("CCLOOP_INTERACTIVE", raising=False)
+    monkeypatch.setattr(keepgoing.time, "sleep", lambda s: None)
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 1)
+    rc, out = run(monkeypatch, {"session_id": "s1"})
+    assert json.loads(out)["decision"] == "block"
+
+
+def test_interactive_without_pending_work_still_keeps_going(monkeypatch, tmp_path):
+    """The free-wait path must be reachable ONLY while work is genuinely live —
+    otherwise an interactive session could stop for good and stall the run."""
+    _wait_env(monkeypatch, tmp_path, 50)
+    monkeypatch.setenv("CCLOOP_INTERACTIVE", "1")
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 0)
+    rc, out = run(monkeypatch, {"session_id": "s1"})
+    payload = json.loads(out)
+    assert payload["decision"] == "block"
+    assert "DONE" in payload["reason"]

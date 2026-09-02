@@ -552,3 +552,131 @@ def test_build_prompt_survives_broken_state_hook(tmp_path, isolated_home, monkey
     out = runner._build_prompt(d / "resume.md", 1, "RID")
     assert "BODY-SENTINEL" in out
     assert "exited 9" in out
+
+
+def test_build_command_resume_reenters_same_session(tmp_path):
+    """A wedge retry must re-enter the SAME session: --resume instead of
+    --session-id, no handoff prompt (already in the resumed context), and
+    'continue' as the trailing instruction instead of 'begin'."""
+    cfg = runner._config()
+    prompt_file = tmp_path / "p.md"
+    prompt_file.write_text("task\n")
+    cmd = runner._build_command(cfg, "sid-abc", prompt_file=prompt_file,
+                                interactive=True, resume=True)
+    assert "--resume" in cmd
+    assert cmd[cmd.index("--resume") + 1] == "sid-abc"
+    assert "--session-id" not in cmd
+    assert "--append-system-prompt-file" not in cmd
+    assert cmd[-1] == "continue"
+
+
+def test_build_command_without_resume_is_unchanged(tmp_path):
+    cfg = runner._config()
+    prompt_file = tmp_path / "p.md"
+    prompt_file.write_text("task\n")
+    cmd = runner._build_command(cfg, "sid-abc", prompt_file=prompt_file,
+                                interactive=True)
+    assert "--resume" not in cmd
+    assert "--session-id" in cmd
+    assert "--append-system-prompt-file" in cmd
+    assert cmd[-1] == "begin"
+
+
+def _wedge_transcript(path):
+    import json
+    path.write_text(json.dumps({
+        "type": "assistant", "isApiErrorMessage": True,
+        "message": {"content": [{"type": "text", "text":
+                                 "API Error: Fable 5's safeguards flagged this message"}]},
+    }) + "\n", encoding="utf-8")
+
+
+def test_relay_reason_reports_wedge(fake_claude, tmp_path, monkeypatch):
+    """The caller has to tell a wedge apart from a wall or a hook halt — only
+    a wedge is eligible for an in-place resume."""
+    monkeypatch.setenv("FAKE_MODE", "sleep")
+    monkeypatch.setenv("FAKE_SLEEP", "30")
+    t = tmp_path / "transcript.jsonl"
+    _wedge_transcript(t)
+    reason = {}
+    exit_code, relayed = runner.run_session_interactive(
+        [str(fake_claude)], dict(os.environ), "wedge-sess",
+        halt_file=tmp_path / "halt-none", transcript_file=t, poll=0.2,
+        api_error_grace=0.5, relay_reason=reason,
+    )
+    assert relayed is True
+    assert reason["kind"] == "wedge"
+
+
+def test_relay_reason_reports_wall(fake_claude, tmp_path, monkeypatch):
+    import json
+    monkeypatch.setenv("FAKE_MODE", "sleep")
+    monkeypatch.setenv("FAKE_SLEEP", "30")
+    t = tmp_path / "transcript.jsonl"
+    t.write_text(json.dumps({
+        "type": "assistant", "isApiErrorMessage": True,
+        "message": {"content": [{"type": "text", "text": "Prompt is too long"}]},
+    }) + "\n", encoding="utf-8")
+    reason = {}
+    exit_code, relayed = runner.run_session_interactive(
+        [str(fake_claude)], dict(os.environ), "wall-sess",
+        halt_file=tmp_path / "halt-none", transcript_file=t, poll=0.2,
+        relay_reason=reason,
+    )
+    assert reason["kind"] == "wall"
+
+
+def test_relay_reason_omitted_is_backward_compatible(fake_claude, tmp_path, monkeypatch):
+    """Callers that don't pass relay_reason must keep working unchanged."""
+    monkeypatch.setenv("FAKE_MODE", "sleep")
+    monkeypatch.setenv("FAKE_SLEEP", "30")
+    t = tmp_path / "transcript.jsonl"
+    _wedge_transcript(t)
+    exit_code, relayed = runner.run_session_interactive(
+        [str(fake_claude)], dict(os.environ), "compat-sess",
+        halt_file=tmp_path / "halt-none", transcript_file=t, poll=0.2,
+        api_error_grace=0.5,
+    )
+    assert relayed is True
+
+
+def test_wedge_knob_defaults():
+    """In-place resume is OFF by default; the storm brake is ON.
+
+    Resume was introduced on the theory that the safeguard flag is sampling
+    noise. Live evidence killed that: the classifier scores the WHOLE assembled
+    request, so --resume replays the same request and re-trips deterministically
+    — measured at 16 flags in under an hour with retries on. The storm brake
+    must stay on regardless: an unbounded wedge loop rebuilds ~65k of startup
+    context per cycle and drains the request pool in minutes."""
+    cfg = runner._config()
+    assert cfg["wedge_retries"] == 0
+    assert cfg["wedge_storm_limit"] == 5
+    assert cfg["wedge_backoff"] == 30
+    assert cfg["wedge_backoff_max"] == 600
+
+
+def test_wedge_knobs_are_overridable(monkeypatch):
+    monkeypatch.setenv("CCLOOP_WEDGE_RETRIES", "0")
+    monkeypatch.setenv("CCLOOP_WEDGE_STORM_LIMIT", "9")
+    cfg = runner._config()
+    assert cfg["wedge_retries"] == 0   # 0 = straight to the fresh relay
+    assert cfg["wedge_storm_limit"] == 9
+
+
+def test_session_env_declares_interactive(tmp_path):
+    cfg = runner._config()
+    env = runner._session_env(cfg, "r1", "s1", tmp_path / "resume.md",
+                              tmp_path / "t.jsonl", interactive=True)
+    assert env["CCLOOP_INTERACTIVE"] == "1"
+
+
+def test_session_env_clears_interactive_for_headless(tmp_path, monkeypatch):
+    """ccloop's to declare, never the ambient environment's. A stray value in
+    the wrapper's own env would otherwise send a HEADLESS session down the
+    free-wait path, where an allowed stop exits the process and loses the task."""
+    monkeypatch.setenv("CCLOOP_INTERACTIVE", "1")
+    cfg = runner._config()
+    env = runner._session_env(cfg, "r1", "s1", tmp_path / "resume.md",
+                              tmp_path / "t.jsonl", interactive=False)
+    assert "CCLOOP_INTERACTIVE" not in env

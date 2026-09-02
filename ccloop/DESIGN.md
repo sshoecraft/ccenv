@@ -305,6 +305,37 @@ to poll), and:
 
 ### API-error wedge relay (the third interactive signal)
 
+**Recovery is two-tier as of 0.15.0.** A wedge used to go straight to a fresh
+session. That costs a full startup-context rebuild — measured at ~65k tokens on
+a mature project — and discards the working context the session had already
+paid for. So the watcher now reports *why* it ended (`relay_reason["kind"]` is
+`wedge` / `wall` / `halt`; the `(exit_code, relayed)` return contract is
+unchanged) and the loop picks the cheapest recovery that fits:
+
+1. **Resume in place** — `claude --resume <session-id>` with `continue` as the
+   prompt, up to `CCLOOP_WEDGE_RETRIES` (default 2) times per session number.
+   Same session, context intact, one request. `--resume` replaces
+   `--session-id`, and the handoff prompt is omitted because it is already in
+   the resumed context.
+2. **Fresh relay** — the previous behaviour, once the retry budget is spent.
+
+The retry budget is bounded because the failure may be content-driven rather
+than sampling noise. If the classifier is reacting to what is already in the
+context, a resume replays the identical state and re-trips deterministically;
+the fresh relay works precisely *because* `resume.md` is a summary that drops
+the offending raw output. Neither tier is reliably right, so the cheap one is
+tried first and the expensive one is the fallback.
+
+**Storm brake.** `wedge_storm` counts consecutive wedges across both tiers and
+resets on any session that ends for another reason. Each consecutive wedge
+backs off exponentially (`CCLOOP_WEDGE_BACKOFF`, default 30s, capped at
+`CCLOOP_WEDGE_BACKOFF_MAX`) and the run aborts at `CCLOOP_WEDGE_STORM_LIMIT`
+(default 5). This is NOT covered by the existing no-progress guard: a wedged
+session produces assistant turns before it wedges, so `stuck` never increments.
+Without the brake, a wedge that reproduces immediately on a fresh session is an
+unbounded loop that rebuilds startup context every cycle and can drain a
+request pool in minutes.
+
 The context wall is one way Claude Code commits an `isApiErrorMessage` turn
 and then idles. A transient **transport/API error** (e.g. `API Error: The
 operation timed out.`, an overload, a 5xx — common when `claude` points at a
@@ -452,9 +483,57 @@ wrap-up near the cutoff. The hard "context full → relay" guarantee is the
 wall-event path (see "Context-wall relay"), not this guard; the transcript
 is recoverable whether or not the nudge is honored.
 
+### `delegate.py` — PreToolUse hook (`ccloop delegate`)
+
+Keeps a session from spending premium requests on mechanical shell work.
+
+**The measurement that motivated it** (five mxfs Fable loop sessions,
+721 requests): 65% of requests were purely mechanical, 50% sat inside
+chains of >= 3 consecutive mechanical requests, and `Agent` was called
+**zero** times. A written rule saying "delegate" had been in place a week
+with no effect. Prose does not change this behaviour; hooks do.
+
+**Mechanism.** Per session, in
+`$XDG_STATE_HOME/ccloop/delegate/<session-id>.json`, it tracks the current
+streak of consecutive parent `Bash` calls with no
+`Read`/`Edit`/`Write`/`Agent` between them (those reset it; other tools are
+neutral). At `CCLOOP_DELEGATE_ADVISE` (default 3) it emits
+`additionalContext` naming the subagents available to the project — read
+from `<cwd>/.claude/agents/` then `~/.claude/agents/`, falling back to
+`general-purpose` on sonnet so it never points at an agent that does not
+exist. Inside a ccloop run only, at `CCLOOP_DELEGATE_DENY` (default 8) it
+returns `permissionDecision: deny`.
+
+**Why two thresholds instead of one.** A denied call has already cost its
+request — the turn that emitted it is spent. Denying at position N and
+forcing an `Agent` call saves `max(0, L - (N+1))` on a chain of length L
+and *loses* `(N+1) - L` when the chain would have ended on its own. Advice
+is free: `additionalContext` rides on a call that runs anyway. So advice
+goes early, refusal goes late. The measured chain distribution is
+fat-tailed — 95 chains, but 6 of length 11-38 carrying 166 requests — so
+deny-at-8 catches the chains that actually drain the pool (net +111
+requests over the sample) while risking one request of loss, where
+deny-at-3 nets more on paper but fires 41 times, i.e. 41 chances to thrash.
+
+**Subagent pass-through is gated on `agent_id`, not `agent_type`.** The
+CLI's hook schema says so explicitly: `agent_type` is also present on the
+main thread of a session started with `--agent`, so gating on it would
+silently disable the brake for those sessions.
+
+**Thrash bound.** The streak resets on a deny, so one chain earns one
+refusal; a session that genuinely must continue by hand can.
+
+**Contract exception.** `guard` and `keepgoing` self-gate on
+`CCLOOP_RUN_ID` and are no-ops outside a run. `delegate` deliberately does
+not — its advice runs in every session on the machine, because the burn it
+targets is not unique to loop runs. Only the *refusal* is gated on
+`CCLOOP_RUN_ID`, where no human is watching and the tool set is known to
+include `Agent`. `CCLOOP_DELEGATE=off` disables it entirely.
+
 ### `install.py` — settings.json hook registration
 
-Reads `~/.claude/settings.json` and merges **two** ccloop entries — one
+
+Reads `~/.claude/settings.json` and merges **three** ccloop entries — one
 per row in the ``HOOKS`` table at the top of the module:
 
 | event         | subcommand   |

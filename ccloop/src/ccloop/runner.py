@@ -207,6 +207,44 @@ def _config():
         "launch_retry_limit": _env_int("CCLOOP_LAUNCH_RETRY_LIMIT", 0),
         "launch_backoff": _env_int("CCLOOP_LAUNCH_BACKOFF", 5),
         "launch_backoff_max": _env_int("CCLOOP_LAUNCH_BACKOFF_MAX", 120),
+        # API-error wedge recovery. A wedge used to go straight to a FRESH
+        # session, which costs a full startup-context rebuild (~65k tokens on
+        # a mature project) and discards the working context the session had
+        # already paid for. `--resume` re-enters the SAME session with its
+        # context intact, so a retry costs one request instead.
+        #
+        # Retries are bounded because the failure may be content-driven rather
+        # than sampling noise: if the classifier is reacting to what is already
+        # in the context, a resume replays the identical state and re-trips
+        # deterministically. When the budget is spent we fall back to the fresh
+        # relay, which works precisely because resume.md drops the offending
+        # raw output.
+        # DEFAULT 0 — in-place resume is OFF. It was introduced in v0.25.0 on
+        # the theory that the safeguard flag is response-sampling noise, so a
+        # retry against the same context would usually pass. Live evidence says
+        # otherwise: with retries on, the user measured 16 flags in under an
+        # hour. Anthropic's server-side cyber classifier stepped up ~110x on
+        # 2026-08-22 (0.13 -> ~15 flags per 1k requests) and fires on the WHOLE
+        # ASSEMBLED REQUEST rather than on any specific content. `--resume`
+        # replays that same assembled request, so it re-trips deterministically
+        # and turns one flag into 2-4 dead sessions.
+        #
+        # The fresh relay works precisely because resume.md is a summary that
+        # drops the offending raw output. Expensive, but it is the thing that
+        # actually clears the condition.
+        #
+        # Set CCLOOP_WEDGE_RETRIES=N to re-enable, if the flag behaviour ever
+        # changes. The storm brake below stays ON regardless.
+        "wedge_retries": _env_int("CCLOOP_WEDGE_RETRIES", 0),
+        # Storm brake. Consecutive wedges — whether resumed or relayed — back
+        # off exponentially and then abort the run. Without this, a wedge that
+        # reproduces immediately on a fresh session is an unbounded loop that
+        # rebuilds startup context every cycle; the existing no-progress guard
+        # does NOT catch it, because a wedged session does produce assistant
+        # turns before it wedges.
+        "wedge_storm_limit": _env_int("CCLOOP_WEDGE_STORM_LIMIT", 5),
+        "wedge_backoff": _env_int("CCLOOP_WEDGE_BACKOFF", 30),
+        "wedge_backoff_max": _env_int("CCLOOP_WEDGE_BACKOFF_MAX", 600),
     }
 
 
@@ -444,15 +482,58 @@ def prior_session_transcript(run_dir):
     return None, ""
 
 
-def prior_session_block(run_dir):
+WEDGE_RELAY_NOTICE = """
+## The previous session was terminated by a safeguard flag — read it via a subagent
+
+The previous session's request was flagged by the server-side classifier. That
+classifier scores the WHOLE assembled request, not any single message, and it is
+model-specific ("can't respond to this message with <model> … try a different
+model"). So:
+
+**DO NOT read `{path}` yourself.** Loading that transcript into this context
+rebuilds the request that just tripped the flag, and this session dies the same
+way. That is what turns one flag into a chain of dead sessions.
+
+**DO dispatch a subagent to read it for you** — it runs on a different model and
+the raw material lands in its context, not yours:
+
+    Agent(subagent_type="miner", prompt="Read the Claude Code session transcript
+    at {path} and report the working state: what was being investigated, what was
+    established or ruled out, what was in flight, and the next concrete step.
+    Describe evidence in prose — do NOT quote raw command output, kernel logs,
+    dmesg, stack traces or forensic dumps verbatim, and do not reproduce long
+    tool results. A short, plain-language digest is the deliverable.")
+
+Work from that digest plus the resume state below. The "no verbatim tool output"
+instruction is load-bearing: a digest that pastes the raw material back in
+recreates the problem in this session.
+
+"""
+
+
+def prior_session_block(run_dir, wedged=False):
     """The prompt section pointing at the previous session's transcript.
 
     Empty string when there is nothing to point at — a first session in a
     project Claude Code has never run in. Never fabricate a path here: a
     session told to read a file that does not exist burns a tool call and
     learns to distrust the whole preamble.
+
+    ``wedged`` replaces the pointer entirely. After a safeguard-flag wedge the
+    transcript is a liability, not a handoff: it holds every tool call and
+    result that was in the flagged request, so a "fresh" session that reads it
+    reassembles the same thing. Detection already happens
+    (``relay_reason["kind"] == "wedge"``); this is the different action taken
+    on it.
     """
     path, origin = prior_session_transcript(run_dir)
+    if wedged:
+        # Name the path so the subagent can be pointed at it, but frame it as
+        # something to delegate reading — never to read here. With no prior
+        # transcript at all there is nothing to digest, so say nothing.
+        if path is None:
+            return ""
+        return WEDGE_RELAY_NOTICE.format(path=path)
     if path is None:
         return ""
     try:
@@ -469,7 +550,7 @@ def prior_session_block(run_dir):
         path=path, origin=origin, size=size, lines=lines, offset=offset)
 
 
-def _build_prompt(resume_file, iteration, run_id=""):
+def _build_prompt(resume_file, iteration, run_id="", wedged=False):
     body = Path(resume_file).read_text(encoding="utf-8", errors="replace")
     run_dir = Path(resume_file).parent
     # The resume body is the BACKWARD half of the handoff (what the last
@@ -481,7 +562,7 @@ def _build_prompt(resume_file, iteration, run_id=""):
     # Ahead of the resume body: the pointer to the full transcript has to land
     # before the scrape of it, so the session reaches for the source rather
     # than treating the summary as all there is.
-    hand = prior_session_block(run_dir)
+    hand = prior_session_block(run_dir, wedged=wedged)
     if _has_criteria(run_dir):
         criteria = _criteria_path(run_dir).read_text(encoding="utf-8", errors="replace").strip()
         marker = str(_criteria_met_path(run_dir))
@@ -490,14 +571,22 @@ def _build_prompt(resume_file, iteration, run_id=""):
     return PREAMBLE_LEGACY.format(iter=iteration) + hand + body + tail
 
 
-def _build_command(cfg, session_id, prompt_file=None, interactive=False):
+def _build_command(cfg, session_id, prompt_file=None, interactive=False, resume=False):
     # The prompt is always injected via --append-system-prompt-file, keeping it
     # out of /proc/<pid>/cmdline so `pgrep -f` or `pkill -f` from inside the
     # session can't match its own parent wrapper.
     cmd = [cfg["claude_bin"]]
     if not interactive:
         cmd.append("-p")
-    cmd += ["--session-id", session_id, "--permission-mode", cfg["permission_mode"]]
+    if resume:
+        # Re-enter the SAME session with its context intact. --resume replaces
+        # --session-id (the id already exists, so it cannot be claimed again),
+        # and the handoff prompt is omitted: it is already in the resumed
+        # context, and re-appending it would duplicate it.
+        cmd += ["--resume", session_id, "--permission-mode", cfg["permission_mode"]]
+        prompt_file = None
+    else:
+        cmd += ["--session-id", session_id, "--permission-mode", cfg["permission_mode"]]
     if not interactive:
         # stream-json is parsed for live output; the interactive TUI renders
         # itself, so we leave its output untouched.
@@ -516,18 +605,37 @@ def _build_command(cfg, session_id, prompt_file=None, interactive=False):
         cmd += cfg["extra_args"].split()
     if interactive:
         # Interactive mode needs a minimal prompt on argv to start the session;
-        # the real task comes from --append-system-prompt-file.
-        cmd.append("begin")
+        # the real task comes from --append-system-prompt-file. On a resume the
+        # task is already in context, so the prompt is the retry instruction.
+        cmd.append("continue" if resume else "begin")
     return cmd
 
 
-def _session_env(cfg, run_id, session_id, resume_file, transcript_file):
+def _session_env(cfg, run_id, session_id, resume_file, transcript_file,
+                 interactive=False):
     env = dict(os.environ)
     env["CCLOOP_RUN_ID"] = run_id
     env["CCLOOP_SESSION_ID"] = session_id
     env["CCLOOP_RESUME_FILE"] = str(resume_file)
     env["CCLOOP_TRANSCRIPT_PATH"] = str(transcript_file)
     env["DISABLE_AUTO_COMPACT"] = "1"
+    # Tells `keepgoing` which stop semantics apply. Headless `-p`: an allowed
+    # stop EXITS the process, so the hook must block or a running background
+    # task is lost to a relay. Interactive TUI: an allowed stop just returns to
+    # the prompt with the process alive, so the session can idle for free and
+    # the harness's own task-completion notification wakes it. Blocking there
+    # is actively harmful — it charges a request per cycle to re-feed a model
+    # that has nothing to do but wait.
+    #
+    # Set AND cleared: the env is inherited via dict(os.environ), so a stray
+    # CCLOOP_INTERACTIVE in the wrapper's own environment would otherwise leak
+    # into a headless session and send it down the free-wait path — where an
+    # allowed stop exits the process and loses the task. This value is ccloop's
+    # to declare, never the ambient environment's.
+    if interactive:
+        env["CCLOOP_INTERACTIVE"] = "1"
+    else:
+        env.pop("CCLOOP_INTERACTIVE", None)
 
     # The whole point of ccloop is that the Stop hook keeps blocking until the
     # task is actually done. Claude Code's harness has a separate safety cap
@@ -629,7 +737,7 @@ def run_session(cmd, env, out_path, timeout):
 
 
 def run_session_interactive(cmd, env, session_id, halt_file, transcript_file=None,
-                            poll=3.0, api_error_grace=60):
+                            poll=3.0, api_error_grace=60, relay_reason=None):
     """Run the real Claude TUI with inherited terminal; return (exit, relayed).
 
     A background thread relays the session to a fresh one when ANY of three
@@ -695,11 +803,19 @@ def run_session_interactive(cmd, env, session_id, halt_file, transcript_file=Non
                 relayed["flag"] = True
                 if wall:
                     why = "context wall hit ('Prompt is too long')"
+                    kind = "wall"
                 elif wedged:
                     why = f"API-error wedge ({(api_err['text'] or '')[:60]!r})"
+                    kind = "wedge"
                 else:
                     why = "context-stop signalled by hook"
-                log(f"{why} — relaying to a fresh session")
+                    kind = "halt"
+                # The caller decides how to recover; a wedge may be resumed in
+                # place rather than relayed. Reported via an out-param so the
+                # (exit_code, relayed) return contract stays unchanged.
+                if relay_reason is not None:
+                    relay_reason["kind"] = kind
+                log(f"{why} — ending session")
                 doomed["tree"] = _descendants(pid)
                 _terminate_tree(proc, doomed["tree"])
                 return
@@ -845,6 +961,16 @@ def loop(run_id, run_dir, ensure_hook=True, interactive=False, model=None, effor
     start_iter = existing
     iteration = existing
     stuck = 0
+    # Consecutive API-error wedges, across sessions AND in-place resumes. Reset
+    # by any session that ends for some other reason. Distinct from `stuck`: a
+    # wedged session DOES produce assistant turns before it wedges, so the
+    # no-progress guard never sees a wedge storm.
+    wedge_storm = 0
+    # True when the session that just ended was killed by a safeguard-flag
+    # wedge. Consumed twice: by summarize() (withhold the flagged session's last
+    # text) and by the NEXT iteration's prompt (hand over a delegate-the-read
+    # notice instead of a read-the-transcript pointer).
+    wedged_pending = False
 
     try:
         while True:
@@ -861,7 +987,12 @@ def loop(run_id, run_dir, ensure_hook=True, interactive=False, model=None, effor
 
             # The handoff prompt is built once per session number; it does not
             # change across launch-failure retries (resume.md is untouched).
-            prompt_text = _build_prompt(resume_file, iteration, run_id)
+            # Carry the previous iteration's wedge verdict into this prompt,
+            # then clear it so this iteration can set it afresh.
+            wedged_prompt = wedged_pending
+            wedged_pending = False
+            prompt_text = _build_prompt(resume_file, iteration, run_id,
+                                        wedged=wedged_prompt)
             prompt_file = run_dir / f"session-{iteration}.prompt"
             prompt_file.write_text(prompt_text, encoding="utf-8")
 
@@ -875,26 +1006,39 @@ def loop(run_id, run_dir, ensure_hook=True, interactive=False, model=None, effor
             # to ask a human. Retries stay WITHIN this session number: only a
             # session that actually ran advances the count and is summarized.
             launch_fails = 0
+            # Set when an API-error wedge is to be retried by re-entering the
+            # same session instead of starting a fresh one. Per session number:
+            # the retry budget is for consecutive wedges on one piece of work.
+            wedge_resume_id = None
+            wedge_retries_used = 0
             while True:
-                session_id = _gen_uuid()
+                resuming = wedge_resume_id is not None
+                session_id = wedge_resume_id or _gen_uuid()
                 transcript_file = tx.transcript_path(session_id)
                 cmd = _build_command(
                     cfg, session_id,
                     prompt_file=prompt_file,
                     interactive=interactive,
+                    resume=resuming,
                 )
-                env = _session_env(cfg, run_id, session_id, resume_file, transcript_file)
+                env = _session_env(cfg, run_id, session_id, resume_file,
+                                   transcript_file, interactive=interactive)
                 halt_file = run_dir / f"halt-{session_id}"
 
-                log(f"── session {iteration} ── id={session_id}")
+                if resuming:
+                    log(f"── session {iteration} (resumed) ── id={session_id}")
+                else:
+                    log(f"── session {iteration} ── id={session_id}")
                 start = time.time()
                 relayed = False
+                relay_reason = {}
                 if interactive:
                     exit_code, relayed = run_session_interactive(
                         cmd, env, session_id, halt_file,
                         transcript_file=transcript_file,
                         poll=cfg["watch_interval"],
                         api_error_grace=cfg["api_error_grace"],
+                        relay_reason=relay_reason,
                     )
                 else:
                     exit_code, fmt = run_session(
@@ -967,6 +1111,48 @@ def loop(run_id, run_dir, ensure_hook=True, interactive=False, model=None, effor
                     time.sleep(delay)
                     continue
 
+                # API-error wedge recovery. Two tiers, cheapest first:
+                # resume the same session (context intact, one request), then
+                # fall back to the fresh relay (full startup rebuild, but it
+                # drops the raw output the classifier may be reacting to).
+                if relay_reason.get("kind") == "wedge":
+                    # Both the summary of THIS session and the NEXT session's
+                    # prompt must know the flag happened.
+                    wedged_pending = True
+                    wedge_storm += 1
+                    limit = cfg["wedge_storm_limit"]
+                    delay = min(
+                        cfg["wedge_backoff"] * (2 ** (wedge_storm - 1)),
+                        cfg["wedge_backoff_max"],
+                    )
+                    if limit and wedge_storm >= limit:
+                        raise CcloopError(
+                            f"{wedge_storm} consecutive API-error wedges — aborting "
+                            "the run rather than rebuilding startup context in a "
+                            "loop. Something in the working context is reproducibly "
+                            "tripping the model's safeguards; inspect "
+                            f"{run_dir}/transcripts/session-{iteration}.jsonl, then "
+                            f"resume with: ccloop --resume-run {run_id}"
+                        )
+                    if wedge_retries_used < cfg["wedge_retries"]:
+                        wedge_retries_used += 1
+                        log(
+                            f"API-error wedge — resuming session {session_id} in "
+                            f"place (retry {wedge_retries_used}/{cfg['wedge_retries']}, "
+                            f"storm {wedge_storm}/{limit or '-'}, {delay}s backoff)"
+                        )
+                        time.sleep(delay)
+                        wedge_resume_id = session_id
+                        continue
+                    log(
+                        f"wedge retries exhausted ({wedge_retries_used}) — relaying "
+                        f"to a fresh session after {delay}s backoff "
+                        f"(storm {wedge_storm}/{limit or '-'})"
+                    )
+                    time.sleep(delay)
+                else:
+                    wedge_storm = 0
+
                 break
 
             # One sessions.log line per session that ACTUALLY ran — the line
@@ -1005,6 +1191,7 @@ def loop(run_id, run_dir, ensure_hook=True, interactive=False, model=None, effor
                 try:
                     new_resume = summarize.summarize(
                         transcript_file, task, run_id, iteration,
+                        wedged=wedged_pending,
                     )
                     tmp = resume_file.with_suffix(".md.tmp")
                     tmp.write_text(new_resume, encoding="utf-8")

@@ -257,6 +257,74 @@ overnight rides out a server restart and picks up the moment the endpoint
 returns. Ctrl-C stops it if you want out; set `CCLOOP_LAUNCH_RETRY_LIMIT=N` to
 abort after N failed launches instead.
 
+### Delegation (the `delegate` hook)
+
+ccloop registers a `PreToolUse` hook that keeps a session from burning its
+own model's requests on mechanical shell work.
+
+It counts consecutive `Bash` calls with no `Read`/`Edit`/`Write`/`Agent`
+between them. At **3** it injects a non-blocking nudge naming the subagents
+available in this project (from `<project>/.claude/agents/` and
+`~/.claude/agents/`, falling back to `general-purpose` on sonnet). **Inside
+a ccloop run only**, at **8** it refuses the call and tells the session to
+hand the rest of the chain to a subagent. A subagent's own tool calls are
+never braked.
+
+Advice runs in every session; only the refusal is gated on a run. Nothing
+per-project needs to be created — no rules file, no config.
+
+| variable | default | effect |
+|---|---|---|
+| `CCLOOP_DELEGATE` | on | `off`/`0`/`false` disables the hook entirely |
+| `CCLOOP_DELEGATE_ADVISE` | `3` | Bash-streak length that triggers the nudge |
+| `CCLOOP_DELEGATE_DENY` | `8` | Bash-streak length that is refused (in-run only) |
+
+Denials and nudges are appended to the run's `hook-events.log` as
+`delegate-deny` / `delegate-advise`.
+
+### Waiting on background work
+
+When a session has live background work and nothing else to do, ccloop's Stop
+hook **absorbs the wait itself** — it sleeps, re-checking liveness, instead of
+re-feeding the model immediately. An instant re-feed costs a full request per
+cycle for a one-word turn ("Waiting.", "Holding."); on a ten-minute build that
+was ~20 requests and no work.
+
+| variable | default | effect |
+|---|---|---|
+| `CCLOOP_WAIT_SLEEP` | `50` | **headless only** — seconds the hook sleeps per cycle; `0` restores the immediate re-feed |
+
+In an **interactive** run the hook does not block at all while live background
+work exists: the session is allowed to stop, the TUI idles at the prompt, and
+the harness's completion notification wakes it. That costs zero requests, and is
+the normal path for `ccloop --interactive`.
+
+The budget must stay under the Stop hook's timeout — a hook killed mid-sleep
+emits nothing, so the stop is not blocked and the session ends, costing a full
+rebuild. `ccloop install` registers Stop with `timeout: 600`, so raising this to
+~540 is safe on a current install and makes a ten-minute wait cost ~2 requests.
+
+Only *locally live* work counts: a `run_in_background` Bash or `Agent` whose
+`tasks/<id>.output` is held open by a running process. Work fired on another
+host (ssh, nohup on a remote node) is invisible to the gate.
+
+### API-error wedge recovery
+
+When a turn aborts on a model-safeguard or transport error, the session idles
+with no Stop event. ccloop detects it and now recovers cheapest-first: it
+resumes the same session in place (context intact, one request) before falling
+back to relaying into a fresh one (full startup rebuild).
+
+| variable | default | effect |
+|---|---|---|
+| `CCLOOP_WEDGE_RETRIES` | `2` | in-place `--resume` attempts before a fresh relay; `0` = old behaviour |
+| `CCLOOP_WEDGE_STORM_LIMIT` | `5` | consecutive wedges before the run aborts; `0` = no limit |
+| `CCLOOP_WEDGE_BACKOFF` | `30` | seconds before retrying, doubling per consecutive wedge |
+| `CCLOOP_WEDGE_BACKOFF_MAX` | `600` | cap on that backoff |
+
+The storm brake matters: a wedged session still produces assistant turns, so
+the no-progress guard never catches a wedge loop.
+
 ### Configuration
 
 | Env var | Default | What it does |

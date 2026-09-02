@@ -902,6 +902,42 @@ if should_install ccmemory || should_install ccusage; then
 fi
 
 # ----------------------------------------------------------------------------
+# Core: agents — the user-level subagent roster in ~/.claude/agents/
+#
+# Claude Code reads subagent definitions from ~/.claude/agents/ (user level,
+# every project) as well as <project>/.claude/agents/. ccenv ships three
+# generic sonnet workers — grind (multi-step shell), scout (locate things),
+# miner (parse bulk structured data) — so that every project has somewhere to
+# delegate mechanical work to.
+#
+# This exists because of a measured problem: across five audited loop sessions
+# (721 requests) 65% of requests were purely mechanical and the Agent tool was
+# called zero times, partly because a session that WANTED to delegate had no
+# named agent to delegate to. `ccloop delegate` (PreToolUse) names these in
+# its nudge, so they must exist before it starts pointing at them.
+#
+# Project-owned agents in <project>/.claude/agents/ take precedence and are
+# never touched. A user file here that has been hand-edited is left alone:
+# these are SEEDED like the settings knobs, not owned.
+# ----------------------------------------------------------------------------
+if should_install agents; then
+    step agents "installing subagent roster in ~/.claude/agents/"
+    AGENT_DIR="$HOME/.claude/agents"
+    mkdir -p "$AGENT_DIR"
+    for src in "$SCRIPT_DIR"/agents/*.md; do
+        [ -f "$src" ] || continue
+        name=$(basename "$src")
+        dst="$AGENT_DIR/$name"
+        if [ -f "$dst" ] && ! cmp -s "$src" "$dst"; then
+            echo "  already present and modified, left alone: $name"
+            continue
+        fi
+        cp "$src" "$dst"
+        echo "  installed $name"
+    done
+fi
+
+# ----------------------------------------------------------------------------
 # Core: ccproject (its own installer owns the awareness skill + its
 # [AWARENESS PROTOCOL] section in ~/.claude/CLAUDE.md)
 # ----------------------------------------------------------------------------
@@ -1016,7 +1052,8 @@ if should_install ccusage; then
 fi
 
 # ----------------------------------------------------------------------------
-# Core: ccloop — pip install only (hooks auto-install on first run)
+# Core: ccloop — pip install, then re-register its three hooks
+# (PostToolUse→guard, Stop→keepgoing, PreToolUse→delegate)
 # ----------------------------------------------------------------------------
 if should_install ccloop; then
     step ccloop "pip install --user"

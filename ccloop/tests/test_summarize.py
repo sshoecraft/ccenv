@@ -37,3 +37,20 @@ def test_summary_handles_empty_transcript(tmp_path):
     out = summarize.summarize(t, "task", run_id="R", session_num=1)
     assert "_(none)_" in out
     assert "crashed mid-tool" in out
+
+
+def test_wedged_summary_withholds_the_flagged_last_text(tmp_path):
+    """The flagged session's final text is the material that was in the flagged
+    request; carrying it forward is the cheapest way to trip the classifier
+    again."""
+    t = tmp_path / "s.jsonl"
+    t.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": "SECRET-FORENSIC-DUMP"}],
+                    "usage": {"input_tokens": 10}},
+    }) + "\n", encoding="utf-8")
+    normal = summarize.summarize(t, "task", "r1", 1)
+    wedged = summarize.summarize(t, "task", "r1", 1, wedged=True)
+    assert "SECRET-FORENSIC-DUMP" in normal
+    assert "SECRET-FORENSIC-DUMP" not in wedged
+    assert "safeguard flag" in wedged

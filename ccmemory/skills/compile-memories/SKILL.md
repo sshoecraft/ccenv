@@ -20,6 +20,19 @@ batch of related raw memories into ONE dense article so the index stays useful. 
 the current interactive session using the ccmemory MCP tools — it never shells out to
 `claude -p`, so it costs nothing beyond normal subscription usage.
 
+## This is the fallback path
+
+The normal path is the `memory-compactor` subagent, dispatched in the
+background so the user is never left waiting on maintenance:
+
+    Agent(subagent_type="memory-compactor", prompt="Compact this project's memory backlog.")
+
+Use this skill instead only when that agent is unavailable, or when the user
+explicitly asks to compact in the current session. Doing the work inline costs
+the session a stop-the-world read of every memory body in the batch — which is
+precisely why, before the agent existed, 29 of 30 project memory dirs on this
+machine had never been compacted at all.
+
 ## When to run it
 
 Run when a trigger fires (a SessionStart "📦 Memory compaction available" nudge, the user

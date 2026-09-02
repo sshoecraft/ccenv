@@ -61,6 +61,15 @@ notes accumulate.
 
 ## History
 
+- v0.18.0 — automation restored, without `claude -p`. The nudge now dispatches
+  the `memory-compactor` subagent (sonnet, background, subscription-billed via
+  the Agent tool) instead of asking the session to compact inline. Measured
+  cause: of 30 project memory dirs on the dev box, only `/src/mxfs` — the one
+  running unattended under ccloop — had ever produced a compiled article. Every
+  interactive project sat at zero, because the inline ask always lost to
+  whatever the user was waiting on. Added `CCMEMORY_COMPILE_COOLDOWN` (default
+  900s) so concurrent sessions do not all dispatch a compactor for the same
+  notes. The skill remains as the fallback path.
 - v0.10.0 — removed the `claude -p` path; added `compile-memories` skill,
   backlog-threshold SessionStart nudge, and read-only `ccmemory compile` status.
   Previously (`v0.9.0` and earlier) `compile.py` ran `claude -p` and the

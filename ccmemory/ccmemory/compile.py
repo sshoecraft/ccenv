@@ -47,6 +47,10 @@ COMPILABLE_TYPES = ("project", "reference")
 # max_inputs batch size: "more raw notes than one compile pass folds in".
 DEFAULT_THRESHOLD = 20
 
+#: Quiet window after a compile pass before the nudge may fire again.
+#: Override with CCMEMORY_COMPILE_COOLDOWN (seconds; 0 disables the guard).
+DEFAULT_COOLDOWN_SECONDS = 900
+
 
 COMPILER_PROMPT = """\
 You are compiling raw per-session memory files into a single dense knowledge
@@ -130,7 +134,38 @@ def count_backlog(memory_dir: Path) -> dict[str, Any]:
         "total_raw": len(raw),
         "has_compiled": newest is not None,
         "threshold": threshold(),
+        # Seconds since the most recent compiled article was written, or None
+        # if none exists. The nudge sites use this as a stampede guard: several
+        # concurrent sessions all seeing the same backlog would otherwise each
+        # dispatch a compactor for the same notes.
+        "since_compiled": (time.time() - newest) if newest is not None else None,
     }
+
+
+def cooldown_seconds() -> int:
+    """Quiet window after a compile pass, via CCMEMORY_COMPILE_COOLDOWN.
+
+    Defaults to 15 minutes. A compactor that folds a handful of notes may not
+    push the backlog under the threshold on a large store, so without this the
+    nudge would re-fire immediately and every session would keep dispatching
+    agents at a backlog that is already being worked.
+    """
+    raw = os.environ.get("CCMEMORY_COMPILE_COOLDOWN")
+    if raw is None:
+        return DEFAULT_COOLDOWN_SECONDS
+    try:
+        v = int(raw)
+    except ValueError:
+        return DEFAULT_COOLDOWN_SECONDS
+    return max(0, v)
+
+
+def nudge_suppressed(b: dict[str, Any]) -> bool:
+    """True when a backlog dict should NOT produce a compaction nudge."""
+    if b["backlog"] < b["threshold"]:
+        return True
+    since = b.get("since_compiled")
+    return since is not None and since < cooldown_seconds()
 
 
 def _build_input(memories: list[dict]) -> str:

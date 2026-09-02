@@ -1,77 +1,192 @@
-## Development Guidelines
-- **A script is never a temp file.** Anything executable you write — test harness, debug probe, repro case, one-off migration, data-munger, convenience helper — goes in the repo, NOT /tmp. /tmp is wiped on reboot and the work is gone.
-  - Test scripts, debug harnesses, repro cases → the project's `tests/` directory
-  - Utilities, ops/build helpers, anything that could be run again by hand → the project's `tools/` or `scripts/` directory (use whichever the project already has; create `scripts/` if it has neither)
-  - Create the directory if it doesn't exist. Do NOT talk yourself out of this — "it's just a quick throwaway" is exactly how reusable work gets deleted. If there is ANY chance the script gets run a second time, it goes in the repo.
-- **/tmp is for data, not code.** Only genuinely transient, regenerable, never-read-again *data* belongs there: scratch output, downloaded blobs, throwaway fixtures, intermediate dumps.
-- Do not scatter files of either kind loosely in the project root — use the directories above.
+# Rules
 
-## Python Guidelines
-- when running ANY python command ALWAYS use python3 unless told otherwise!
-- always use python3 when running python scripts
+**These rules are the user's.** Claude does not get to write one — not a new rule, not a bullet
+bolted onto an existing one, not a "note" or "principle" in this preamble that functions as a rule.
+Ask, get an explicit yes, then write exactly what was authorized.
 
-## Communication Guidelines
-- **NO PLATITUDES**: Never use phrases like "You're absolutely right!", "I'm sorry", "Great question!", or similar. Speak like an engineer would - direct and technical.
+**Rules only, paid on every turn.** A line belongs here only if it constrains a turn before any file
+is open and is a one-line imperative. Lessons → `.ccmemory`. Design → `docs/`. What changed →
+`CHANGELOG.md`.
 
-## Ethical Guidelines
-- **STRICT NO MOCK DATA RULE**: NEVER Mock/Simulate any data - this definitely violates the "no fake data" policy!
+**One decision per bullet.** A bullet states a single thing to do or not do, with a single test for
+whether it was violated — which is also what a hook can check. Bullets without an imperative are the
+evidence and the reason; they are why the rule survives being forgotten and re-derived.
 
-## Git
-**ABSOLUTE PROHIBITIONS — the following are BANNED under ANY circumstance unless I explicitly tell you to:**
-- `git` and any command starting with `git ` (any subcommand, no exceptions)
-- Using `git` for _ANY REASON_ unless directed to
-- Using `git` to "restore" changes — DO NOT! I REPEAT _DO NOT_ _EVER_ ... I MEAN EVER ... use git to restore
-- Restoring from git unless EXPLICITLY asked to — **DO NOT EVER ... I MEAN EVER!!**
+---
 
-If you find yourself about to run `git`, STOP and ask the user what they want instead.
+## RULE ONE — NEVER ADD A RULE WITHOUT THE USER'S AUTHORIZATION
 
-**.ccmemory/ IS PART OF THE REPO — NEVER EXCLUDE IT FROM A COMMIT:**
-- The `.ccmemory/` directory holds the project's persistent memory. It travels WITH the repo by design (cloning brings it; excluding it loses it on every other machine).
-- When you are directed to commit, before staging anything else: check whether `.ccmemory/` has untracked or modified files. If it does, you MUST `git add .ccmemory/` (or `git add -A .ccmemory/`) as part of that commit. Not in a follow-up commit — the SAME commit.
-- This applies to EVERY commit, regardless of the topic of the change. The memory state at the moment of the commit is part of the project state at that moment.
-- The `.gitignore` inside `.ccmemory/` already excludes the local SQLite index (`.memory_index.db*`) — those are derived caches. EVERYTHING ELSE in `.ccmemory/` IS the memory and MUST be committed.
-- NEVER treat `.ccmemory/` as session scratch, transient state, or "not part of this work." That reasoning is wrong and will cost the user memory on every other clone.
+- Ask before writing any rule into this file. An explicit yes, then exactly what was authorized and
+  nothing adjacent to it.
+- A rule Claude wrote for itself outranks nothing and costs a turn on every session thereafter. The
+  file is small because someone said no to most of what could have gone in it.
 
-**COMMIT ALL OUTSTANDING CHANGES — NEVER FILTER TO "ONLY WHAT CLAUDE TOUCHED":**
-- When directed to commit, stage and commit EVERY modified and untracked file in the working tree, not just files you (Claude) edited this session.
-- The user's in-progress work (offline edits, work from another machine, work from another session) is part of the project state at the moment of the commit. Leaving it unstaged "so the user can commit it separately" is wrong — it leaves a dirty tree, hides their work from `git status` next time, and assumes you understand their commit boundaries better than they do. You don't.
-- The ONLY files you may leave unstaged are:
-  - Files already excluded by `.gitignore` (never override that)
-  - Files that look like they could contain secrets (`.env`, `credentials.json`, `*.pem`, `*.key`, anything matching obvious secret patterns) — and even then, surface them to the user and ask, don't silently skip
-- If unrelated work is present and the commit message would get muddled by including it, write a single commit message that honestly describes BOTH groups of changes (e.g. "X: do the thing you asked; also includes pending Y package bump"). Do NOT split into two commits unless the user explicitly asks for that — splitting is a judgment call about commit boundaries, and that is the user's call.
-- If you think a file genuinely shouldn't be committed (e.g. a build artifact that escaped `.gitignore`), surface it to the user before committing — never silently exclude.
+## RULE TWO — NEVER RUN `git` UNLESS DIRECTED
 
-**When explicitly directed to commit to GitHub or open a PR:**
-- DO NOT put any icons or graphics that indicate Claude Code is being used — just list items as clear, concise bullet points
-- DO NOT put `🤖 Generated with Claude Code` (or anything similar) at the end
-- DO NOT give any indication Claude was used (no "<user> and claude...", no co-author tags, no generated-by footers)
+*Second on purpose. It is the most dangerous rule here to miss — every other violation in this file
+is recoverable.*
 
-**CRITICAL:**
-- No examples!
-- No samples!
-- No mock data or static data or fake data to test with!
-- No "TODO in the code" or unimplemented functionality to "get it working" or "test this out"
-- No "simple" functions when troubleshooting - fix the actual code
-- Don't create _new or _old etc ... just use the same filenames! if you need to make a backup copy whatever your working on to XXX.backup
-- DO NOT EVER edit the Makefile without being told to do so
-- NEVER EVER "fallback" to hardcoded responses or text
+- No `git` command and no subcommand unless the user says so in that turn. Not to check state, not
+  to read history, not "just to see."
+- Never `restore`, `revert`, `checkout`, `reset` or `stash`. Uncommitted work in the tree is the
+  user's work, and no `git` command that discards it can give it back.
+- If a restore looks like the answer, that is the moment to stop and ask what they want instead. The
+  answer has never been "run git."
 
-**CODING STYLE**:
-- DO NOT put an underscore prefix (_) before variable names
-- DO NOT put an underscore suffix (_) after variable names
-- DO NOT use accessor functions for variable names
-- DO NOT make all class variables private - only use private variables when no outside sources require them
-- DO NOT use "Manager" in the name of any classes
-- When making changes, be sure to rev the patch version for fixes/patches, the minor version for new features, and major version for major changes
+## RULE THREE — INSPECT WITH THE RIGHT TOOL
 
-**BEHAVIOR:**
-- DO NOT give up and offer alternatives when working on something - keep working until a solution is found or told to stop
-- Before you work on any module, check to see if there's an associated docs/.md file for it
-- After making changes to any module create/maintain the docs/.md file for it describing the arch/history/etc
+- Every conclusion about what code does comes from the `Read` tool. It fires the ccmemory
+  `PreToolUse` hook, which injects prior lessons about that path; `sed` fires nothing.
+- Bash search may LOCATE — `grep -l`, `grep -n`, counting, field extraction. Locating is not
+  reading. `cat`, `sed`, `awk`, `head`, `tail` and a Python one-liner are not reading, whatever they
+  print.
+- Never run `pgrep` or `pkill`, in any form. No flag makes it acceptable. Use the project's own
+  status command, a PID already in hand, `ps -o pid,cmd -C <exact-name>`, or `/proc/<pid>/cmdline`.
 
-**ASK TOOL USE (mcp__ask_*__query):**
-- The `ask_*` MCP tools (e.g. `mcp__ask_gemini__query`, `mcp__ask_flash__query`, etc.) call external LLMs and cost real money / quota. Do NOT call them as a routine step.
-- Call an `ask_*` tool ONLY when one of these two conditions is met:
-  1. The user has specifically asked you to consult that model (e.g. "ask Gemini", "get a second opinion from Flash", "run this by Opus").
-  2. You have genuinely exhausted every other option on your own — researched the codebase, tried the obvious fixes, consulted any available docs — AND you are stuck. In that case state clearly what you've already tried and why you're escalating before invoking the tool.
-- Never invoke an `ask_*` tool speculatively, as a shortcut, for a "second opinion" you weren't asked for, or because the task feels hard at first glance. Do the work yourself first.
+## RULE FOUR — DELEGATE CHAINS, NOT CALLS
+
+- When the next step is 3+ shell commands, hand it to a subagent — `grind` (multi-step shell),
+  `scout` (locate things, returns `file:line`), `miner` (parse bulk structured data). One `Agent`
+  call costs one request, so it pays only when it replaces several; a single already-batched command
+  stays put. What stays here: the files that must actually be understood, edits, design decisions,
+  project judgement.
+- Never poll and never block on background work. No `until … sleep`, no `TaskOutput` on a local
+  agent (it dumps raw JSONL into this context), no watch on `tasks/*.output`. An `Agent` delivers
+  its own completion — that is the sanctioned way to wait. While one runs, do independent work: read
+  what is needed next, form the next hypothesis, prepare the diagnostic.
+- Ending the turn to wait requires `CCLOOP_RUN_ID` set AND the work locally live — a
+  `run_in_background` Bash or `Agent` whose `tasks/<id>.output` is still held open. Work fired on
+  another host is invisible to the Stop gate: it counts zero, the loop re-feeds "continue", and the
+  session is kicked.
+- Nothing required is in flight when a session ends — in-flight agents die with it. A task exiting
+  is not a task succeeding: read and validate its output.
+- *Hook: `ccloop delegate` (`PreToolUse`) nudges at 3 consecutive Bash calls and refuses at 8 inside
+  a loop run. Being refused means the chain was long enough to drain the budget — delegate the
+  remainder, do not retry it by hand.*
+
+## RULE FIVE — A SCRIPT IS NEVER A TEMP FILE
+
+- `/tmp` holds data, never code. Scratch output, downloaded blobs, throwaway fixtures, intermediate
+  dumps — genuinely transient, regenerable, never read again.
+- Anything executable goes in the repo: test harnesses, debug probes and repro cases in `tests/`;
+  utilities, ops and build helpers, anything runnable again by hand, in `tools/` or `scripts/` —
+  whichever the project has, creating `scripts/` if it has neither. Never loose in the project root.
+- Before writing a new script, check the project's `tools/` and `scripts/` for one that already does
+  the job.
+- `/tmp` is wiped on reboot and the work is gone. "It's just a quick throwaway" is exactly how
+  reusable work gets deleted — if there is ANY chance it runs a second time, it goes in the repo.
+
+## RULE SIX — EDIT THE FILE, NOT AROUND IT
+
+- Keep the same filename. Never `foo_new.py`, never `foo_old.py`, never a versioned sibling. If a
+  copy is genuinely needed it is `foo.py.backup` and nothing else.
+- Never edit the Makefile unless told to in that turn.
+
+## RULE SEVEN — FOUR PLACES TO WRITE, AND A THING IN THE WRONG ONE IS LOST
+
+- `docs/` IS DESIGN, AND NOTHING ELSE. What the system is, why it is shaped that way, what was
+  decided, what is still open. Never status, never history, never a session handoff, never a plan
+  with a date on it. **The test: if it would be wrong next month because the work moved on, it is
+  not a design document.**
+- `CHANGELOG.md` IS WHAT CHANGED IN THE SOURCE. Newest first, every entry headed with the date and
+  the version — `## 2026-09-02 — 1.1.0`. What changed and why, in prose. Nothing else goes in this
+  file.
+- The version is revved as part of the change, not after: patch for a fix, minor for a feature,
+  major for a break.
+- THE DEFECT QUEUE IS WHAT IS BROKEN AND STILL NEEDS WORK, where the project has one. A defect that
+  is fixed is REMOVED, and the fix is a `CHANGELOG.md` entry. It is a work queue, never an archive:
+  nothing in it is closed, resolved, pending or historical, because those entries would not still be
+  in it.
+- `.ccmemory` IS THE LESSONS — what already bit us, what the user corrected, what a turn should have
+  known. Write it with `memory_write`; `MEMORY.md` is generated and hand-editing it is blocked.
+- NEVER CITE A RULE OUTSIDE THIS FILE. No rule number, no "per the rules", in a `CHANGELOG.md`
+  entry, in `docs/`, in a commit message, in a comment, or anywhere in the code. Say the reason
+  itself, in that artifact's own terms — *why* the version got revved, *what* would have been lost,
+  *what* the code must not do. A citation is a pointer at a file the reader may not have, and it is
+  the first thing to go stale: renumber or reword one rule and every reference to it in the tree
+  silently becomes wrong, while reading exactly as authoritative as the day it was written.
+- A design doc holding status rots into a description of a system that no longer exists, and
+  everyone keeps reading it. That is the failure this rule exists to prevent.
+
+## RULE EIGHT — TROUBLESHOOTING IS A LOOP, NOT A GUESS
+
+- Written falsifiable hypothesis before any patch. Never "it looks like X, so patch X."
+- Instrument before changing. A live trace settles what reading the code only suggests.
+- Disproven means a NEW hypothesis, never a patch on a dead one. Proven means patch at the proven
+  cause, then reproduce to confirm.
+- One change at a time. Never fix two things at once — neither result means anything afterward.
+- Never work around at a higher layer unasked.
+- Evidence outranks intuition. If the instrument disagrees with what is expected, the instrument is
+  usually right — and when it genuinely is not, that is proven and the instrument fixed, never
+  ignored.
+
+## RULE NINE — WHEN DIRECTED TO COMMIT, COMMIT EVERYTHING
+
+- `.ccmemory/` goes in the SAME commit, every commit, whatever the topic. Check it for untracked or
+  modified files before staging anything else. It travels with the repo by design — cloning brings
+  it, excluding it loses it on every other machine. Only the derived SQLite index is ignored;
+  everything else in there IS the memory.
+- Stage every modified and untracked file in the tree, not only what was edited this session. The
+  user's in-progress work — offline edits, another machine, another session — is part of the project
+  state at that moment. Leaving it unstaged assumes Claude knows their commit boundaries better than
+  they do.
+- Two exceptions and no others: files already excluded by `.gitignore`, and anything that looks like
+  it holds secrets (`.env`, `credentials.json`, `*.pem`, `*.key`). Secrets are surfaced and asked
+  about, never silently skipped. Anything else that seems like it should not be committed gets
+  raised before the commit, not quietly dropped from it.
+- If unrelated work would muddy the message, write ONE message that honestly describes both groups.
+  Never split into two commits unless explicitly asked — that boundary is the user's call.
+
+## RULE TEN — NOTHING INDICATES CLAUDE WROTE IT
+
+- In any commit message or PR description: no icons, no graphics, no "Generated with Claude Code",
+  no co-author tag, no "<user> and Claude", no generated-by footer of any kind. Clear, concise
+  bullet points and nothing else.
+
+## RULE ELEVEN — NO UNDERSCORE PREFIX OR SUFFIX ON A NAME YOU CREATE
+
+- No leading underscore, no trailing underscore, on any variable or function introduced into this
+  project's own code. Not `_buf`, not `buf_`, not `_helper()`.
+- Exempt, because they are not yours to name: language-mandated names (`__init__`, `__repr__`),
+  inherited or overridden API names, external interfaces, generated code. **Matching the surrounding
+  style is NOT an exemption.**
+- This is not a Python style opinion and it does not stop at Python. It exists because Claude kept
+  applying the Python `_private` convention in C++ as well, where it is not a convention at all —
+  the habit followed the model across languages, so the rule does too. User, 2026-09-02: *"That rule
+  came about because you kept putting underscore prefixes and postfixes on variable names and
+  functions in C++ too — not just Python."*
+
+## RULE TWELVE — NAMES AND CLASS SHAPE
+
+- No accessor functions wrapping a variable.
+- Class variables are not private by default — private only when nothing outside needs them.
+- No "Manager" in any class name.
+
+## RULE THIRTEEN — NOTHING FAKE, NOTHING DEFERRED
+
+- Never mock, simulate or fabricate data, and never present an invented result as an observed one.
+  No static stand-ins "to test with."
+- Never fall back to a hardcoded response or canned text when the real path fails. Fix the real
+  path.
+- No TODOs and no unimplemented paths in work handed back as finished.
+- No "simple" replacement function while troubleshooting. Fix the actual code.
+- This governs what ships and what is claimed, not what is explained. Showing the user an example
+  command or a snippet in an answer is not a violation; presenting one as a result is.
+
+## RULE FOURTEEN — SPEAK LIKE AN ENGINEER
+
+- No platitudes. Never "You're absolutely right!", "I'm sorry", "Great question!", or anything of
+  that shape. Direct and technical.
+
+## RULE FIFTEEN — DO NOT STOP AT THE FIRST FAILURE
+
+- Do not stop after the first failed approach, and do not hand back a list of alternatives instead
+  of a solution. Take the next evidence-based step.
+- If genuinely blocked — missing access, missing information, or a decision only the user can make —
+  say exactly what the blocker is and the smallest thing that unblocks it. That is a report, not a
+  surrender, and it is not an invitation to go pick a different problem.
+
+## RULE SIXTEEN — `python3`, ALWAYS
+
+- Invoke the interpreter as `python3`, never `python`, in every shell command and every script
+  written here.

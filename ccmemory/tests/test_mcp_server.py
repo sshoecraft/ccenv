@@ -124,7 +124,11 @@ def test_note_carries_compaction_directive_in_band(memory_dir, monkeypatch):
         write_memory(memory_dir, f"note{i}")
     payload = call_json("memory_list")
     assert "COMPACTION DUE" in payload["note"]
-    assert "compile-memories" in payload["note"]
+    # The ask must be a background dispatch, not "do it yourself now". Asking
+    # the session to do the work inline is what left 29 of 30 project memory
+    # dirs at zero compiled articles.
+    assert "memory-compactor" in payload["note"]
+    assert "Do NOT stop" in payload["note"]
 
 
 def test_no_compaction_directive_once_cited(memory_dir, monkeypatch):

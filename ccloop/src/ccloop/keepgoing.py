@@ -255,6 +255,52 @@ PROC_ROOT = "/proc"
 # to this window instead of forever; a procfs-equipped host never uses it.
 STALE_OUTPUT_SECONDS = 90
 
+#: Seconds the Stop hook itself sleeps while background work is live, instead
+#: of re-feeding the model immediately. Every re-feed costs a full request, and
+#: a session with nothing to do but wait spends it on a one-word turn. Absorbing
+#: the wait here turns ~1 request per cycle into ~1 request per budget.
+#:
+#: Conservative by default: it MUST stay under Claude Code's hook timeout
+#: (60s when a registration carries no explicit timeout). A hook killed
+#: mid-sleep emits nothing, so the stop is NOT blocked and the session ends —
+#: costing a full session rebuild. ``install.py`` registers Stop with a larger
+#: explicit timeout, so raising this via CCLOOP_WAIT_SLEEP is safe on a current
+#: install; on a 600s registration a 540s budget makes a 10-minute build cost
+#: about two requests instead of twenty.
+DEFAULT_WAIT_SLEEP = 50
+
+#: How often, inside that sleep, to re-check whether the work finished.
+WAIT_POLL_SECONDS = 5
+
+
+def _env_int(name, default):
+    """Parse a non-negative int env var. ZERO IS MEANINGFUL here: it disables
+    the in-hook sleep entirely, restoring the immediate re-feed."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        return default
+    return v if v >= 0 else default
+
+
+def _emit_resume(waited):
+    """Background work finished inside the hook's sleep budget.
+
+    Unblock into a real turn — the result is now on disk, so the model has
+    something to do. Deliberately does NOT bump the keepgoing counter: this
+    cycle was bounded by external work, not by model pathology, so it must not
+    consume the CCLOOP_MAX_CONTINUES budget that exists to catch a spinning
+    model.
+    """
+    sys.stdout.write(json.dumps({
+        "decision": "block",
+        "reason": "Background work finished. Read its output and continue.",
+        "systemMessage": f"ccloop wait — background work finished after {int(waited)}s",
+    }) + "\n")
+
 
 def _outputs_with_live_writer(output_paths):
     """Subset of ``output_paths`` currently held open by a live process.
@@ -413,7 +459,70 @@ def main(argv=None):
     # the session alive. Counter intentionally NOT bumped — wait cycles
     # are bounded by external work, not the model-pathology cap protects.
     n_pending = _pending_background_task_count(own_sid)
+    if n_pending and os.environ.get("CCLOOP_INTERACTIVE"):
+        # THE SESSION IS ALLOWED TO SIMPLY WAIT. Return 0 — do not block, do
+        # not re-feed, do not sleep.
+        #
+        # The harness already implements exactly the behaviour we want: a
+        # background task re-invokes the model when it exits, and a subagent's
+        # completion arrives as a notification. A session that fires background
+        # work and ends its turn is *correct*, and it costs nothing while it
+        # waits.
+        #
+        # This hook used to block that unconditionally, on the reasoning that
+        # "ccloop relays on session-end, so allowing the stop loses the running
+        # task". That is true for headless `-p`, where an allowed stop exits
+        # the process. It is NOT true for the interactive TUI: the stop returns
+        # to the prompt, the process stays alive, the watcher sees no halt file
+        # and no wall, and nothing relays. Applying the headless constraint
+        # here charged a full request per cycle to re-feed a model whose only
+        # honest answer was "still waiting" — observed as ~20 one-word turns
+        # across a ten-minute build.
+        #
+        # Residual risk: if the completion notification never arrives (the task
+        # died without one), the session idles until the user or the run's own
+        # watchdog intervenes. That is strictly better than burning the request
+        # pool, and the liveness check means we only take this path while a
+        # local process genuinely holds the task's output open.
+        return 0
+
     if n_pending:
+        # Headless: an allowed stop would exit the process and relay, losing the
+        # task. We must block — but ABSORB the wait here rather than bouncing it
+        # back to the model.
+        #
+        # Returning immediately makes every wait cycle cost a full request: the
+        # stop is blocked, the session is re-fed at once, it emits one word
+        # ("Waiting.", "Holding.") and stops again. Observed on a ~10 minute
+        # build: ~20 one-word turns, ~20 requests, zero work done. A blocking
+        # foreground `until` loop — the thing this whole design replaced — cost
+        # ONE request for the same wait, so the uncapped re-feed was strictly
+        # worse than what it replaced.
+        #
+        # So the hook does the waiting. We sleep in short increments,
+        # re-checking liveness, and hand the model a turn only when the work is
+        # actually done (or when the budget runs out). The model's next turn
+        # then has the result in front of it.
+        #
+        # The budget MUST stay under Claude Code's hook timeout: a hook killed
+        # mid-sleep emits nothing, the stop is not blocked, and the session ends
+        # — which costs a full session rebuild. The default is deliberately
+        # conservative (safe under a 60s default timeout even if this hook's
+        # registration is stale and carries no explicit timeout). `install.py`
+        # registers Stop with a larger explicit timeout, so raising
+        # CCLOOP_WAIT_SLEEP is safe on a current install.
+        budget = _env_int("CCLOOP_WAIT_SLEEP", DEFAULT_WAIT_SLEEP)
+        step = min(WAIT_POLL_SECONDS, budget) if budget else 0
+        waited = 0.0
+        while step and waited < budget:
+            time.sleep(step)
+            waited += step
+            n_pending = _pending_background_task_count(own_sid)
+            if not n_pending:
+                # Work finished inside the budget: give the model a real turn
+                # rather than another "still running" no-op.
+                _emit_resume(waited)
+                return 0
         _emit_wait(n_pending)
         return 0
 

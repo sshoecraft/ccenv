@@ -113,13 +113,16 @@ def _list_note(memory_dir, counts: dict, *, include_folded: bool) -> str:
     try:
         from . import compile as compile_mod
         b = compile_mod.count_backlog(Path(memory_dir))
-        if b["backlog"] >= b["threshold"]:
+        if not compile_mod.nudge_suppressed(b):
             parts.append(
                 f"COMPACTION DUE: {b['backlog']} memories have never been folded "
-                f"into a compiled- article (threshold {b['threshold']}). Run the "
-                "`compile-memories` skill in THIS session — it is free (no "
-                "claude -p, no metered credit), and until it runs this backlog "
-                "keeps growing and this listing keeps degrading."
+                f"into a compiled- article (threshold {b['threshold']}). Do NOT "
+                "stop the user's task to do this yourself — dispatch it: "
+                "Agent(subagent_type=\"memory-compactor\", prompt=\"Compact this "
+                "project's memory backlog.\"). It runs in the background on "
+                "sonnet and reads the memory bodies into its own context, not "
+                "yours. Until it runs this backlog keeps growing and this "
+                "listing keeps degrading."
             )
     except Exception:
         pass

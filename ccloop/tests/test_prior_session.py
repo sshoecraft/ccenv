@@ -118,3 +118,43 @@ def test_line_count_matches_the_file(tmp_path):
     p.write_text("a\nb\nc\n", encoding="utf-8")
     assert tx.line_count(p) == 3
     assert tx.line_count(tmp_path / "nope.jsonl") is None
+
+
+def test_wedge_relay_replaces_the_transcript_pointer(tmp_path, monkeypatch):
+    """Detection already happened; this is the different action taken on it.
+    After a safeguard-flag wedge the transcript is a liability, not a handoff —
+    it holds every tool result that was in the flagged request."""
+    run_dir = tmp_path / "run"
+    (run_dir / "transcripts").mkdir(parents=True)
+    tx_file = run_dir / "transcripts" / "session-1.jsonl"
+    tx_file.write_text('{"type":"assistant"}\n', encoding="utf-8")
+    monkeypatch.setattr(runner, "prior_session_transcript",
+                        lambda d: (tx_file, "transcripts"))
+
+    normal = runner.prior_session_block(run_dir)
+    wedged = runner.prior_session_block(run_dir, wedged=True)
+
+    assert normal != wedged
+    assert "DO NOT read" in wedged
+    assert 'subagent_type="miner"' in wedged
+    assert str(tx_file) in wedged, "the subagent still needs the path"
+    assert "do NOT quote raw command output" in wedged
+
+
+def test_wedge_relay_is_silent_with_no_prior_transcript(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(runner, "prior_session_transcript", lambda d: (None, None))
+    assert runner.prior_session_block(run_dir, wedged=True) == ""
+
+
+def test_build_prompt_threads_the_wedge_flag(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    resume = run_dir / "resume.md"
+    resume.write_text("task body\n", encoding="utf-8")
+    monkeypatch.setattr(runner.state, "state_block", lambda *a, **k: "")
+    monkeypatch.setattr(runner, "prior_session_block",
+                        lambda d, wedged=False: "WEDGED" if wedged else "NORMAL")
+    assert "WEDGED" in runner._build_prompt(resume, 2, "r1", wedged=True)
+    assert "NORMAL" in runner._build_prompt(resume, 2, "r1")

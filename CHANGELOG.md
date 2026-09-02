@@ -1,6 +1,410 @@
 # ccenv changelog
 
-Per the global rule: patch = fix, minor = feature, major = breaking.
+patch = fix, minor = feature, major = breaking.
+
+## v0.30.0
+
+**The base rules are sixteen named rules now, not sixty bullets.**
+
+The old file was nine headings — "Development Guidelines", "CODING STYLE",
+"BEHAVIOR" — over about sixty unnumbered imperatives, and the user reported that
+its rules were routinely ignored while another project's rules file was followed
+without exception by every model tried. That file is longer (250 lines, 14
+rules), so neither length nor rule count is the variable.
+
+What differs is that each of its rules is a named, bounded unit. The same
+project had already measured this one scale down, for text its engine feeds a
+model at runtime: a requirement written as a clause inside an established
+structure is ignored, and the identical requirement promoted to its own
+top-level step is obeyed — proven twice in one day, against 498 prose
+instructions that changed nothing. A bullet buried mid-list is that clause. A
+heading is that step.
+
+So the base rules are now `## RULE N — TITLE`, each followed by bullets: one
+decision per bullet, plus the evidence or scope that makes the rule
+reconstructible when it is half-remembered. Headings that hedged ("Guidelines",
+"STYLE") are gone, and so is the escalating all-caps emphasis, which saturated
+to the point of carrying no signal.
+
+Content changes beyond the restructure:
+
+- **Rules from another project's file that were never project-specific** — the
+  no-self-authored-rules rule, inspect-with-the-right-tool, the four places to
+  write, and the troubleshooting loop — now ship in the base.
+- **A new rule forbidding any citation of these rules outside this file.** No
+  rule number in a changelog entry, a design doc, a commit message or a comment;
+  state the reason in that artifact's own terms. A citation points at a file the
+  reader may not have, and it goes stale silently the moment a rule is reworded
+  or renumbered — the same project has over a thousand such citations that now
+  resolve to the wrong rule.
+- **The underscore prohibition is scoped and given its origin.** It applies to
+  names introduced into the project's own code and exempts what the model does
+  not get to name — language-mandated, inherited, external, generated — while
+  stating that matching surrounding style is not an exemption. It exists because
+  the Python `_private` convention kept being applied in C++, where it is not a
+  convention at all.
+- **"Don't give up and offer alternatives" now has a stopping condition.** As
+  written it had none, which rewards grinding and hides blockers. It keeps its
+  teeth — no bailing after one failure, no menu of alternatives instead of a
+  solution — and adds that a genuine blocker is named precisely, as a report.
+- **The no-fake-work rule is split by what it governs.** Fabricated data,
+  hardcoded fallbacks, unimplemented paths and stand-in troubleshooting
+  functions are separate bullets, and the rule now says it governs what ships
+  and what is claimed, not what is explained — read literally, the old "no
+  examples" banned showing the user an example command.
+- **"Never overrule the instrumentation" is no longer an absolute.** Instruments
+  can be wrong, incomplete, or perturb what they measure. Evidence still
+  outranks intuition, but a suspect instrument gets proven wrong rather than
+  ignored.
+- Dropped: the per-module `docs/*.md` maintenance rule, which the awareness
+  system supersedes, and the `ask_*` budget rule.
+
+Awareness deliberately stays out of the base rules: it only exists in a project
+that has been bootstrapped, and a rule whose first step is checking whether its
+subject exists is a lookup, not a rule. `ccproject` continues to append that
+section outside the managed markers.
+
+`install.sh` needs no change — it cats this file verbatim into the managed
+region of the global `CLAUDE.md`.
+
+Also adds `scripts/reflow_md_bullets.py`. Editing a rules file by
+search-and-replace leaves bullets wrapped at whatever column the previous text
+ended on; this rejoins and rewraps list items without touching headings or
+prose.
+
+## v0.28.0
+
+**A safeguard-flag wedge now produces a different handoff instead of pointing
+the next session at the transcript that caused it.**
+
+ccloop already detected the wedge — it prints `API-error wedge (...) — ending
+session`. What it did next was the problem: relay to a fresh session and hand it
+the standard pointer at the previous transcript, which holds every tool call and
+result that was in the flagged request. The "fresh" session re-imports the same
+material and trips again. Detection without a different action.
+
+Anthropic's server-side cyber classifier stepped up ~110x on 2026-08-22
+(0.13 -> ~15 flags per 1k requests) and scores the WHOLE assembled request, not
+any single message. Nothing in ccenv caused it; the flags predate the delegation
+changes by 12 hours.
+
+Two changes, both gated on `relay_reason["kind"] == "wedge"`:
+
+- **`prior_session_block(wedged=True)`** replaces the read-the-transcript
+  pointer with a notice that names the path but forbids reading it here, and
+  instead instructs the session to dispatch a `miner` subagent to digest it —
+  running on a different model, with the raw material landing in the subagent's
+  context rather than the parent's. The dispatch prompt explicitly bans verbatim
+  tool output, kernel logs and forensic dumps: a digest that pastes the raw
+  material back in recreates the problem. This is on-subscription, unlike a
+  headless `claude -p` summarizer.
+- **`summarize(wedged=True)`** withholds the flagged session's last text turn,
+  which is precisely the material that was in the flagged request.
+
+Also: **`CCLOOP_WEDGE_RETRIES` now defaults to 0** — in-place `--resume` is off.
+It was added in v0.25.0 on the theory that the flag was response-sampling noise
+and a retry would usually pass. It is not: replaying the session replays the
+same assembled request, and with retries on the user measured 16 flags in under
+an hour, one flag becoming 2-4 dead sessions. The storm brake stays on.
+
+ccloop 0.17.1 -> 0.18.0. 241 tests pass.
+
+## v0.27.1
+
+`CCLOOP_INTERACTIVE` is now cleared as well as set. `_session_env` builds from
+`dict(os.environ)`, so a stray value in the wrapper's own environment would have
+leaked into a **headless** session and sent it down the free-wait path — where an
+allowed stop exits the process and loses the running task. The flag is ccloop's
+to declare from the same boolean that chooses `-p` vs `begin`, never the ambient
+environment's. ccloop 0.17.0 → 0.17.1. 237 tests pass.
+
+## v0.27.0
+
+**An interactive session with live background work is now allowed to simply
+wait. No block, no re-feed, no sleep — zero requests.**
+
+This is the fix v0.26.0 should have been. v0.26.0 made the Stop hook re-feed
+*less often*; it never questioned why the hook was re-feeding at all.
+
+The harness already implements the wanted behaviour: a background Bash task
+re-invokes the model when it exits, and a subagent completion arrives as a
+notification. A session that fires background work and ends its turn is
+**correct**, and costs nothing while it waits.
+
+`keepgoing` was blocking that unconditionally, on the reasoning in its own
+docstring: "ccloop relays on session-end, so allowing the stop loses the running
+task." That holds for headless `-p`, where an allowed stop exits the process.
+It does **not** hold for the interactive TUI — the stop returns to the prompt,
+the process stays alive, the watcher sees no halt file and no wall, and nothing
+relays. The hook was applying a headless constraint to interactive sessions,
+charging a request per cycle to re-feed a model whose only honest answer was
+"still waiting". Observed: ~20 one-word turns across a ten-minute build.
+
+- `runner._session_env` now exports **`CCLOOP_INTERACTIVE=1`** for TUI sessions.
+- `keepgoing` returns 0 — allowing the stop — when that is set and live local
+  background work exists. The session idles for free until the notification
+  wakes it.
+- Headless keeps the v0.26.0 behaviour (block, absorbing the wait by sleeping),
+  because there a stop really does exit the process.
+- The free-wait path is reachable only while a local process genuinely holds the
+  task's output open, so an interactive session can never stop for good and
+  stall the run.
+
+Residual risk, stated plainly: if a completion notification never arrives, the
+session idles until the user or the run's watchdog intervenes. That is strictly
+better than burning the request pool on no-op turns.
+
+ccloop 0.16.0 → 0.17.0. 235 tests pass.
+
+## v0.26.0
+
+**The Stop hook now absorbs the wait for background work instead of charging a
+request per cycle.**
+
+Observed live: a session fired a background build, ended its turn as v0.25.1
+invited, and the wait gate blocked the stop — correctly. But `_emit_wait`
+returned instantly, so the session was re-fed at once, emitted one word
+("Waiting.", "Holding.", "Holding for the link stage."), and stopped again.
+About twenty such turns over a ten-minute build. Twenty requests, no work.
+
+The old blocking `until` loop that this whole design replaced cost **one**
+request for the same wait, so the uncapped re-feed was strictly worse than what
+it replaced. That is a regression introduced by v0.25.1's guidance, and it is
+fixed here rather than by walking the guidance back.
+
+- **`keepgoing` sleeps inside the hook** while background work is live,
+  re-checking liveness every 5s. If the work finishes inside the budget it
+  unblocks into a real turn ("Background work finished. Read its output and
+  continue.") so the model's next request has the result in front of it.
+- **`CCLOOP_WAIT_SLEEP`** (default 50) is the per-cycle budget; `0` restores the
+  old immediate re-feed.
+- **`install.py` registers the Stop hook with `timeout: 600`** (new
+  `HOOK_TIMEOUTS` table) and treats a registration with the wrong timeout as
+  stale, so upgrades self-heal. The default budget stays conservative — safe
+  under Claude Code's 60s default even against a stale registration — because a
+  hook killed mid-sleep emits nothing, the stop is not blocked, and the session
+  ends at the cost of a full rebuild. On a current install `CCLOOP_WAIT_SLEEP=540`
+  makes a ten-minute wait cost about two requests instead of twenty.
+- The completion path deliberately does **not** bump the keepgoing counter: a
+  wait is bounded by external work, not model pathology, and must not consume
+  the `CCLOOP_MAX_CONTINUES` budget that exists to catch a spinning model.
+
+ccloop 0.15.1 → 0.16.0. 232 tests pass.
+
+## v0.25.2
+
+**Corrects v0.25.1: "end the turn while background work runs" is only safe for
+LOCALLY LIVE work, and rig work is not that.**
+
+Observed within an hour of shipping v0.25.1 (mxfs sess395): the session
+announced it was holding for a ~35-minute 32-node rig series, ended its turn as
+the new rule invited, and was re-fed "continue" three times in a row.
+
+The Stop gate was behaving correctly. `_pending_background_task_count` counts
+only an `.output` file **held open by a live local process**; the session's
+tasks dir had eight `.output` files and not one live writer, because the work
+was running on 32 nodes over ssh. A local submitter that fires remote work and
+returns leaves nothing for the gate to see. For this project that is not an
+edge case — it is the normal shape of every long run.
+
+GPT's review of the v0.25.1 draft listed this exact false negative ("a local
+submitter exits after starting work in another process namespace, machine,
+scheduler, or service"). It was under-weighted: verifying that the tasks-dir
+glob resolves proved the path shape, not that rig work ever registers there.
+
+Guidance corrected in the managed `CLAUDE.md` and in mxfs's `CLAUDE.md` +
+`feedback-never-background-wait-poll` memory:
+
+- lead with **find independent work** while it runs — needs no gate, and is
+  almost always right;
+- ending the turn is a narrow exception, valid only when `CCLOOP_RUN_ID` is set
+  AND the pending task is locally live;
+- **rig/ssh/nohup work explicitly does not qualify** — keep working, or block in
+  the foreground with a derived timeout.
+
+No code change; the hook and gate were both correct.
+
+## v0.25.1
+
+**The "wait in the foreground" rule was manufacturing the exact chains the
+delegation hook refuses. Rule replaced, hook stops punishing waits.**
+
+mxfs's `CLAUDE.md` carried a sess10/sess47 user correction: foreground
+everything, and "if a run is longer than 10 min, split into per-iteration
+foreground calls (~5 min each)". That instruction generates long runs of
+consecutive blocking Bash calls — which is precisely the shape v0.23.0's
+`delegate` hook refuses at 8. Sessions were observed firing a subagent and then
+writing `until [ -f tasks/<id>.output ]` waiters to poll for it, paying
+requests to wait for a notification already in flight, and getting refused for
+it.
+
+Both failures behind the original rule are fixed in code, verified on the live
+run:
+
+- orphaned `*.output` files no longer wedge the Stop gate —
+  `keepgoing._pending_background_task_count` counts only files held open by a
+  live process (procfs, mtime fallback);
+- a session with live background work no longer stalls on the user — that gate
+  emits `decision: block` ("Wait. Background command still running."), uncapped
+  by `CCLOOP_MAX_CONTINUES`.
+
+Changes:
+
+- **`delegate` hook: blocking waits are neutral.** `until`/`while ... sleep`
+  loops and reads of `tasks/*.output` neither advance nor reset the streak.
+  Telling a session that already delegated to "hand this to a subagent" is
+  worse than saying nothing, and a genuinely undelegatable wait (a long rig lap
+  watched from the parent) must not accumulate toward a refusal.
+- **ccenv `## Delegation` rewritten** — never poll, never block; after firing an
+  Agent carry on with independent work; end the turn only when nothing else can
+  proceed **and `CCLOOP_RUN_ID` is set**, because outside a loop run there is no
+  Stop gate and ending the turn hands control back to the user. Nothing required
+  may be in flight when a session ends, and a task exiting is not a task
+  succeeding.
+
+The `CCLOOP_RUN_ID` condition came out of a GPT review of the draft: the
+original wording said "end the turn" unconditionally, which would have
+reintroduced the exact sess10 stall in any non-ccloop session.
+
+ccloop 0.15.0 → 0.15.1. 228 ccloop tests pass.
+
+## v0.25.0
+
+**API-error wedges recover by resuming the session, not rebuilding it — with a
+brake so a recurring wedge cannot drain the request pool.**
+
+A turn that aborts on a model-safeguard error (`[cyber]` and friends) commits a
+synthetic error turn and then idles: no Stop event, so ccloop's `keepgoing`
+re-feed never fires. The existing recovery was to relay into a fresh session,
+which costs a full startup-context rebuild — ~65k tokens on a mature project —
+and throws away the working context, in one observed case 210k tokens of it.
+
+- **Tier 1, new: resume in place.** `claude --resume <session-id>` with
+  `continue`, up to `CCLOOP_WEDGE_RETRIES` (default 2) per session number. Same
+  session, context intact, one request instead of a 65k rebuild.
+- **Tier 2: the previous fresh relay,** once the budget is spent.
+
+The budget is bounded on purpose. The failure may be content-driven rather than
+sampling noise — if the classifier is reacting to what is already in context, a
+resume replays the same state and re-trips, and the fresh relay works precisely
+*because* `resume.md` drops the offending raw output. Cheap tier first,
+expensive tier as fallback.
+
+- **New storm brake.** Consecutive wedges back off exponentially
+  (`CCLOOP_WEDGE_BACKOFF`, 30s, doubling, capped by `CCLOOP_WEDGE_BACKOFF_MAX`)
+  and abort the run at `CCLOOP_WEDGE_STORM_LIMIT` (default 5). The existing
+  no-progress guard does not cover this: a wedged session produces assistant
+  turns before wedging, so `stuck` never increments. Without the brake a wedge
+  that reproduces immediately on a fresh session is an unbounded loop that
+  rebuilds startup context every cycle.
+
+`run_session_interactive` gained an optional `relay_reason` out-param carrying
+`wedge` / `wall` / `halt`; the `(exit_code, relayed)` return contract is
+unchanged.
+
+ccloop 0.14.0 → 0.15.0. 225 ccloop tests pass, 112 ccmemory.
+
+## v0.24.0
+
+**Memory compaction is automated again — via a background subagent, not
+`claude -p`.**
+
+`ccmemory` v0.10.0 removed the automatic compaction path because it shelled out
+to a headless `claude -p`, which Anthropic was moving onto a separate metered
+credit pool. Nothing replaced the automation: what shipped instead was a
+SessionStart nudge asking the session to run the `compile-memories` skill
+itself. That ask never had a chance — it requires stopping the user's task to
+read twenty memory bodies inline and synthesize an article.
+
+The measurement, taken across every `.ccmemory` directory on the dev box:
+
+| project | compiled articles |
+|---|---:|
+| `/src/mxfs` (runs unattended under ccloop) | 138 |
+| the other 29 memory dirs, all interactive | 0 each |
+
+Compaction only ever happened where nobody was waiting. This is the same
+failure mode as the delegation rule in v0.23.0: discretionary maintenance
+requested via prose loses to whatever the session is actually doing.
+
+The fix makes compliance cheap rather than asking harder:
+
+- **New `memory-compactor` agent** (ccenv `agents/`, installed to
+  `~/.claude/agents/`) — sonnet, runs in the background, fetches everything it
+  needs itself, and reads the memory bodies into its own context rather than
+  the caller's. It inherits full tools, because compaction needs the ccmemory
+  MCP tools and the `ccmemory` CLI has no read/write surface.
+- **Both nudge sites now dispatch it** (`hooks.py` SessionStart and the
+  `memory_list` note in `mcp_server.py`): "Do not stop what you are doing —
+  make one background Agent call and carry on." One tool call instead of a
+  stop-the-world synthesis.
+- **New `CCMEMORY_COMPILE_COOLDOWN`** (default 900s, `compile.py`) — a compile
+  pass on a large store may not push the backlog under the threshold, so
+  backlog alone cannot gate the nudge or every concurrent session would
+  dispatch a compactor for the same notes. `count_backlog` now also returns
+  `since_compiled`.
+- The `compile-memories` skill remains, documented as the fallback for when the
+  agent is unavailable.
+
+This does not reintroduce metered billing: a subagent spawned by the Agent tool
+inside a live session bills the subscription, verified from transcripts —
+it is not the Agent SDK / `claude -p` / GitHub Actions path that v0.10.0 was
+written to avoid.
+
+ccmemory 0.17.1 → 0.18.0. 112 tests pass.
+
+## v0.23.0
+
+**Sessions now delegate mechanical work instead of spending premium requests
+on it — enforced, not suggested.**
+
+The problem, measured over five audited loop sessions (721 requests,
+`scripts/delegate_chain_distribution.py`): 65% of requests were purely
+mechanical — grep/sed/ls sweeps, fleet ssh polls, harness runs, build+deploy,
+JSONL parsing — 50% sat inside chains of >= 3 consecutive mechanical requests,
+and the `Agent` tool was called **zero** times. A written rule telling sessions
+to delegate had been in place for a week with no effect. Every behaviour change
+that ever stuck in this tree was mechanical, so this one is too.
+
+Three parts, all installed by `./install.sh`:
+
+- **New `agents` install step** — seeds `~/.claude/agents/` with three generic
+  sonnet workers available in every project: `grind` (multi-step shell work),
+  `scout` (locate things, returns `file:line`), `miner` (parse bulk structured
+  data). Each is instructed to return raw evidence with the exact commands run
+  and pre-truncation totals, never a summary that hides its own truncation. A
+  project's own `.claude/agents/` still wins; a hand-edited user file is left
+  alone.
+- **New ccloop `PreToolUse` hook (`ccloop delegate`, ccloop 0.14.0)** — tracks
+  consecutive parent `Bash` calls with no `Read`/`Edit`/`Write`/`Agent`
+  between them. At 3 it injects a non-blocking nudge naming the available
+  subagents; inside a ccloop run only, at 8 it refuses the call. Subagent tool
+  calls pass through untouched, gated on `agent_id` (the CLI's schema is
+  explicit that `agent_type` is the wrong field — it is also present on the
+  main thread of an `--agent` session). `CCLOOP_DELEGATE=off` disables it;
+  `CCLOOP_DELEGATE_ADVISE` / `CCLOOP_DELEGATE_DENY` move the thresholds.
+- **A `## Delegation` section in the managed `CLAUDE.md` region** — states the
+  rule that actually matters (delegate chains, not calls) and removes the
+  conflict that was blocking delegation: an `Agent` call is the sanctioned way
+  to wait, and the standing prohibition on backgrounding + polling does not
+  apply to it.
+
+Why 3-and-8 rather than a single hard threshold: a denied call has already
+cost its request, so denying at position N and forcing an `Agent` call saves
+`max(0, L - (N+1))` on a chain of length L and *loses* when the chain would
+have ended on its own. Advice is free — it rides on a call that runs anyway —
+so advice goes early and refusal goes late, where the measured chain
+distribution is fat-tailed (95 chains, but 6 of length 11-38 carrying 166
+requests). The streak resets after a refusal, so one chain earns one refusal
+and never a refusal loop.
+
+Also in this release:
+
+- `docs/context-economics.md` — how quota is actually metered (a separate
+  weekly Fable bucket the statusline cannot see; cost weighted by context
+  size, not flat per request), why lowering ccloop's `--cutoff` is settled as
+  a permanent no, and the measured attribution of session startup context.
+- `scripts/startup_context_audit.py` and `scripts/delegate_chain_distribution.py`.
 
 ## v0.22.0
 

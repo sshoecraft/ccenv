@@ -145,3 +145,52 @@ def test_no_claude_bin_resolver_remains():
     # The claude -p machinery must be gone entirely.
     assert not hasattr(compile_mod, "_resolve_claude_bin")
     assert not hasattr(compile_mod, "compile_directory")
+
+
+def test_cooldown_suppresses_nudge_after_a_recent_compile(memory_dir, monkeypatch):
+    """Several concurrent sessions must not all dispatch a compactor for the
+    same notes. A compile pass on a large store may not push the backlog under
+    the threshold, so backlog alone cannot be the only gate."""
+    monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
+    monkeypatch.setenv("CCMEMORY_COMPILE_COOLDOWN", "900")
+    for i in range(5):
+        write_memory(memory_dir, f"note{i}")
+
+    b = compile_mod.count_backlog(memory_dir)
+    assert b["backlog"] >= b["threshold"]
+    assert compile_mod.nudge_suppressed(b) is False
+
+    # A compiled article that cites nothing: backlog is unchanged, but a pass
+    # just ran, so the nudge must go quiet for the cooldown window.
+    write_memory(memory_dir, "compiled-topic", body="no citations here")
+    b = compile_mod.count_backlog(memory_dir)
+    assert b["backlog"] >= b["threshold"]
+    assert b["since_compiled"] is not None and b["since_compiled"] < 900
+    assert compile_mod.nudge_suppressed(b) is True
+
+
+def test_cooldown_can_be_disabled(memory_dir, monkeypatch):
+    monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
+    monkeypatch.setenv("CCMEMORY_COMPILE_COOLDOWN", "0")
+    for i in range(5):
+        write_memory(memory_dir, f"note{i}")
+    write_memory(memory_dir, "compiled-topic", body="no citations here")
+    b = compile_mod.count_backlog(memory_dir)
+    assert compile_mod.nudge_suppressed(b) is False
+
+
+def test_since_compiled_is_none_with_no_articles(memory_dir, monkeypatch):
+    monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
+    for i in range(5):
+        write_memory(memory_dir, f"note{i}")
+    b = compile_mod.count_backlog(memory_dir)
+    assert b["since_compiled"] is None
+    assert compile_mod.nudge_suppressed(b) is False
+
+
+def test_backlog_under_threshold_still_suppresses(memory_dir, monkeypatch):
+    monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "50")
+    for i in range(5):
+        write_memory(memory_dir, f"note{i}")
+    b = compile_mod.count_backlog(memory_dir)
+    assert compile_mod.nudge_suppressed(b) is True

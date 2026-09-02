@@ -294,25 +294,43 @@ MEMORY.md automatically at the end of the turn.
 
 
 def _compaction_nudge(memory_dir: Path) -> str:
-    """One-line suggestion to compact memory when the uncompiled backlog is
-    large. Empty string when under threshold. Data-driven so the model is told
-    exactly when the compile-memories skill is worth running — a skill with no
-    trigger never gets invoked. Fail-open: any error → no nudge.
+    """Dispatch instruction for the memory-compactor agent when the uncompiled
+    backlog is large. Empty string when under threshold or inside the
+    post-compile cooldown. Fail-open: any error → no nudge.
+
+    This asks for ONE background Agent call, not for the session to do the work
+    itself. That distinction is the whole point. The nudge used to say "invoke
+    the compile-memories skill", i.e. stop, read twenty memory bodies inline,
+    and synthesize an article — expensive, context-polluting, and disruptive to
+    whatever the user is actually waiting on. Measured result: across 30
+    project memory dirs on this machine, the only one that ever compacted was
+    the one running unattended under ccloop, where nobody is waiting. Every
+    interactive project sat at zero compiled articles indefinitely.
+
+    Compliance failure here is a cost-of-compliance problem, not a willingness
+    problem. A single background Agent call is cheap enough to actually happen:
+    one tool call, sonnet, and the raw memory bodies land in the subagent's
+    context instead of this one's.
     """
     try:
         from . import compile as compile_mod
         b = compile_mod.count_backlog(memory_dir)
-        if b["backlog"] < b["threshold"]:
+        if compile_mod.nudge_suppressed(b):
             return ""
         return (
             f"\n\n---\n📦 Memory compaction due: {b['backlog']} of {b['total_raw']} "
-            f"memories have never been folded into a `compiled-` article "
-            f"(threshold {b['threshold']}). Invoke the `compile-memories` skill "
-            f"to fold related raw notes into a denser `compiled-<topic>` article. "
-            f"It runs in THIS interactive session — no `claude -p`, no metered "
-            f"Agent-SDK credit. Compacting also shrinks every future "
-            f"`memory_list`: citing a note in a compiled article retires it from "
-            f"the listing while leaving it searchable."
+            f"raw memories have never been folded into a `compiled-` article "
+            f"(threshold {b['threshold']}).\n\n"
+            f"**Do not stop what you are doing to handle this.** Make one "
+            f"background Agent call now and carry on with the user's task:\n\n"
+            f"    Agent(subagent_type=\"memory-compactor\", "
+            f"prompt=\"Compact this project's memory backlog.\")\n\n"
+            f"It runs on sonnet, needs nothing from you, and the memory bodies "
+            f"it reads never enter your context. If that agent is unavailable, "
+            f"invoke the `compile-memories` skill instead at your next natural "
+            f"pause. Compacting shrinks every future `memory_list`: citing a "
+            f"note in a compiled article retires it from the listing while "
+            f"leaving it searchable."
         )
     except Exception:
         return ""

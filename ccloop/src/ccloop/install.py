@@ -1,17 +1,25 @@
 """Register/unregister ccloop hooks in Claude Code's settings.json.
 
-ccloop owns two hooks:
+ccloop owns three hooks:
 
 - ``PostToolUse`` → ``ccloop guard``  : context-fill nudge
 - ``Stop``        → ``ccloop keepgoing``: prevents the model from sitting
   idle waiting for input — re-feeds "continue" on every stop unless the
   task is converged.
+- ``PreToolUse``  → ``ccloop delegate``: nudges a session out of long
+  mechanical Bash chains and into subagents, and refuses the chain outright
+  once it is long enough to be clearly draining the request budget.
 
 Each command is the absolute path to this very ``ccloop`` executable plus
 the subcommand. Absolute paths mean the hooks resolve regardless of
-whether ccloop is on Claude Code's PATH. Both hooks self-gate on
-``CCLOOP_RUN_ID`` (and ``keepgoing`` also gates on session id), so they
-are no-ops in every session that isn't a ccloop run.
+whether ccloop is on Claude Code's PATH.
+
+``guard`` and ``keepgoing`` self-gate on ``CCLOOP_RUN_ID`` (and
+``keepgoing`` also gates on session id), so they are no-ops in every
+session that isn't a ccloop run. ``delegate`` is the deliberate exception:
+its non-blocking advice runs in every session, because the burn it targets
+is not unique to loop runs — only its *refusal* is gated on
+``CCLOOP_RUN_ID``. ``CCLOOP_DELEGATE=off`` disables it entirely.
 """
 
 import json
@@ -25,6 +33,19 @@ from pathlib import Path
 HOOKS = {
     "PostToolUse": "guard",
     "Stop": "keepgoing",
+    "PreToolUse": "delegate",
+}
+
+# Explicit per-event hook timeouts, in seconds. Claude Code's default is 60s.
+#
+# Stop needs a large one: `keepgoing` ABSORBS the wait for live background work
+# by sleeping inside the hook, so the model is not re-fed (and charged a
+# request) once per cycle just to say "still waiting". The sleep budget is
+# CCLOOP_WAIT_SLEEP, which must stay under this timeout — a hook killed
+# mid-sleep emits nothing, so the stop is not blocked and the session ends,
+# costing a full session rebuild.
+HOOK_TIMEOUTS = {
+    "Stop": 600,
 }
 
 
@@ -138,6 +159,14 @@ def _ensure_event(data, event, command):
         ]
         if any(c != command for c in ours):
             had_stale = True
+        want_timeout = HOOK_TIMEOUTS.get(event)
+        for h in (entry.get("hooks") or []):
+            if isinstance(h, dict) and _is_ours(h.get("command")):
+                if h.get("timeout") != want_timeout:
+                    # A registration without the right timeout is stale: the
+                    # Stop hook's sleep budget depends on it.
+                    had_stale = True
+                    had_exact = False
         if kept_hooks:
             entry = dict(entry)
             entry["hooks"] = kept_hooks
@@ -147,7 +176,11 @@ def _ensure_event(data, event, command):
         hooks[event] = entries
         return "present"
 
-    rebuilt.append({"hooks": [{"type": "command", "command": command}]})
+    hook = {"type": "command", "command": command}
+    timeout = HOOK_TIMEOUTS.get(event)
+    if timeout:
+        hook["timeout"] = timeout
+    rebuilt.append({"hooks": [hook]})
     hooks[event] = rebuilt
     return "updated" if had_stale else "added"
 

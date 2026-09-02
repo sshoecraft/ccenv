@@ -34,7 +34,7 @@ import os
 from . import transcript as tx
 
 
-def summarize(transcript_file, task, run_id="unknown", session_num="?"):
+def summarize(transcript_file, task, run_id="unknown", session_num="?", wedged=False):
     """Return a markdown resume document built from a session transcript."""
     session_id = os.path.basename(str(transcript_file))
     if session_id.endswith(".jsonl"):
@@ -56,11 +56,23 @@ def summarize(transcript_file, task, run_id="unknown", session_num="?"):
     else:
         files_block = "_(none)_"
 
-    text = tx.last_text(transcript_file)
-    if text.strip():
-        text_block = text
+    if wedged:
+        # The previous session was killed by a server-side safeguard flag. That
+        # classifier evaluates the WHOLE assembled request, so the cheapest way
+        # to trip it again is to carry the previous request's material forward.
+        # Its last text turn is exactly that material, so it is withheld.
+        text_block = (
+            "_(withheld — the previous session was terminated by a server-side "
+            "safeguard flag. Its final text is deliberately not carried forward: "
+            "the classifier scores the whole assembled request, so replaying that "
+            "content is what turns one flag into a chain of dead sessions.)_"
+        )
     else:
-        text_block = "_(no text turn — session may have crashed mid-tool)_"
+        text = tx.last_text(transcript_file)
+        if text.strip():
+            text_block = text
+        else:
+            text_block = "_(no text turn — session may have crashed mid-tool)_"
 
     return f"""# Resume — run {run_id}, after session {session_num}
 

@@ -202,6 +202,9 @@ def main(argv=None):
     if argv[:1] == ["keepgoing"]:
         from . import keepgoing
         return keepgoing.main(argv[1:])
+    if argv[:1] == ["delegate"]:
+        from . import delegate
+        return delegate.main(argv[1:])
 
     if not argv or argv[0] in ("-h", "--help"):
         print(USAGE)

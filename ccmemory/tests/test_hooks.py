@@ -371,3 +371,26 @@ def test_claim_injections_is_idempotent_per_slug(memory_dir):
 def test_handler_dispatch_fail_open_on_unknown():
     rc = hooks.dispatch("nonexistent_handler")
     assert rc == 0
+
+
+def test_compaction_nudge_dispatches_an_agent(memory_dir, monkeypatch):
+    """The SessionStart nudge must ask for a background Agent call, not for the
+    session to do the compaction inline. The inline ask is what left 29 of 30
+    project memory dirs on this machine at zero compiled articles: only the
+    unattended ccloop project ever complied."""
+    from ccmemory import hooks
+    monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
+    for i in range(5):
+        write_memory(memory_dir, f"note{i}")
+    msg = hooks._compaction_nudge(memory_dir)
+    assert "Memory compaction due" in msg
+    assert 'subagent_type="memory-compactor"' in msg
+    assert "Do not stop what you are doing" in msg
+
+
+def test_compaction_nudge_quiet_under_threshold(memory_dir, monkeypatch):
+    from ccmemory import hooks
+    monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "50")
+    for i in range(5):
+        write_memory(memory_dir, f"note{i}")
+    assert hooks._compaction_nudge(memory_dir) == ""
