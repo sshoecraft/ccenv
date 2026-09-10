@@ -31,6 +31,7 @@
 - [quota-two-weekly-buckets-and-context-weighting](quota-two-weekly-buckets-and-context-weighting.md) — Quota has a separate weekly Fable bucket the statusline can't see, and cost is context-weighted, not flat per request. Request counts are a proxy.
 - [repo-claude-md-is-managed-block-source](repo-claude-md-is-managed-block-source.md) — /src/ccenv/CLAUDE.md is the verbatim source of the [CCENV MANAGED] block in ~/.claude/CLAUDE.md — policy edits must land there or reinstall wipes the…
 - [shared-userbase-compiled-dep-abi-mismatch](shared-userbase-compiled-dep-abi-mismatch.md) — PYTHONUSERBASE shares ONE version-agnostic site-packages across pythons; a python bump strands stale-ABI .so files. install.sh v0.1.5 auto-heals via…
+- [shipped-agents-embed-no-rules](shipped-agents-embed-no-rules.md) — RULE FOUR now requires rules embedded verbatim in agent definitions, but all four shipped agents (grind/scout/miner/memory-compactor) embed none.
 
 ## reference
 - [ccloop-install-heals-own-hooks](ccloop-install-heals-own-hooks.md) — Top-level install.sh runs `ccloop install` after pip-installing ccloop so it self-heals stale PostToolUse/Stop hook paths

@@ -2,6 +2,36 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-09-10 — v0.31.0
+
+**Two harness behaviours the base rules did not cover.**
+
+An audit of the MXFS project's own CLAUDE.md found about 128 lines restating
+rules the base file already carries, and two things it genuinely does not.
+Both are properties of the harness rather than of any one project, so they
+belong in the file that installs everywhere.
+
+RULE SEVENTEEN — never run a command that can trigger a permission prompt.
+The dangerous-`rm` check is shape-based: `rm -f $D/*` prompts because of how
+it is written, not because of what it would delete, and an allowlist entry of
+`Bash(rm:*)` does not suppress it. Under ccloop that prompt is not a pause,
+it is a stall — the loop waits until a human happens to look at the terminal.
+The rule asks for a fresh `mktemp -d` over cleaning a directory, for the
+allowlist entry to be added before the command is run, and for the file tools
+in place of shelling out.
+
+RULE FOUR gains a bullet on what subagents can see: CLAUDE.md is read at
+session start and `.claude/agents/*.md` is registered then, so a rule written
+mid-session never reaches a delegated task. Measured 2026-08-15 — a subagent
+making no tool calls quoted the file as of session start and nothing added
+after it. Any rule a delegated task could violate has to be embedded verbatim
+in the agent definition.
+
+A third candidate, on batching independent tool calls into one response, was
+rejected: RULE FOUR already establishes the request as the billing unit and
+the delegate hook already enforces it, so the rule would have been paid on
+every turn to repeat what the file says twice.
+
 ## v0.30.0
 
 **The base rules are sixteen named rules now, not sixty bullets.**
