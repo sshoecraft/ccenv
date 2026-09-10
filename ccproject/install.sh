@@ -60,12 +60,10 @@ echo "[3/6] Installing analysis scripts ..."
 cp "$SCRIPT_DIR/scripts/analyze_project.py" "$SKILL_DIR/scripts/"
 cp "$SCRIPT_DIR/scripts/generate_structural_map.py" "$SKILL_DIR/scripts/"
 cp "$SCRIPT_DIR/scripts/generate_mermaid_callgraph.py" "$SKILL_DIR/scripts/"
-cp "$SCRIPT_DIR/scripts/awareness_hooks.py" "$SKILL_DIR/scripts/"
 chmod +x "$SKILL_DIR/scripts/analyze_project.py"
 chmod +x "$SKILL_DIR/scripts/generate_structural_map.py"
 chmod +x "$SKILL_DIR/scripts/generate_mermaid_callgraph.py"
-chmod +x "$SKILL_DIR/scripts/awareness_hooks.py"
-echo "  Installed 4 scripts to $SKILL_DIR/scripts/"
+echo "  Installed 3 scripts to $SKILL_DIR/scripts/"
 
 # Step 4: Update global awareness protocol in ~/.claude/CLAUDE.md
 # ccproject owns this section; it appends/updates it idempotently and never
@@ -103,27 +101,36 @@ else
     echo "  Created $GLOBAL_CLAUDE_MD with awareness protocol."
 fi
 
-# Step 5: Register awareness-maintenance hooks in ~/.claude/settings.json
-echo "[5/6] Registering awareness hooks ..."
-HOOK_SCRIPT="$SKILL_DIR/scripts/awareness_hooks.py"
-PYTHON_BIN="$(command -v python3)"
+# Step 5: Remove the awareness-maintenance hooks from ~/.claude/settings.json
+#
+# These hooks used to run on PostToolUse/Stop/SessionStart. They are gone, and
+# this step is the migration: a box that installed an earlier version still has
+# them registered, pointing at a script this installer no longer ships. Left
+# alone, every Edit/Write would spawn a python3 that immediately fails.
+#
+# What they did and why they went:
+#   track   wrote .claude/awareness/.state/touched-<session>.json on every edit,
+#           one file per session, and nothing ever deleted one — 810 had piled
+#           up in a single project. Nothing read them after the session ended.
+#   sync    blocked the model from finishing until it edited a subsystem doc.
+#           It could only check WHETHER the doc was written, not whether the
+#           edit said anything true, so it was satisfiable with a no-op write.
+#           Measured over those 810 sessions: 32 exhausted the nudge cap — three
+#           blocks each, no doc update, then it gave up anyway.
+#   status  injected an mtime-based drift report into the model's context at
+#           session start. mtime is not a drift signal: a checkout or a reformat
+#           bumps every source file at once and it flags everything.
+#
+# The scripts themselves stay. Regenerate a structural map by hand when you
+# want one: python3 generate_structural_map.py <project>
+echo "[5/6] Removing awareness hooks ..."
 SETTINGS_JSON="$HOME/.claude/settings.json" \
-HOOK_CMD_PREFIX="$PYTHON_BIN $HOOK_SCRIPT" \
+STALE_SCRIPT="$SKILL_DIR/scripts/awareness_hooks.py" \
 python3 - <<'PY'
 import json, os
 from pathlib import Path
 
 settings_path = Path(os.environ["SETTINGS_JSON"])
-settings_path.parent.mkdir(parents=True, exist_ok=True)
-prefix = os.environ["HOOK_CMD_PREFIX"]  # "python3 /abs/awareness_hooks.py"
-
-# event -> (matcher or None, subcommand)
-WANT = [
-    ("PostToolUse", "Edit|Write|MultiEdit", "track"),
-    ("Stop",        None,                    "sync"),
-    ("SessionStart", None,                   "status"),
-]
-
 if settings_path.exists():
     try:
         data = json.loads(settings_path.read_text() or "{}")
@@ -134,48 +141,51 @@ else:
 if not isinstance(data, dict):
     data = {}
 
-hooks = data.setdefault("hooks", {})
+hooks = data.get("hooks")
+removed = 0
 
 def is_ours(cmd):
     return bool(cmd) and "awareness_hooks.py" in cmd
 
-changed = False
-for event, matcher, sub in WANT:
-    command = f"{prefix} {sub}"
-    entries = hooks.get(event) or []
-    # Drop any stale entry of ours for this subcommand (self-heal a moved path),
-    # preserving foreign hooks untouched.
-    rebuilt = []
-    present = False
-    for entry in entries:
-        kept = []
-        for h in entry.get("hooks", []):
-            c = h.get("command")
-            if is_ours(c) and c.split()[-1] == sub:
-                if c == command and entry.get("matcher") == matcher:
-                    present = True
-                    kept.append(h)
+if isinstance(hooks, dict):
+    for event in list(hooks):
+        entries = hooks.get(event) or []
+        rebuilt = []
+        for entry in entries:
+            kept = []
+            for h in entry.get("hooks", []):
+                if is_ours(h.get("command")):
+                    removed += 1
                 else:
-                    changed = True  # stale path/matcher — drop it
-            else:
-                kept.append(h)
-        if kept:
-            e = dict(entry)
-            e["hooks"] = kept
-            rebuilt.append(e)
-    if not present:
-        new_entry = {"hooks": [{"type": "command", "command": command}]}
-        if matcher is not None:
-            new_entry["matcher"] = matcher
-        rebuilt.append(new_entry)
-        changed = True
-    hooks[event] = rebuilt
+                    kept.append(h)
+            # An entry whose only hooks were ours is dropped whole, so no
+            # empty matcher stubs are left behind.
+            if kept:
+                e = dict(entry)
+                e["hooks"] = kept
+                rebuilt.append(e)
+        if rebuilt:
+            hooks[event] = rebuilt
+        else:
+            del hooks[event]
+    if not hooks:
+        data.pop("hooks", None)
 
-if changed:
+if removed:
     settings_path.write_text(json.dumps(data, indent=2) + "\n")
-    print("  registered/updated ccproject hooks (PostToolUse/Stop/SessionStart)")
+    print(f"  unregistered {removed} awareness hook(s) from settings.json")
 else:
-    print("  ccproject hooks already registered")
+    print("  no awareness hooks registered — nothing to remove")
+
+# Drop the script an earlier install left in the skill directory.
+stale = Path(os.environ["STALE_SCRIPT"])
+try:
+    stale.unlink()
+    print(f"  removed stale {stale}")
+except FileNotFoundError:
+    pass
+except OSError as exc:
+    print(f"  could not remove {stale}: {exc}")
 PY
 
 # Step 6: Verify
@@ -188,7 +198,6 @@ ERRORS=0
 [ -f "$SKILL_DIR/scripts/analyze_project.py" ] || { echo "  ERROR: analyze_project.py not found"; ERRORS=1; }
 [ -f "$SKILL_DIR/scripts/generate_structural_map.py" ] || { echo "  ERROR: generate_structural_map.py not found"; ERRORS=1; }
 [ -f "$SKILL_DIR/scripts/generate_mermaid_callgraph.py" ] || { echo "  ERROR: generate_mermaid_callgraph.py not found"; ERRORS=1; }
-[ -f "$SKILL_DIR/scripts/awareness_hooks.py" ] || { echo "  ERROR: awareness_hooks.py not found"; ERRORS=1; }
 [ -x "$SKILL_DIR/scripts/analyze_project.py" ] || { echo "  ERROR: analyze_project.py not executable"; ERRORS=1; }
 grep -q "\[AWARENESS PROTOCOL\]" "$GLOBAL_CLAUDE_MD" || { echo "  ERROR: Global CLAUDE.md missing awareness protocol"; ERRORS=1; }
 
@@ -207,13 +216,10 @@ if [ $ERRORS -eq 0 ]; then
     echo "  analyze_project.py          — Auto-detect languages, subsystems, dependencies"
     echo "  generate_structural_map.py  — Extract signatures, types, call graph"
     echo "  generate_mermaid_callgraph.py — Visual call graph in Mermaid format"
-    echo "  awareness_hooks.py          — Auto-maintain docs (track/sync/status hooks)"
     echo ""
-    echo "Awareness hooks registered in ~/.claude/settings.json (self-gate on"
-    echo "projects that have .claude/awareness/ — no-ops everywhere else):"
-    echo "  PostToolUse  -> track   record touched source/doc files per session"
-    echo "  Stop         -> sync    auto-regen structural map; block on doc drift"
-    echo "  SessionStart -> status  report subsystems whose source outran their doc"
+    echo "Nothing runs automatically. The awareness docs are maintained when you"
+    echo "ask for it; regenerate the structural map with:"
+    echo "  python3 $SKILL_DIR/scripts/generate_structural_map.py <project>"
     echo ""
     echo "Usage:"
     echo "  1. Open Claude Code in any project directory"

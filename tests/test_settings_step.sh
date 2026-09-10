@@ -1,6 +1,6 @@
 #!/bin/bash
-# install.sh `settings` step — the model-stability knobs it enforces in
-# ~/.claude/settings.json.
+# install.sh `settings` step — the model-stability and attribution knobs it
+# enforces in ~/.claude/settings.json.
 #
 # The step's function is lifted out of install.sh by name and evaluated here,
 # so the test runs the real code without running the rest of the installer
@@ -63,11 +63,15 @@ check() {
 }
 
 # ---------------------------------------------------------------------------
-echo "=== no settings.json at all: the file is created with both knobs ==="
+echo "=== no settings.json at all: the file is created with every knob ==="
 H=$(new_home)
 OUT=$(HOME="$H" install_ccenv_settings 2>&1)
 check "refusal fallback disabled" "$H" "env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK" '"1"'
 check "switchModelsOnFlag false"  "$H" "switchModelsOnFlag" 'false'
+check "co-author trailer off"     "$H" "includeCoAuthoredBy" 'false'
+check "session link off"          "$H" "attribution.sessionUrl" 'false'
+check "commit attribution blank"  "$H" "attribution.commit" '""'
+check "pr attribution blank"      "$H" "attribution.pr" '""'
 echo "$OUT" | grep -q "set env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1" \
     && ok "reports the env var it set" || bad "reports the env var it set" "$OUT"
 
@@ -92,15 +96,20 @@ check "switchModelsOnFlag added"      "$H" "switchModelsOnFlag" 'false'
 echo "=== values already present are left alone, whatever they are ==="
 H=$(new_home)
 cat > "$H/.claude/settings.json" <<'JSON'
-{"switchModelsOnFlag": true, "env": {"CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "0"}}
+{"switchModelsOnFlag": true,
+ "env": {"CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "0"},
+ "includeCoAuthoredBy": true,
+ "attribution": {"commit": "mine", "pr": "mine", "sessionUrl": true}}
 JSON
 BEFORE=$(cat "$H/.claude/settings.json")
 OUT=$(HOME="$H" install_ccenv_settings 2>&1)
 check "user's env value kept"          "$H" "env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK" '"0"'
 check "user's switchModelsOnFlag kept" "$H" "switchModelsOnFlag" 'true'
+check "user's coAuthoredBy kept"       "$H" "includeCoAuthoredBy" 'true'
+check "user's sessionUrl kept"         "$H" "attribution.sessionUrl" 'true'
 [ "$(cat "$H/.claude/settings.json")" = "$BEFORE" ] \
-    && ok "file not rewritten when both keys present" \
-    || bad "file not rewritten when both keys present" "$(cat "$H/.claude/settings.json")"
+    && ok "file not rewritten when every key present" \
+    || bad "file not rewritten when every key present" "$(cat "$H/.claude/settings.json")"
 echo "$OUT" | grep -q 'left alone: switchModelsOnFlag=true' \
     && ok "reports what it left alone" || bad "reports what it left alone" "$OUT"
 
@@ -125,6 +134,20 @@ MTIME_AFTER=$(stat -c %Y "$H/.claude/settings.json" 2>/dev/null || stat -f %m "$
 [ "$MTIME_BEFORE" = "$MTIME_AFTER" ] && ok "file not rewritten on re-run" || bad "file not rewritten on re-run" "mtime moved"
 echo "$OUT" | grep -q "left alone" \
     && ok "reports no-op" || bad "reports no-op" "$OUT"
+
+# ---------------------------------------------------------------------------
+echo "=== a partial attribution object is filled in, not replaced ==="
+H=$(new_home)
+cat > "$H/.claude/settings.json" <<'JSON'
+{"attribution": {"commit": "Signed-off-by: someone <s@example.com>"}}
+JSON
+OUT=$(HOME="$H" install_ccenv_settings 2>&1)
+check "user's commit text kept" "$H" "attribution.commit" '"Signed-off-by: someone <s@example.com>"'
+check "missing sessionUrl seeded" "$H" "attribution.sessionUrl" 'false'
+check "missing pr seeded"         "$H" "attribution.pr" '""'
+echo "$OUT" | grep -q 'left alone: attribution.commit=' \
+    && ok "reports the attribution text it left alone" \
+    || bad "reports the attribution text it left alone" "$OUT"
 
 # ---------------------------------------------------------------------------
 echo "=== --skip settings leaves settings.json alone ==="

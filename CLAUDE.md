@@ -206,3 +206,19 @@ is recoverable.*
 - The "dangerous rm on a possibly-empty variable path" check is shape-based and fires regardless of
   the allowlist; `Bash(rm:*)` does NOT suppress it. In an unattended session a prompt stalls the
   loop until a human happens to look.
+
+## RULE EIGHTEEN — `.ccmemory` IS LESSONS, NOT SESSIONS
+
+- Never name a memory for a session, a run, or a date — not `sess574-…`, not `ccloop-<runid>-…`,
+  not `…-2026-09-10`. A memory is named for what it teaches. A name that says WHEN it happened
+  means it is a record, and a record does not go here.
+- Never write a handoff, a status report, a plan, or a change history as a memory. No
+  `-how-to-continue-it`, no `-next-steps`, no `-progress`. The transcript is the handoff; point at
+  it.
+- Write one only if a future session on a DIFFERENT task would be wrong without it — what already
+  bit us, what the user corrected, what a turn should have known.
+- Cite a session in the `description` for provenance when it helps. Never in the `name`.
+- The test: if it stops being true when the work moves on, it is not a lesson.
+- One project's `.ccmemory` reached 2801 files and 44 MB this way, 38% of them named for a ccloop
+  run and session number, while the durable material — `trap-`, `technique-`, `feedback-` — came to
+  97 files.

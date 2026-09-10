@@ -2,6 +2,113 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-09-10 — v0.34.0
+
+**RULE EIGHTEEN: `.ccmemory` is lessons, not sessions.**
+
+One project's memory directory had reached 2801 files and 44 MB. The census is
+what makes the case: 1056 named `ccloop-<runid>-sess<N>-…` and 987 carrying a
+`sess<N>` in the filename — the same files, mostly — against 76 `trap-`, 14
+`feedback-` and 7 `technique-` entries. Roughly 38% of the store was a record
+of which session did what, and 97 files were the durable material the store
+exists for. Nothing was malformed; exactly one file of 2801 lacked frontmatter.
+`memory_write` worked perfectly and was handed the wrong things.
+
+The discriminator was already visible in the data and needs no judgment. A
+durable memory is named for what it teaches and cites its session in the
+description if at all — `trap-a-silent-instrument-and-a-clean-system-are-the-
+same-observation`, described as "TRAP (sess571): …". A record is named for when
+it happened or what to do next — `sole-survivor-sweep-queue-how-to-continue-it`,
+described as "sess574: …". So the rule tests the NAME and never the body or the
+description, which keeps session provenance legal where it belongs.
+
+This was already stated, as a bullet inside RULE SEVEN saying `.ccmemory` is the
+lessons. That bullet is the control group, and it lost 1056 to nothing. Promoting
+it to its own heading is the same correction the rules file itself received when
+sixty buried imperatives became sixteen named rules: a requirement written as a
+clause inside an established structure gets ignored, and the identical
+requirement given its own top-level step gets obeyed. RULE SEVEN keeps saying
+what `.ccmemory` is; EIGHTEEN says what it is not.
+
+A validation gate inside `memory_write` was considered and passed over. A regex
+catches only the shapes someone thought to enumerate, and the failure here is a
+habit rather than a typo.
+
+## 2026-09-10 — v0.33.0
+
+**ccproject's three awareness hooks are removed. Nothing runs automatically.**
+
+The `.state/` ledger directory in one project had reached 810 files. Each was
+`touched-<session-id>.json`, written by the PostToolUse hook to record which
+source files a session edited, so the Stop hook could tell at the end whether a
+subsystem doc had gone stale. Nothing ever deleted one — there was no retention
+window and no cleanup path anywhere in the module. 141 KB of JSON occupying
+3.3 MB of disk, since each ~170-byte file burns a 4 KB block. The directory was
+not in the project's `.gitignore` either, so 810 session identifiers were
+sitting in the tree as commit candidates.
+
+The pile-up is what surfaced this, but it is not why the hooks are gone. The
+ledger existed to feed the Stop hook, and the Stop hook did not work. It blocked
+the session from ending until a subsystem doc was edited, and it could only
+check *whether the doc file had been written* — not whether the edit said
+anything true. A no-op write satisfied it. Worse, it demanded prose at the exact
+moment a session is winding down and least able to write any. The record over
+those 810 sessions: 189 were blocked at least once, and 32 exhausted the
+three-block cap — blocked, refused, blocked, refused, blocked, then let through
+anyway with no doc update. That is roughly 96 re-fed turns that bought nothing.
+
+The SessionStart drift report went with it. Its output was injected into the
+model's context, never shown to the user, and its signal was file mtime — which
+a checkout or a reformat bumps across every source file at once, flagging
+everything. An unreliable signal producing a vague suggestion, paid for on every
+session start.
+
+`awareness_hooks.py` is deleted along with its design doc. The three analysis
+scripts stay; regenerate a structural map when you actually want one:
+
+    python3 ~/.claude/skills/project-awareness/scripts/generate_structural_map.py <project>
+
+Step 5 of ccproject's installer is now an unregister step rather than a register
+step, because a box that installed an earlier version still has these hooks in
+`~/.claude/settings.json` pointing at a script that no longer ships — left
+alone, every edit would spawn a python3 that fails. It strips only hooks whose
+command names `awareness_hooks.py`, drops an entry whole when that was its only
+hook so no empty matcher stubs remain, and deletes the stale script from the
+skill directory. Verified against a copy of a real settings.json carrying nine
+unrelated ccloop and ccmemory hooks: three removed, nine untouched.
+
+## 2026-09-10 — v0.32.0
+
+**The installer turns off commit attribution, session link included.**
+
+Left at their defaults, Claude Code appends two things to any commit message
+it writes: a `Co-Authored-By: Claude …` trailer, and a `Claude-Session:
+https://claude.ai/code/session_…` URL. The second one is the problem. It puts
+a session identifier into git history, where it is permanent and travels to
+whatever remote the repository pushes to, public ones included. The base rules
+have forbidden Claude-authored attribution in commit messages for some time,
+so on every box the harness default and the rules were pulling opposite ways,
+silently, and the rules only won when a session happened to notice.
+
+These are TWO independent controls, which is the part worth writing down:
+turning off the co-author trailer does NOT turn off the session link. That was
+measured, not assumed — with `includeCoAuthoredBy: false` alone, the harness
+kept instructing sessions to append the `Claude-Session:` line. The session
+link lives in `attribution.sessionUrl`, which defaults to true.
+
+The `settings` step now seeds four keys instead of two: `includeCoAuthoredBy`
+false, and `attribution.commit` / `attribution.pr` blank with
+`attribution.sessionUrl` false. Note that `includeCoAuthoredBy` is the key
+that works despite the schema marking it deprecated in favour of
+`attribution` — CLI 2.1.267 rejects the shorter `coAuthoredBy` spelling that
+various guides recommend as an unrecognized field, and the write fails
+validation.
+
+Seeding rules are unchanged: each key is written only when absent, and the
+`attribution` object is filled in per sub-key rather than replaced, so a
+commit trailer someone set deliberately survives. `tests/test_settings_step.sh`
+covers the new keys, including a partial `attribution` object.
+
 ## 2026-09-10 — v0.31.0
 
 **Two harness behaviours the base rules did not cover.**

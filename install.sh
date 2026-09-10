@@ -818,6 +818,23 @@ assemble_ccenv_base_claude_md() {
 #       the shell), this setting still prevents the switch — at the cost of a
 #       dialog instead of a silent swap.
 #
+# Attribution is TWO independent controls, and turning off the co-author
+# trailer does NOT turn off the session link — that was measured, not assumed:
+#
+#   includeCoAuthoredBy = false
+#       Suppresses the `Co-Authored-By: Claude …` trailer on commits. The
+#       settings schema marks it deprecated in favour of `attribution`, but it
+#       is still the only key that turns the trailer off: CLI 2.1.267 rejects
+#       the shorter `coAuthoredBy` spelling as an unrecognized field.
+#
+#   attribution.sessionUrl = false, attribution.commit = "", attribution.pr = ""
+#       sessionUrl DEFAULTS TO TRUE and is what appends
+#       `Claude-Session: https://claude.ai/code/session_…` to commit messages
+#       and a link to PR bodies. That writes a session identifier into git
+#       history, where it is permanent and travels to whatever remote the repo
+#       pushes to — public ones included. Nothing identifying a session belongs
+#       in a published commit. The two text keys blank the attribution bodies.
+#
 # These are SEEDED, not owned: each key is written only when it is absent. A
 # key that is already present — whatever its value — is the user's deliberate
 # choice and is left exactly as it is (reported, not overwritten). Everything
@@ -825,7 +842,7 @@ assemble_ccenv_base_claude_md() {
 # registrations written by the component steps below).
 # ----------------------------------------------------------------------------
 install_ccenv_settings() {
-    step settings "enforcing model-stability knobs in ~/.claude/settings.json"
+    step settings "enforcing model-stability and attribution knobs in ~/.claude/settings.json"
     python3 - <<'PY'
 import json
 from pathlib import Path
@@ -856,6 +873,20 @@ if "switchModelsOnFlag" in data:
 else:
     data["switchModelsOnFlag"] = False
     changed.append("switchModelsOnFlag=false")
+
+if "includeCoAuthoredBy" in data:
+    kept.append("includeCoAuthoredBy=%s" % json.dumps(data["includeCoAuthoredBy"]))
+else:
+    data["includeCoAuthoredBy"] = False
+    changed.append("includeCoAuthoredBy=false")
+
+attribution = data.setdefault("attribution", {})
+for key, value in (("commit", ""), ("pr", ""), ("sessionUrl", False)):
+    if key in attribution:
+        kept.append("attribution.%s=%s" % (key, json.dumps(attribution[key])))
+    else:
+        attribution[key] = value
+        changed.append("attribution.%s=%s" % (key, json.dumps(value)))
 
 if changed:
     sp.write_text(json.dumps(data, indent=2) + "\n")

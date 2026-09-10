@@ -67,22 +67,33 @@ task automatically.
 
 ### Maintenance
 
-Maintenance is **enforced by hooks**, not left to memory. Once installed,
-ccproject registers three global hooks in `~/.claude/settings.json` that
-self-gate on whether the current project has `.claude/awareness/` (no-ops
-everywhere else):
+Maintenance is manual. ccproject registers no hooks and runs nothing in the
+background — installing it copies a skill, some templates and three analysis
+scripts, and that is all.
 
-| Hook | When | What it does |
-|------|------|--------------|
-| `track` | PostToolUse (Edit/Write/MultiEdit) | Records which source files and which docs you touched this session |
-| `sync`  | Stop | Auto-regenerates the structural map (Layer 3), then **blocks the session from ending** if you changed a subsystem's code without updating its doc |
-| `status`| SessionStart | Reports subsystems whose source is newer than their doc |
+It used to enforce freshness with three global hooks, and they were removed:
 
-The split is deliberate: the **structural map is regenerated automatically**
-(it's pure AST extraction — no judgment), while the **prose layers
-(invariants, pitfalls, API intent) cannot be script-generated**, so the Stop
-hook instead refuses to let you walk away from drift. Same philosophy as
-ccloop's keepgoing hook.
+- `track` (PostToolUse) wrote a per-session ledger to
+  `.claude/awareness/.state/`, one file per session, and nothing ever deleted
+  one. 810 accumulated in a single project. Nothing read them once the session
+  ended.
+- `sync` (Stop) blocked the session from ending until a subsystem doc was
+  edited. It could check only whether the doc had been written, not whether the
+  edit was true, so a no-op write satisfied it. Across those 810 sessions, 32
+  burned the full three-block cap and still ended with no doc update.
+- `status` (SessionStart) injected an mtime-based drift report into the model's
+  context. mtime is not a drift signal — a checkout or a reformat bumps every
+  source file at once, flagging everything.
+
+Regenerate the structural map when you want it (pure AST extraction, no
+judgment):
+
+```
+python3 ~/.claude/skills/project-awareness/scripts/generate_structural_map.py <project>
+```
+
+The prose layers — invariants, pitfalls, API intent — were never script-generable
+and still aren't. Keeping them current is a judgment call, made deliberately.
 
 Tuning (env vars):
 
