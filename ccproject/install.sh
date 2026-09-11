@@ -178,6 +178,11 @@ else:
     print("  no awareness hooks registered — nothing to remove")
 
 # Drop the script an earlier install left in the skill directory.
+#
+# Note the in-flight hazard, which is real but deliberately not handled here: a
+# session ALREADY RUNNING when this executes still holds the old hook list. Its
+# Stop hook then points at a missing file, python3 exits 2, and exit 2 on a Stop
+# hook blocks the stop. Finish your sessions before installing.
 stale = Path(os.environ["STALE_SCRIPT"])
 try:
     stale.unlink()

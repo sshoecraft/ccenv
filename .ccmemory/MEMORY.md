@@ -1,6 +1,7 @@
 ## feedback
 - [bump-top-level-bundle-version-not-just-subdir](bump-top-level-bundle-version-not-just-subdir.md) — When fixing a component in /src/ccenv, bump the TOP-LEVEL bundle VERSION + CHANGELOG.md — the bundle is what installs, not the component subdir.
 - [ccloop-cutoff-lowering-already-tried-and-lost](ccloop-cutoff-lowering-already-tried-and-lost.md) — Never propose lowering ccloop --cutoff. 500→145 lost to restart churn, and startup context (65k, ~75% CLI floor) can't be cut enough to change that.
+- [enforcement-hooks-that-check-file-written](enforcement-hooks-that-check-file-written.md) — A Stop hook that gates on "was the doc edited" is satisfiable by a no-op write. ccproject's awareness hooks removed in v0.33.0 — measured, not guesse…
 - [install-claude-md-component-owned](install-claude-md-component-owned.md) — Top-level install.sh owns only the BASE ~/.claude/CLAUDE.md (in a [CCENV MANAGED] marker region); each component owns/appends its own section.
 - [installer-seeds-settings-never-overwrites](installer-seeds-settings-never-overwrites.md) — install.sh settings step SEEDS keys — a key already present in ~/.claude/settings.json is the user's choice and is never overwritten, only reported.
 - [never-make-sessions-maintain-handoff-docs](never-make-sessions-maintain-handoff-docs.md) — NEVER instruct a session to write/update a handoff doc. The transcript is the handoff — point at it. ccenv v0.21.0 ripped this out of ccloop.

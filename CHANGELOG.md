@@ -2,6 +2,39 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-09-11 — v0.34.1
+
+**A converged interactive run no longer leaves its session resident forever.**
+
+Observed live: a run met its criteria at 11:39 and its Claude session was still
+resident, idle at its prompt, at 18:16 — seven hours later and drifted to 510k
+tokens, past a 500k cutoff. It was neither re-fed nor ended.
+
+`keepgoing` returns 0 on legitimate completion, which permits the stop. That is
+sufficient for headless `-p`, where the process exits on its own. It is not
+sufficient for the interactive TUI: a permitted stop returns the session to its
+prompt and leaves it running. The only thing that terminates a TUI is the
+watcher in `run_session_interactive` seeing `<run-dir>/halt-<session_id>`, and
+the completion path never wrote one.
+
+What made it unrecoverable is the ordering. The completion check sits above the
+cutoff gate, and the cutoff gate is the code that writes that sentinel. Once
+`criteria-met` started matching, the only remaining route to a sentinel was
+unreachable, so no amount of further token growth could end the session. The
+`fired` entries piling up in `hook-events.log` came from `guard`, a separate
+PostToolUse cutoff check that reports the crossing but cannot end anything —
+which is why the cutoff looked like it was working and being ignored at once.
+
+Both completion paths now write the sentinel before returning, via
+`_signal_converged`, logging `converged` rather than `halt` so a finished run is
+distinguishable from a cutoff relay in the event log. Completion still wins over
+the cutoff; it simply now ends the session instead of only permitting it to end.
+
+Two tests asserted the sentinel's *absence* on completion, using that as a proxy
+for "no relay happened". They were encoding the defect. They now assert the
+sentinel is present and that the logged event is `converged`, which is what
+actually distinguishes a clean finish from a relay.
+
 ## 2026-09-10 — v0.34.0
 
 **RULE EIGHTEEN: `.ccmemory` is lessons, not sessions.**

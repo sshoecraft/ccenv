@@ -219,6 +219,41 @@ def _signal_halt(run_dir, session_id, tokens, cutoff):
         pass
 
 
+def _signal_converged(run_dir, session_id, why):
+    """Write the halt sentinel for a run that finished legitimately.
+
+    Allowing the stop is not enough to end an INTERACTIVE run. Headless ``-p``
+    exits by itself, but the TUI simply returns to its prompt and waits: the
+    only thing that terminates it is the watcher in
+    ``runner.run_session_interactive`` seeing ``<run-dir>/halt-<session_id>``.
+
+    Without this, a session that reported DONE / criteria-met allowed every
+    subsequent stop, signalled nothing, and parked at the prompt indefinitely
+    while ``--list`` reported the run converged. Observed 2026-09-11: a run met
+    its criteria at 11:39 and its session was still resident and idle at 18:16,
+    having drifted to 510k tokens — past a 500k cutoff whose gate sits BELOW the
+    completion check and so was never reached.
+    """
+    if run_dir is None or not session_id:
+        return
+    try:
+        (run_dir / f"halt-{session_id}").write_text("", encoding="utf-8")
+    except OSError:
+        pass
+    try:
+        with open(run_dir / "hook-events.log", "a", encoding="utf-8") as fh:
+            fh.write(
+                "%s\tconverged\t%s\t%s\n"
+                % (
+                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    why,
+                    session_id,
+                )
+            )
+    except OSError:
+        pass
+
+
 def _emit_block(reason, n):
     sys.stdout.write(json.dumps({
         "decision": "block",
@@ -421,11 +456,20 @@ def main(argv=None):
 
     # Legitimate completion always wins over the cutoff: a real DONE / YES
     # should end the run cleanly, not trigger a relay to a fresh session.
+    #
+    # Ending it cleanly means SIGNALLING, not just returning 0. Returning 0 only
+    # permits the stop; under the interactive TUI that returns the session to its
+    # prompt and leaves it resident forever, because nothing terminates a TUI but
+    # the watcher's halt sentinel. This check sits above the cutoff gate, so once
+    # it starts matching, the gate that would otherwise have written that sentinel
+    # is unreachable and the session can never end by any route.
     if criteria is None:
         if _is_done_legacy(resume_file):
+            _signal_converged(run_dir, own_sid, "done-legacy")
             return 0
     else:
         if _criteria_met(run_dir):
+            _signal_converged(run_dir, own_sid, "criteria-met")
             return 0
 
     # Cutoff gate. If this session has crossed the token cutoff, allow the

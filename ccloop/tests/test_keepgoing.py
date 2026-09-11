@@ -254,7 +254,13 @@ def test_done_wins_over_cutoff(monkeypatch, tmp_path):
     monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
     rc, out = run(monkeypatch, {"session_id": "s1"})
     assert rc == 0 and out == ""
-    assert not (tmp_path / "halt-s1").exists()
+    # The sentinel IS written: allowing the stop does not end an interactive
+    # session, only the watcher seeing this file does. It is logged as
+    # `converged`, not `halt`, so the run ends instead of relaying.
+    assert (tmp_path / "halt-s1").exists()
+    events = (tmp_path / "hook-events.log").read_text()
+    assert "\tconverged\tdone-legacy\t" in events
+    assert "\thalt\t" not in events
 
 
 def test_criteria_yes_wins_over_cutoff(monkeypatch, tmp_path):
@@ -267,7 +273,13 @@ def test_criteria_yes_wins_over_cutoff(monkeypatch, tmp_path):
     monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
     rc, out = run(monkeypatch, {"session_id": "s1"})
     assert rc == 0 and out == ""
-    assert not (tmp_path / "halt-s1").exists()
+    # Same contract as the legacy-DONE case: the sentinel must appear so the
+    # interactive TUI is actually terminated. Without it a converged run left
+    # its session resident at the prompt indefinitely.
+    assert (tmp_path / "halt-s1").exists()
+    events = (tmp_path / "hook-events.log").read_text()
+    assert "\tconverged\tcriteria-met\t" in events
+    assert "\thalt\t" not in events
 
 
 def test_cutoff_does_not_bump_refeed_counter(monkeypatch, tmp_path):
