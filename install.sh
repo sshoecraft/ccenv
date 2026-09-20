@@ -950,20 +950,45 @@ fi
 # Project-owned agents in <project>/.claude/agents/ take precedence and are
 # never touched. A user file here that has been hand-edited is left alone:
 # these are SEEDED like the settings knobs, not owned.
+#
+# "Hand-edited" means different from what this installer last put there, NOT
+# different from the source. Comparing against the source made every shipped
+# update look like a user edit, so an agent, once installed, could never be
+# updated again: memory-compactor stayed on its pre-0.35.0 definition across
+# installs. A copy of each installed file is kept in
+# ~/.config/ccenv/agents-installed/ to compare against. That lives in the
+# user's home, never the source tree, which installs must not write to. An
+# existing file with no recorded copy (installed before the record existed) is
+# saved as <name>.backup and then replaced, so a genuine edit is recoverable.
 # ----------------------------------------------------------------------------
 if should_install agents; then
     step agents "installing subagent roster in ~/.claude/agents/"
     AGENT_DIR="$HOME/.claude/agents"
-    mkdir -p "$AGENT_DIR"
+    AGENT_RECORD_DIR="$HOME/.config/ccenv/agents-installed"
+    mkdir -p "$AGENT_DIR" "$AGENT_RECORD_DIR"
     for src in "$SCRIPT_DIR"/agents/*.md; do
         [ -f "$src" ] || continue
         name=$(basename "$src")
         dst="$AGENT_DIR/$name"
-        if [ -f "$dst" ] && ! cmp -s "$src" "$dst"; then
-            echo "  already present and modified, left alone: $name"
+        record="$AGENT_RECORD_DIR/$name"
+        if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+            cp "$src" "$record"
+            echo "  up to date: $name"
             continue
         fi
+        if [ -f "$dst" ]; then
+            if [ -f "$record" ]; then
+                if ! cmp -s "$dst" "$record"; then
+                    echo "  hand-edited since last install, left alone: $name"
+                    continue
+                fi
+            else
+                cp "$dst" "$dst.backup"
+                echo "  no install record for $name; previous copy saved as $name.backup"
+            fi
+        fi
         cp "$src" "$dst"
+        cp "$src" "$record"
         echo "  installed $name"
     done
 fi

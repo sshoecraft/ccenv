@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from ccmemory import compile as compile_mod
 from ccmemory import hooks
 from ccmemory.store import Store
 from tests.conftest import write_memory
@@ -373,19 +374,23 @@ def test_handler_dispatch_fail_open_on_unknown():
     assert rc == 0
 
 
-def test_compaction_nudge_dispatches_an_agent(memory_dir, monkeypatch):
-    """The SessionStart nudge must ask for a background Agent call, not for the
-    session to do the compaction inline. The inline ask is what left 29 of 30
-    project memory dirs on this machine at zero compiled articles: only the
-    unattended ccloop project ever complied."""
+def test_compaction_nudge_offers_but_does_not_order(memory_dir, monkeypatch):
+    """The SessionStart nudge reports the backlog and holds the fan-out until
+    the user asks for it. It fires before the first user message, so 'dispatch
+    these and carry on' had nothing to carry on with: the session launched one
+    agent per group and then waited on them, spending the opening turn on
+    housekeeping. The Agent call stays in the text as the recipe for when the
+    user does ask — it must not read as an instruction for right now."""
     from ccmemory import hooks
     monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
     for i in range(5):
         write_memory(memory_dir, f"note{i}")
     msg = hooks._compaction_nudge(memory_dir)
-    assert "Memory compaction due" in msg
+    assert "Memory compaction available" in msg
+    assert "status line, not a task" in msg
+    assert "Do not start compaction now and do not dispatch agents for it" in msg
+    assert "When the user asks for it" in msg
     assert 'subagent_type="memory-compactor"' in msg
-    assert "Do not stop what you are doing" in msg
 
 
 def test_compaction_nudge_quiet_under_threshold(memory_dir, monkeypatch):
@@ -394,3 +399,41 @@ def test_compaction_nudge_quiet_under_threshold(memory_dir, monkeypatch):
     for i in range(5):
         write_memory(memory_dir, f"note{i}")
     assert hooks._compaction_nudge(memory_dir) == ""
+
+
+def test_compaction_nudge_asks_for_one_agent_per_group(memory_dir, monkeypatch):
+    """One agent per group, not one agent.
+
+    Asking for a single compactor capped the drain at one group per session —
+    roughly a dozen notes — while ordinary use keeps writing new ones, so a
+    store that fell behind never caught up. A backlog of 227 had to be split
+    into 18 groups by hand before it could be fanned out.
+    """
+    from ccmemory import hooks
+    monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
+    monkeypatch.setenv("CCMEMORY_COMPILE_GROUP_SIZE", "3")
+    for i in range(12):
+        write_memory(memory_dir, f"note{i}", body=f"unrelated body {i}")
+
+    msg = hooks._compaction_nudge(memory_dir)
+    plan = compile_mod.compaction_plan(memory_dir)
+    assert plan["group_count"] > 1
+    assert f"{plan['group_count']} disjoint groups" in msg
+    assert "one background agent per group" in msg
+    # Every seed the caller needs to dispatch is named.
+    for g in plan["groups"]:
+        assert f"`{g['seed']}`" in msg
+
+
+def test_compaction_nudge_defers_to_the_plan_tool_past_the_seed_cap(memory_dir, monkeypatch):
+    """The nudge is paid at every SessionStart, so it must not grow without
+    bound with the backlog."""
+    from ccmemory import hooks
+    monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
+    monkeypatch.setenv("CCMEMORY_COMPILE_GROUP_SIZE", "1")
+    for i in range(compile_mod.NUDGE_SEED_CAP + 5):
+        write_memory(memory_dir, f"note{i}", body=f"unrelated body {i}")
+
+    msg = hooks._compaction_nudge(memory_dir)
+    assert "memory_compaction_plan()` for the full list" in msg
+    assert msg.count("`note") <= compile_mod.NUDGE_SEED_CAP + 1

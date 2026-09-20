@@ -2,6 +2,129 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-09-20 — v0.37.0
+
+**ccmemory v0.20.0: withheld corrections are recoverable, and session start
+stops doing housekeeping.**
+
+Two failures seen in the field on a 331-memory store. First, `memory_list`
+reported 37 withheld memories, all of them `user`/`feedback` — behavioral
+corrections with no topic to search for. Those types had first claim on the
+listing budget but no way out of it: nothing in the system could compile one,
+so they accumulated until they overflowed their own 25% tier and then reported
+`load_bearing_withheld` on every listing from then on. The remedy the warning
+printed, `memory_list(type="feedback")`, applied the same tier share to the
+filtered result and returned the identical truncated set.
+
+A filtered listing now spends the whole budget, and every type is compilable.
+Behavior notes fold only into an article that is itself always-listed, so a
+correction is never retired in favour of a representative the budget can drop;
+the compaction plan keeps behavior and knowledge notes in separate groups and
+tells the compactor which `article_type` to write.
+
+Found while validating the above, and worse than either: `/src` is an NFS
+mount, SQLite's WAL mode needs a shared memory mapping that NFS does not
+provide, and the index was in WAL mode. Every ccmemory tool in every project on
+that volume failed to open its index — and failed invisibly, because the hooks
+fail open and a session with unreachable memory reads as a session with no
+memories. The store now falls back to a journal mode the filesystem supports
+and rebuilds an index it cannot open, which is free: the index is derived from
+the markdown.
+
+Second, both backlog nudges told the session to fan out one compactor agent per
+group. They fire before the user's first message, where there is no task to run
+them alongside, so the session dispatched four agents and then waited on them —
+~90 seconds and the whole opening turn spent on maintenance nobody requested.
+Both now report the count and leave the decision to the user; the fan-out
+recipe stays, labelled for when it is asked for.
+
+## 2026-09-19 — v0.36.1
+
+**Shipped subagent definitions can be updated again.**
+
+The installer counted any difference between an installed agent in `~/.claude/agents/` and the
+source as a hand edit, and left the file alone. As a result, an agent could never be updated after
+its first install: every change ccenv shipped looked like a user edit. `memory-compactor.md` stayed
+on its pre-0.35.0 definition across installs. That definition ignores the group seed it is given, so
+the one-agent-per-group fan-out from 0.35.0 never actually reached the agents doing the work.
+
+- The installer now keeps a copy of each agent it installs in
+  `~/.config/ccenv/agents-installed/`. A file that still matches that copy has not been touched, so
+  it is updated. A file that differs from it was edited, so it is left alone. The copy lives in the
+  user's home directory, because an install must never write into the source tree.
+- If an installed agent differs from the source and there is no recorded copy (it was installed
+  before the record existed), it is saved as `<name>.backup` and then replaced, so a genuine edit
+  can still be recovered.
+- Base rules: an install or a push seen during a session closes the version it shipped. The next
+  change opens a new version instead of joining one that has already been released.
+
+## 2026-09-19 — v0.36.0
+
+**The version is bumped once per session, before the first change, instead of on every edit.**
+
+The base rules said the version was revved "as part of the change, not after," and every
+`CHANGELOG.md` entry had to carry a version. Taken literally, every edit got its own bump: one
+uninterrupted bug-fixing session revved the version seven times before anything was released.
+
+Bumping at release time instead would not work, because a session never sees a release. Installs
+run as a different user from the one doing the coding, or from someone else's clone, and an install
+must never write back into the source tree, so there is nowhere a release could be recorded for the
+session to read. Bumping before the first change means the number is already new by the time
+anyone installs, whoever does it and wherever.
+
+- New base rule: the version is bumped once per session, before the first change to the tree.
+  Later changes in that session go under the same version. The number moves again only to raise
+  its size (patch to minor, minor to major), never to add another step.
+- Removed the base-rule lines requiring a version on every changelog entry and a bump as part of
+  every change. The section that listed places to write now lists three.
+## 2026-09-14 — v0.35.0
+
+**Compaction fans out: one agent per group, and the groups are computed for it.**
+
+Compaction was automated but not self-draining. The SessionStart nudge asked for
+exactly one background compactor, and the compactor was defined to fold in one
+cluster and stop — about nine notes on the store measured here. A busy session
+writes several new notes, so the drain rate sat at or below the fill rate: a
+store that fell behind never caught up. One project reached 227 uncompiled notes
+against a threshold of 20, and the partitioning had to be done by hand — the
+notes were split into 18 disjoint groups manually before any fan-out was
+possible.
+
+Hand-splitting was necessary because nothing else could do it. Each compactor
+picked its own cluster out of `memory_list()`, so two started together would see
+the same listing and converge on the same obvious cluster, writing two articles
+about the same notes. That capped the system at one agent at a time.
+
+- `compile.compaction_plan()` partitions the whole uncompiled backlog into
+  disjoint groups — greedy clustering over the existing BM25 index, no LLM. Two
+  properties make concurrent agents safe: no note is in two groups, and every
+  note is in some group.
+- Groups are addressed by **seed slug, not index**. The plan is recomputed from
+  whatever is still uncompiled, so indices shift as agents retire notes; a seed
+  does not. A seed that is no longer in the plan means that group is already
+  compiled, and its agent is told to write nothing rather than take another
+  group.
+- Clusters too small to be a topic are pooled into `assorted` groups instead of
+  being skipped. A note in no group can never be cited, never retires from the
+  listing and never leaves the backlog — that is how a backlog acquires a floor
+  it can never get under, which is the failure `COMPILABLE_TYPES` already
+  documents.
+- `CLUSTER_FLOOR` keeps a group a topic rather than "the dozen notes with the
+  most words in common": a candidate must match the seed at 15% of the seed's
+  own BM25 self-score, and recency weighting is switched off for the similarity
+  query. Without it, groups were just the newest notes wearing a topic label.
+- New `memory_compaction_plan` MCP tool and `ccmemory compile --plan`
+  (`--seed`, `--group-size`).
+- The SessionStart nudge and the `memory_list` in-band note now ask for one
+  agent per group, `wave` at a time, and name the group seeds (capped at 24,
+  then deferring to the plan tool so the nudge cannot grow without bound).
+- `agents/memory-compactor.md` takes an assigned seed, fetches its own group,
+  and compiles that group and nothing else — including the loose ones.
+- New knobs: `CCMEMORY_COMPILE_GROUP_SIZE` (default 12, and the ceiling on how
+  many memory bodies one subagent reads) and `CCMEMORY_COMPILE_WAVE` (default 6).
+
+ccmemory 0.18.0 → 0.19.0. 126 tests pass.
+
 ## 2026-09-11 — v0.34.1
 
 **A converged interactive run no longer leaves its session resident forever.**

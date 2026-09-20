@@ -75,12 +75,14 @@ def _list_note(memory_dir, counts: dict, *, include_folded: bool) -> str:
     Two jobs. First, truncation must never be silent: a listing that quietly
     drops 1,500 entries reads as "that is everything this project knows".
 
-    Second, this is where the compaction directive goes. The SessionStart
-    reminder that suggests compacting is demonstrably ignored, and the MCP
-    server has no model of its own to compact with (the claude -p path was
-    removed from compile.py because it bills metered credit). But the caller
-    of memory_list IS a model, at session start, with the skill available and
-    free to run. So the ask rides back on the payload it already reads.
+    Second, it reports the compaction backlog as a COUNT and nothing more.
+    It used to prescribe the work — call memory_compaction_plan(), fan out one
+    background agent per group — and that directive arrives before the user's
+    first message, when there is no task to interleave the agents with. The
+    only behavior available to the caller was dispatch-then-block: a store with
+    23 uncompiled notes spent the first ~90 seconds and the whole opening turn
+    on housekeeping nobody asked for. Whether memory maintenance is worth a
+    turn is the user's call, so the count rides back and the decision does not.
     """
     parts = []
     if counts["folded"]:
@@ -115,14 +117,14 @@ def _list_note(memory_dir, counts: dict, *, include_folded: bool) -> str:
         b = compile_mod.count_backlog(Path(memory_dir))
         if not compile_mod.nudge_suppressed(b):
             parts.append(
-                f"COMPACTION DUE: {b['backlog']} memories have never been folded "
-                f"into a compiled- article (threshold {b['threshold']}). Do NOT "
-                "stop the user's task to do this yourself — dispatch it: "
-                "Agent(subagent_type=\"memory-compactor\", prompt=\"Compact this "
-                "project's memory backlog.\"). It runs in the background on "
-                "sonnet and reads the memory bodies into its own context, not "
-                "yours. Until it runs this backlog keeps growing and this "
-                "listing keeps degrading."
+                f"Compaction backlog: {b['backlog']} memories have never been "
+                f"folded into a compiled- article (threshold {b['threshold']}). "
+                "This is a status count, NOT a task: do not start compaction, do "
+                "not dispatch agents for it, and do not let it delay the user's "
+                "first message. Mention it in one line if it is worth raising at "
+                "all. When the user asks for it, memory_compaction_plan() returns "
+                "the disjoint groups the backlog splits into and the "
+                "compile-memories skill runs them."
             )
     except Exception:
         pass
@@ -187,6 +189,12 @@ def build_app():
         },
         "memory_stats": {"type": "object", "properties": {}},
         "memory_regen_index": {"type": "object", "properties": {}},
+        "memory_compaction_plan": {
+            "type": "object",
+            "properties": {
+                "seed": {"type": "string", "description": "return only the group seeded by this slug"},
+            },
+        },
     }
 
     def dispatch(name: str, arguments: dict):
@@ -286,6 +294,11 @@ def build_app():
                 result = index_gen.write(d)
                 return _text(json.dumps(result, indent=2))
 
+            if name == "memory_compaction_plan":
+                from . import compile as compile_mod
+                plan = compile_mod.compaction_plan(d, seed=arguments.get("seed") or None)
+                return _text(json.dumps(plan, indent=2, default=str))
+
             return _err(f"unknown tool: {name}")
         except Exception as e:
             log.exception("tool %s failed", name)
@@ -301,7 +314,7 @@ def build_app():
 
     @app.tool(
         name="memory_list",
-        description="List memories (metadata only — name, type, description, age), newest first. Use when you need the inventory, not a ranked subset. Always returns every user/feedback/reference memory in full; project notes fill a token budget, newest-first. Memories already folded into a `compiled-` article are omitted (they stay searchable) unless include_folded=true. The returned `note` field states exactly what was withheld — read it. Optional type filter (user|feedback|project|reference).",
+        description="List memories (metadata only — name, type, description, age), newest first. Use when you need the inventory, not a ranked subset. Bounded by a token budget spent in tiers, newest-first inside each: user/feedback, then `compiled-` articles, then raw project/reference. EVERY tier is trimmable, including the first — `load_bearing_withheld` in the returned counts says how many user/feedback memories did not fit. Passing a type filter (user|feedback|project|reference) gives that one type the entire budget, which is how you recover them. Memories already folded into a `compiled-` article are omitted (they stay searchable) unless include_folded=true. The returned `note` field states exactly what was withheld — read it.",
         schema=SCHEMAS["memory_list"],
     )
     def memory_list(**kwargs):
@@ -338,6 +351,19 @@ def build_app():
     )
     def memory_regen_index(**kwargs):
         return dispatch("memory_regen_index", kwargs)
+
+    @app.tool(
+        name="memory_compaction_plan",
+        description=(
+            "Partition the uncompiled memory backlog into disjoint compactor groups. "
+            "Returns {backlog, group_count, group_size, wave, groups:[{seed, kind, size, names}]}. "
+            "Groups are addressed by `seed` slug, never by index. Pass `seed` to fetch one group; "
+            "status 'done' means that group is already compiled — write nothing, and do not take another."
+        ),
+        schema=SCHEMAS["memory_compaction_plan"],
+    )
+    def memory_compaction_plan(**kwargs):
+        return dispatch("memory_compaction_plan", kwargs)
 
     return app
 

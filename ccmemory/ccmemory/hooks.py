@@ -205,13 +205,16 @@ field of its own response — read that field, don't skip it:
 - `shown` / `total` / `folded` / `withheld` come back as explicit counts.
   A listing that shows 90 of 1,848 is not "everything this project knows",
   and you must not treat it as such.
-- `load_bearing_withheld` is the one count you cannot work around. It means
-  `user`/`feedback` memories did not fit even in the first tier, so you are
-  missing instructions you have no way to know to search for. If it is
-  non-zero, say so and call `memory_list(type="feedback")`.
+- `load_bearing_withheld` counts `user`/`feedback` memories that did not fit
+  even in the first tier. They record behavior and corrections and have no
+  topic to search for, so you are missing instructions you cannot know to ask
+  about. If it is non-zero, say so and call `memory_list(type="feedback")` —
+  a filtered listing gives that one type the entire budget rather than the
+  first tier's share, so it returns what the mixed listing could not hold.
 
-If the note says COMPACTION DUE, act on it in this session rather than
-deferring: the backlog only grows, and every session pays for it.
+The note also reports a compaction backlog when there is one. That is a status
+count, not a task: do not start compaction and do not dispatch agents for it
+unless the user asks. It is their turn to spend, not yours.
 
 After that initial memory_list, use the decision rules below for the
 rest of the session.
@@ -294,11 +297,11 @@ MEMORY.md automatically at the end of the turn.
 
 
 def _compaction_nudge(memory_dir: Path) -> str:
-    """Dispatch instruction for the memory-compactor agent when the uncompiled
+    """Dispatch instruction for the memory-compactor agents when the uncompiled
     backlog is large. Empty string when under threshold or inside the
     post-compile cooldown. Fail-open: any error → no nudge.
 
-    This asks for ONE background Agent call, not for the session to do the work
+    This asks for background Agent calls, not for the session to do the work
     itself. That distinction is the whole point. The nudge used to say "invoke
     the compile-memories skill", i.e. stop, read twenty memory bodies inline,
     and synthesize an article — expensive, context-polluting, and disruptive to
@@ -308,29 +311,55 @@ def _compaction_nudge(memory_dir: Path) -> str:
     interactive project sat at zero compiled articles indefinitely.
 
     Compliance failure here is a cost-of-compliance problem, not a willingness
-    problem. A single background Agent call is cheap enough to actually happen:
-    one tool call, sonnet, and the raw memory bodies land in the subagent's
-    context instead of this one's.
+    problem. A background Agent call is cheap enough to actually happen: one
+    tool call, sonnet, and the raw memory bodies land in the subagent's context
+    instead of this one's.
+
+    It asks for one agent PER GROUP, not one agent. Asking for a single one
+    capped the drain rate at roughly nine notes per session — below the rate at
+    which ordinary use writes new ones — so a store that fell behind never
+    caught up, and the partitioning work landed on the user: one backlog of 227
+    was split into 18 groups by hand before it could be fanned out. The plan
+    makes the groups disjoint, which is what makes the fan-out safe to do
+    unattended.
     """
     try:
         from . import compile as compile_mod
         b = compile_mod.count_backlog(memory_dir)
         if compile_mod.nudge_suppressed(b):
             return ""
+        plan = compile_mod.compaction_plan(memory_dir)
+        groups = plan["groups"]
+        if not groups:
+            return ""
+        shown = groups[:compile_mod.NUDGE_SEED_CAP]
+        seeds = ", ".join(f"`{g['seed']}`" for g in shown)
+        if len(shown) < len(groups):
+            seeds += (f" — and {len(groups) - len(shown)} more; call "
+                      f"`memory_compaction_plan()` for the full list")
         return (
-            f"\n\n---\n📦 Memory compaction due: {b['backlog']} of {b['total_raw']} "
-            f"raw memories have never been folded into a `compiled-` article "
-            f"(threshold {b['threshold']}).\n\n"
-            f"**Do not stop what you are doing to handle this.** Make one "
-            f"background Agent call now and carry on with the user's task:\n\n"
-            f"    Agent(subagent_type=\"memory-compactor\", "
-            f"prompt=\"Compact this project's memory backlog.\")\n\n"
-            f"It runs on sonnet, needs nothing from you, and the memory bodies "
-            f"it reads never enter your context. If that agent is unavailable, "
-            f"invoke the `compile-memories` skill instead at your next natural "
-            f"pause. Compacting shrinks every future `memory_list`: citing a "
-            f"note in a compiled article retires it from the listing while "
-            f"leaving it searchable."
+            f"\n\n---\n📦 Memory compaction available: {b['backlog']} of "
+            f"{b['total_raw']} raw memories have never been folded into a "
+            f"`compiled-` article (threshold {b['threshold']}).\n\n"
+            f"**This is a status line, not a task.** Do not start compaction now "
+            f"and do not dispatch agents for it. It arrives before the user's "
+            f"first message, so there is no task to run it alongside — firing the "
+            f"agents here means waiting on them, and the user's opening turn goes "
+            f"to housekeeping they did not ask for. Say one line about it if it is "
+            f"worth raising at all, then do what they actually asked.\n\n"
+            f"When the user asks for it: the backlog is already partitioned into "
+            f"{plan['group_count']} disjoint groups, which share no notes and are "
+            f"safe to run concurrently — one background agent per group, "
+            f"{plan['wave']} at a time, launching the next batch as they "
+            f"finish:\n\n"
+            f"    {compile_mod.AGENT_CALL}\n\n"
+            f"Group seeds: {seeds}\n\n"
+            f"Each agent runs on sonnet, fetches its own group via "
+            f"`memory_compaction_plan`, and the memory bodies it reads never enter "
+            f"your context; the `compile-memories` skill does the same work inline "
+            f"instead. Compacting shrinks every future `memory_list`: citing a note "
+            f"in a compiled article retires it from the listing while leaving it "
+            f"searchable."
         )
     except Exception:
         return ""

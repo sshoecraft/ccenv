@@ -65,6 +65,15 @@ a store with no articles still spends the full budget on raw notes.
 withheld project note, a withheld behavioral correction has no topic to search
 for, so the session cannot recover it and does not know to try.
 
+**A `type_filter` suspends the tier split and spends the whole budget on the
+one type.** The shares are cumulative and donate downward only, so a filtered
+listing would otherwise be capped at its tier's share with the rest of the
+budget stranded above it in tiers that cannot be populated. That made
+`memory_list(type="feedback")` — the escape hatch the `load_bearing_withheld`
+warning prescribes — return exactly the truncated set the unfiltered call had
+already returned: on a 331-memory store, 34 of 56 feedback memories withheld
+both times.
+
 ## Compaction (folding)
 
 A `compiled-<topic>` article wikilinks the raw notes it absorbed. Those
@@ -73,21 +82,38 @@ omit cited notes from the listing — the article now represents them. **Folding
 never deletes anything**; folded notes stay fully reachable via
 `memory_search` / `memory_get` / `memory_list(include_folded=true)`.
 
-`compile.COMPILABLE_TYPES` (`project`, `reference`) is what a compile pass can
-ingest, and therefore the only thing compaction can retire. It **must stay
-complementary to `Store.ALWAYS_LIST_TYPES`** — a type in neither tuple can be
-neither retired from the listing nor drained from the backlog.
-`test_compilable_and_always_listed_types_are_complementary` enforces this.
+`compile.COMPILABLE_TYPES` is **every** type. A type a compile pass cannot
+ingest is a type nothing can retire, so it accumulates until it overflows
+whatever budget governs it and then complains forever. That happened twice:
+`reference` below the tier boundary (160 pinned entries on mxfs), then
+`user`/`feedback` above it. `test_every_type_can_be_drained` pins it.
 
-`count_backlog` counts uncited memories of compilable types only. Counting
-types that `_select` will never ingest produces a backlog with a floor above
-the threshold, i.e. a nudge that fires forever and cannot be satisfied.
+Behavior notes are foldable, but **only into an article of an always-listed
+type**. `compile.group_pool` splits the backlog into a behavior pool
+(`user`/`feedback` → `article_type: feedback`) and a knowledge pool
+(`project`/`reference` → `article_type: project`); a group never spans both,
+because the group decides the article's single type. `Store.folded_names`
+enforces the other half: a behavior note cited only by a `project` article is
+**not** folded. Otherwise compaction would trade an entry with first claim on
+the budget for a representative the budget is allowed to drop — strictly worse
+than not folding it.
 
-Compaction is **not automatic**. `claude -p` was removed (it bills metered
-credit), so nothing in this module runs a model. The backlog surfaces as text
-in two places — the SessionStart nudge (`hooks._compaction_nudge`) and the
-`COMPACTION DUE` clause in the `memory_list` note — and a model in an
-interactive session acts on it by invoking the `compile-memories` skill.
+`count_backlog` and `pending_notes` therefore key on `folded_names`, not
+`cited_names`: a note is pending until something that can actually represent it
+in the listing cites it.
+
+Compaction is **not automatic**, and it is **not self-dispatching**. `claude -p`
+was removed (it bills metered credit), so nothing in this module runs a model.
+The backlog surfaces as text in two places — the SessionStart nudge
+(`hooks._compaction_nudge`) and the backlog clause in the `memory_list` note —
+and both report a count without ordering the work. They used to prescribe a
+fan-out, one background agent per group. Both fire before the user's first
+message, where there is no task to run agents alongside, so the only available
+behavior was dispatch-then-block: sessions opened by spending ~90s and their
+first turn on memory housekeeping nobody had asked for. Whether that turn is
+worth spending is the user's call; the count rides back and the decision does
+not. The user asks, and then the plan and the `compile-memories` skill (or the
+`memory-compactor` agent, one per group) do the work.
 
 ## History
 
@@ -108,11 +134,38 @@ interactive session acts on it by invoking the `compile-memories` skill.
   favour of articles that were themselves withheld; and the token estimator
   modelled a wire format the server did not emit, under-counting by 1.42x.
 
+## The index is derived, and must be disposable
+
+`index.db` holds nothing the `.md` files do not. That is what makes the repair
+in `Store.__init__` safe: an index that cannot be opened is deleted and rebuilt
+rather than diagnosed.
+
+It has to be, because the store lives on whatever filesystem the project does.
+`/src` is NFS, and SQLite's WAL mode needs a shared `-shm` mapping that NFS
+does not provide — a WAL-mode index written on another host answers "unable to
+open database file" to *every* statement there, read-only opens included. WAL
+is therefore preferred, not assumed: `Store._open` falls back to TRUNCATE when
+the filesystem refuses WAL, and `busy_timeout` absorbs the writer-blocks-reader
+cost. An index that cannot be opened has no concurrency story to protect.
+
+This failure is silent by construction — the hooks fail open, so a session
+whose memory is unreachable is indistinguishable from one with no memories.
+Any future change here should keep `memory_stats` loud: it is the only tool
+that reports the store's health instead of degrading politely.
+
 ### Invariants worth not re-deriving
 
-- Keep `ALWAYS_LIST_TYPES` **small**. Every type in it is a type nothing can
-  ever retire.
+- Keep `ALWAYS_LIST_TYPES` **small**. Every type in it is a type that must be
+  worth first claim on the budget of every session, forever.
+- Every type must be compilable. A type with no drain grows without bound.
+- A memory may only be folded into an article that is listed at least as early
+  as the memory itself. Folding is a swap, and a swap for something the budget
+  can drop is a loss.
 - Any budget must be able to trim every tier, or it is not a budget.
+- A filtered listing gets the whole budget; the tier shares exist to ration a
+  mixed listing and have nothing to ration in a filtered one.
+- Neither nudge site may order work. They are read before the user's first
+  message, where "dispatch this and carry on" has nothing to carry on with.
 - If `_entry_tokens` and the server's serialization drift apart, the budget
   silently stops meaning anything —
   `test_entry_tokens_tracks_real_wire_size` pins them together.

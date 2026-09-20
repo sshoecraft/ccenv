@@ -2,6 +2,99 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.20.0
+
+**The index no longer requires WAL, and repairs one that cannot be opened.**
+
+`/src` is an NFS mount. SQLite's WAL mode needs a shared `-shm` mapping, which
+NFS does not provide, so a WAL-mode `index.db` written anywhere else answers
+"unable to open database file" to every statement on this client — including a
+read-only open. Every ccmemory tool in every project on that volume was dead,
+and dead invisibly: the hooks fail open, so a session whose memory is
+unreachable looks exactly like a session that has no memories. `memory_stats`
+was the only thing that reported it, and only because it does not fail open.
+
+`Store` now tries WAL, falls back to TRUNCATE when the filesystem refuses it,
+and on an open failure discards the index and rebuilds it from the markdown.
+The index is derived, so the repair costs one reindex and loses nothing.
+
+**Behavior memories can be recovered, and can finally be retired.**
+
+`user`/`feedback` notes get first claim on the listing budget because nothing
+else surfaces them. They had no drain: they were outside `COMPILABLE_TYPES`, so
+no compile pass could ever ingest one and the population only grew. Tier 1 is
+25% of a 6,000-token budget — roughly 30 entries — so every long-lived project
+eventually crossed it and then reported `load_bearing_withheld` on every
+listing, forever. A 331-memory store was withholding 34 of its 56 feedback
+memories: behavioral corrections the session could not see and could not know
+to search for.
+
+The escape hatch printed in the same warning did not work.
+`memory_list(type="feedback")` applied the tier shares to the filtered result,
+and the shares are cumulative and donate downward only — with tiers 2 and 3
+empty, 75% of the budget sat stranded above a tier that was overflowing. The
+filtered call returned the same truncated set as the unfiltered one. A filtered
+listing now spends the whole budget: the shares ration a mixed listing and have
+nothing to ration in a homogeneous one.
+
+`COMPILABLE_TYPES` is now every type. Behavior notes compact like anything
+else, with one restriction that makes it sound: they fold only into an article
+that is itself always-listed. `compaction_plan` splits the backlog into a
+behavior pool (`user`/`feedback` → `article_type: feedback`) and a knowledge
+pool (`project`/`reference` → `article_type: project`) and never puts both in
+one group, since a group decides its article's single type; `folded_names`
+enforces the other half and will not retire a behavior note cited only by a
+`project` article. Folding one into a tier-2 article would swap an entry that
+is always listed for a representative the budget is allowed to drop — worse
+than not folding it. `count_backlog` and `pending_notes` key on `folded_names`
+rather than `cited_names` for the same reason: a note is pending until
+something that can represent it in the listing cites it.
+
+The `memory_list` tool description claimed "always returns every
+user/feedback/reference memory in full", which stopped being true in 0.19.0
+when tier 1 became trimmable. It now states that every tier is trimmable, what
+`load_bearing_withheld` means, and that a type filter recovers them.
+
+**Neither backlog nudge orders work any more.**
+
+The SessionStart nudge and the `memory_list` note both prescribed a fan-out —
+`memory_compaction_plan()`, then one background compactor per group. Both are
+read before the user's first message, so "do not stop what you are doing" had
+nothing to be doing: the only available behavior was to fire the agents and
+then wait on them. Sessions opened by spending ~90 seconds and their entire
+first turn on memory housekeeping nobody asked for. Both sites now report the
+backlog as a count and say plainly that it is not a task. The seeds, the wave
+size and the Agent call stay in the nudge as the recipe for when the user asks
+for it.
+
+## v0.19.0
+
+**The backlog is partitioned, so compaction can fan out instead of trickling.**
+
+The nudge asked for one background compactor and the compactor folded in one
+cluster, so a store drained at roughly a dozen notes per session — at or below
+the rate at which ordinary use writes new ones. A store that fell behind stayed
+behind: 227 uncompiled notes against a threshold of 20, split into 18 groups by
+hand before they could be worked in parallel.
+
+They had to be split by hand because a compactor picking its own cluster out of
+`memory_list()` cannot be run concurrently with another one — both see the same
+listing and pick the same cluster.
+
+- `compaction_plan(memory_dir, size=, seed=)` — disjoint groups covering the
+  entire uncompiled backlog, greedy BM25 clustering, no LLM. Exposed as the
+  `memory_compaction_plan` MCP tool and `ccmemory compile --plan`.
+- Groups are addressed by seed slug, never by index: the plan is recomputed as
+  notes are retired, and a vanished seed is how an agent learns its group is
+  already done.
+- Clusters under `MIN_CLUSTER` are pooled into `assorted` groups. Leaving them
+  out would mean notes nothing can ever cite, and an uncitable note is a
+  permanent floor under the backlog.
+- `CLUSTER_FLOOR` (0.15 of the seed's own BM25 self-score) and
+  `recency_weight=0` on the similarity query: without both, a "topic" group was
+  just the newest notes.
+- `CCMEMORY_COMPILE_GROUP_SIZE` (12) and `CCMEMORY_COMPILE_WAVE` (6).
+
 ## v0.16.0
 
 **`memory_list` is bounded, and compaction finally reduces something.**

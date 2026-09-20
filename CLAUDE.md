@@ -87,17 +87,12 @@ is recoverable.*
   copy is genuinely needed it is `foo.py.backup` and nothing else.
 - Never edit the Makefile unless told to in that turn.
 
-## RULE SEVEN — FOUR PLACES TO WRITE, AND A THING IN THE WRONG ONE IS LOST
+## RULE SEVEN — THREE PLACES TO WRITE, AND A THING IN THE WRONG ONE IS LOST
 
 - `docs/` IS DESIGN, AND NOTHING ELSE. What the system is, why it is shaped that way, what was
   decided, what is still open. Never status, never history, never a session handoff, never a plan
   with a date on it. **The test: if it would be wrong next month because the work moved on, it is
   not a design document.**
-- `CHANGELOG.md` IS WHAT CHANGED IN THE SOURCE. Newest first, every entry headed with the date and
-  the version — `## 2026-09-02 — 1.1.0`. What changed and why, in prose. Nothing else goes in this
-  file.
-- The version is revved as part of the change, not after: patch for a fix, minor for a feature,
-  major for a break.
 - THE DEFECT QUEUE IS WHAT IS BROKEN AND STILL NEEDS WORK, where the project has one. A defect that
   is fixed is REMOVED, and the fix is a `CHANGELOG.md` entry. It is a work queue, never an archive:
   nothing in it is closed, resolved, pending or historical, because those entries would not still be
@@ -222,3 +217,20 @@ is recoverable.*
 - One project's `.ccmemory` reached 2801 files and 44 MB this way, 38% of them named for a ccloop
   run and session number, while the durable material — `trap-`, `technique-`, `feedback-` — came to
   97 files.
+
+## RULE NINETEEN — ONE VERSION BUMP PER SESSION, BEFORE THE FIRST CHANGE
+
+- Rev the version only when a change to the project's source is about to be made — immediately
+  before the first one in the session, and never a second time in that session. A session that
+  changes nothing bumps nothing.
+- A write to `.ccmemory/` is not a change to the source and never bumps the version.
+- Every later change in the session joins that version. The number moves again only to raise its
+  size — patch to minor, minor to major — never to add a step.
+- A release seen during the session — an install or a push run inside it — closes that version;
+  the next change after it opens a new one.
+- One uninterrupted bug-fixing session revved the version seven times before a single release was
+  made — seven versions that were never installed, never pushed, and never existed anywhere but the
+  working tree.
+- The bump cannot wait for the release, because Claude never sees one: installs run as another
+  user, or from someone else's clone, and nothing an install does is allowed to write back into the
+  source tree.

@@ -23,15 +23,24 @@ the current interactive session using the ccmemory MCP tools — it never shells
 ## This is the fallback path
 
 The normal path is the `memory-compactor` subagent, dispatched in the
-background so the user is never left waiting on maintenance:
+background so the user is never left waiting on maintenance — one agent per
+group in the compaction plan, `wave` of them at a time:
 
-    Agent(subagent_type="memory-compactor", prompt="Compact this project's memory backlog.")
+    plan = memory_compaction_plan()        # disjoint groups, addressed by seed slug
+    for each group, wave at a time:
+        Agent(subagent_type="memory-compactor", prompt="Compact memory group seeded by `<seed>`.")
 
 Use this skill instead only when that agent is unavailable, or when the user
 explicitly asks to compact in the current session. Doing the work inline costs
 the session a stop-the-world read of every memory body in the batch — which is
 precisely why, before the agent existed, 29 of 30 project memory dirs on this
 machine had never been compacted at all.
+
+Fire one agent per group, not one agent. One agent folds in roughly a dozen
+notes and stops; a backlog in the hundreds then needs dozens of sessions while
+ordinary use keeps adding notes, and it never converges. The plan exists so the
+whole backlog can be drained in a single session without two agents landing on
+the same notes.
 
 ## When to run it
 
@@ -41,18 +50,23 @@ session — compaction is deliberate maintenance, not a background habit.
 
 To inspect the backlog and candidate inputs first (optional): `ccmemory compile` (and
 `ccmemory compile --topic "<topic>"`). That command no longer calls any LLM — it just
-reports `backlog`, `threshold`, and `candidate_names`.
+reports `backlog`, `threshold`, and `candidate_names`. `ccmemory compile --plan` (or the
+`memory_compaction_plan` tool) reports the group partition instead.
 
 ## Procedure
 
-1. **Survey.** Call `memory_list()` to get every memory (name, type, description, age).
-   Ignore any already named `compiled-*` — those are prior articles, not raw inputs.
+1. **Get the plan.** Call `memory_compaction_plan()`. It partitions every uncompiled
+   `project`/`reference` note into disjoint groups, each addressed by a `seed` slug, and
+   covers the whole backlog — `kind: assorted` groups are the tail that did not cluster
+   onto a topic. Do not hand-pick clusters out of `memory_list()`: that is what made two
+   concurrent compactors converge on the same notes.
 
-2. **Pick a topic batch.** Group the raw memories by shared subject and choose ONE cohesive
-   cluster (typically 3–20 notes). If the user named a topic, use `memory_search("<topic>")`
-   to gather the cluster. Compile one topic per invocation; repeat for others.
+2. **Take one group per pass.** Work the groups in order, one article per group, until the
+   backlog is under `threshold`. Compile an `assorted` group too — say in its opening line
+   that it is a mixed batch. If the user named a topic, `memory_compaction_plan(seed=...)`
+   fetches just that group.
 
-3. **Read the bodies.** `memory_get(name)` for each memory in the batch. Read them fully —
+3. **Read the bodies.** `memory_get(name)` for each `names` entry in the group. Read them fully —
    you are deduplicating and synthesizing, so you need the actual content, not just
    descriptions.
 
@@ -76,7 +90,11 @@ reports `backlog`, `threshold`, and `candidate_names`.
 5. **Write it** with `memory_write`:
    - `name`: `compiled-<short-kebab-topic>` (the `compiled-` prefix is REQUIRED — it marks
      the article as compiled so the backlog nudge resets and future compiles skip it).
-   - `type`: `project`
+   - `type`: the group's `article_type`, copied from the plan — `feedback` for a group of
+     `user`/`feedback` notes, `project` otherwise. This is not a judgement call. A behavior
+     group's article has to sit in the same first-claim listing tier as the corrections it
+     retires; write `project` on one and those notes are folded away behind a
+     representative the budget is allowed to drop, which is worse than not folding them.
    - `description`: one-line summary suitable for the index (≤150 chars).
    - `tags`: include `compiled` plus a few topic tags.
    - `body`: the synthesized article.
@@ -92,4 +110,6 @@ reports `backlog`, `threshold`, and `candidate_names`.
    backlog, no matter how thoroughly you folded its content in.
 
 7. **Report** to the user: which raw memories you folded in, the new article name, and a
-   one-line description. Offer to compile another topic cluster if the backlog is still high.
+   one-line description. If the backlog is still over `threshold`, keep going — inline
+   compaction that stops after one group leaves the rest to the next session, and that is
+   exactly how a backlog reaches the hundreds.

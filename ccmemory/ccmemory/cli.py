@@ -67,7 +67,10 @@ def cmd_compile(args):
     if not d:
         sys.exit("error: no memory yet in this directory (nothing in "
                  f"{paths.startup_memory_dir()} and no legacy store to read)")
-    result = compile_mod.compile_status(d, topic=args.topic, max_inputs=args.max)
+    if args.plan or args.seed:
+        result = compile_mod.compaction_plan(d, size=args.group_size, seed=args.seed)
+    else:
+        result = compile_mod.compile_status(d, topic=args.topic, max_inputs=args.max)
     print(json.dumps(result, indent=2, default=str))
 
 
@@ -118,6 +121,11 @@ def build_parser() -> argparse.ArgumentParser:
     pc = sub.add_parser("compile", help="report the memory-compaction backlog + candidate inputs (compile via the compile-memories skill — no claude -p)")
     pc.add_argument("--topic")
     pc.add_argument("--max", type=int, default=20)
+    pc.add_argument("--plan", action="store_true",
+                    help="partition the whole backlog into disjoint compactor groups")
+    pc.add_argument("--seed", help="with --plan, return only the group seeded by this slug")
+    pc.add_argument("--group-size", type=int, default=None,
+                    help="notes per group (default CCMEMORY_COMPILE_GROUP_SIZE or 12)")
     pc.set_defaults(func=cmd_compile)
 
     pmg = sub.add_parser("migrate", help="copy legacy memory into project-local .ccmemory/ (also runs automatically on MCP boot)")

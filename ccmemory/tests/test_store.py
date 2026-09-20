@@ -1,9 +1,42 @@
 """Store: reindex, search, ranking, get."""
 
+import sqlite3
 import time
 
 from ccmemory.store import Store
 from tests.conftest import write_memory
+
+
+def test_unopenable_index_is_discarded_and_rebuilt(memory_dir, monkeypatch):
+    # A WAL-mode index on a filesystem with no shared-memory support cannot be
+    # opened at all, read or write — sqlite answers "unable to open database
+    # file" to every statement. That is what /src (NFS) does to an index
+    # written anywhere else, and it took every ccmemory tool in every project
+    # on the volume down silently: the hooks fail open, so a session with
+    # unreachable memory looks exactly like a session with no memory.
+    write_memory(memory_dir, "note", description="a lesson worth keeping")
+    with Store(memory_dir) as s:
+        s.reindex()
+    assert (memory_dir / "index.db").exists()
+
+    real_connect = sqlite3.connect
+    calls = []
+
+    def refuse_once(*args, **kwargs):
+        calls.append(args)
+        conn = real_connect(*args, **kwargs)
+        if len(calls) == 1:
+            conn.close()
+            raise sqlite3.OperationalError("unable to open database file")
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", refuse_once)
+    with Store(memory_dir) as s:
+        # Rebuilt from the markdown without being asked to reindex: the index
+        # is derived, so throwing it away costs one rebuild and nothing else.
+        names = {r["name"] for r in s.list_all()[0]}
+    assert names == {"note"}
+    assert len(calls) == 2, "one failed open, one reopen on a fresh file"
 
 
 def test_reindex_empty_dir(memory_dir):
@@ -181,6 +214,30 @@ def test_untyped_memories_are_never_folded(memory_dir):
     assert "untyped" in {r["name"] for r in results}
 
 
+def test_behavior_note_folds_only_into_an_always_listed_article(memory_dir):
+    # Folding a correction into a `type: project` article would swap an entry
+    # with first claim on the budget for a representative that can be trimmed
+    # out of the listing — the note retires and nothing stands in for it.
+    write_memory(memory_dir, "corrected", type="feedback")
+    write_memory(memory_dir, "compiled-wrong-tier", type="project",
+                 body="[[corrected]]")
+    with Store(memory_dir) as s:
+        s.reindex()
+        assert s.folded_names() == set()
+        results, _ = s.list_all()
+        assert "corrected" in {r["name"] for r in results}
+
+    write_memory(memory_dir, "compiled-right-tier", type="feedback",
+                 body="[[corrected]]")
+    with Store(memory_dir) as s:
+        s.reindex()
+        assert s.folded_names() == {"corrected"}
+        results, _ = s.list_all()
+        names = {r["name"] for r in results}
+        assert "corrected" not in names
+        assert "compiled-right-tier" in names
+
+
 def test_budget_gives_load_bearing_types_first_claim(memory_dir):
     now = time.time()
     write_memory(memory_dir, "pref", type="user", mtime=now - 900 * 86400)
@@ -223,6 +280,31 @@ def test_budget_is_a_real_ceiling_even_for_load_bearing_types(memory_dir):
     # And the starvation half: other tiers still get their share.
     assert any(r["type"] == "project" for r in results), \
         "tier 1 must not be able to consume the whole budget"
+
+
+def test_type_filter_gets_the_whole_budget(memory_dir):
+    # `load_bearing_withheld` tells the caller to re-list with type="feedback".
+    # That advice was a no-op: the tier shares are cumulative and donate
+    # DOWNWARD only, so with tiers 2 and 3 empty the filtered call was still
+    # capped at tier 1's 25% and returned the same truncated set. On a real
+    # 331-memory store it withheld 34 of 56 feedback memories twice in a row.
+    now = time.time()
+    for i in range(60):
+        write_memory(memory_dir, f"fb{i:03d}", type="feedback",
+                     description="d" * 140, mtime=now - i * 86400)
+    for i in range(20):
+        write_memory(memory_dir, f"proj{i:02d}", type="project",
+                     description="d" * 140, mtime=now - i * 86400)
+    budget = 3000
+    with Store(memory_dir) as s:
+        s.reindex()
+        mixed, mixed_counts = s.list_all(token_budget=budget)
+        filtered, counts = s.list_all(type_filter="feedback", token_budget=budget)
+        spent = sum(s._entry_tokens(e) for e in filtered)
+    in_mixed = sum(1 for e in mixed if e["type"] == "feedback")
+    assert len(filtered) > in_mixed, "the filtered call must recover entries"
+    assert counts["load_bearing_withheld"] < mixed_counts["load_bearing_withheld"]
+    assert spent <= budget, "and must still respect the ceiling"
 
 
 def test_compiled_articles_get_their_own_budget_tier(memory_dir):

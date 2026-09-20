@@ -1,8 +1,9 @@
 ## feedback
-- [bump-top-level-bundle-version-not-just-subdir](bump-top-level-bundle-version-not-just-subdir.md) — When fixing a component in /src/ccenv, bump the TOP-LEVEL bundle VERSION + CHANGELOG.md — the bundle is what installs, not the component subdir.
+- [bump-top-level-bundle-version-not-just-subdir](bump-top-level-bundle-version-not-just-subdir.md) — ccenv: bump ONCE per session, before the first change — top-level bundle VERSION + CHANGELOG.md too, not just the component subdir.
 - [ccloop-cutoff-lowering-already-tried-and-lost](ccloop-cutoff-lowering-already-tried-and-lost.md) — Never propose lowering ccloop --cutoff. 500→145 lost to restart churn, and startup context (65k, ~75% CLI floor) can't be cut enough to change that.
 - [enforcement-hooks-that-check-file-written](enforcement-hooks-that-check-file-written.md) — A Stop hook that gates on "was the doc edited" is satisfiable by a no-op write. ccproject's awareness hooks removed in v0.33.0 — measured, not guesse…
 - [install-claude-md-component-owned](install-claude-md-component-owned.md) — Top-level install.sh owns only the BASE ~/.claude/CLAUDE.md (in a [CCENV MANAGED] marker region); each component owns/appends its own section.
+- [install-never-writes-to-source-tree](install-never-writes-to-source-tree.md) — No install.sh may write into the source tree — installs run as other users, or from someone else's git clone. Claude as steve can't see installs.
 - [installer-seeds-settings-never-overwrites](installer-seeds-settings-never-overwrites.md) — install.sh settings step SEEDS keys — a key already present in ~/.claude/settings.json is the user's choice and is never overwritten, only reported.
 - [never-make-sessions-maintain-handoff-docs](never-make-sessions-maintain-handoff-docs.md) — NEVER instruct a session to write/update a handoff doc. The transcript is the handoff — point at it. ccenv v0.21.0 ripped this out of ccloop.
 - [no-git-checkout-to-undo-own-edits](no-git-checkout-to-undo-own-edits.md) — NEVER run git for ANY reason without explicit direction — including read-only checks (status/diff/log). The ban has no exceptions.
@@ -14,6 +15,8 @@
 - [version-must-have-one-source-of-truth](version-must-have-one-source-of-truth.md) — Never hardcode __version__ in __init__.py — derive from importlib.metadata. ccloop and ccmemory both drifted 2 minor versions and lied during install…
 
 ## project
+- [allowing-a-stop-does-not-end-an-interactive-session](allowing-a-stop-does-not-end-an-interactive-session.md) — ccloop: returning 0 from keepgoing permits a stop but never ends an interactive TUI — only the halt sentinel does. Fixed in 0.34.1.
+- [bm25-idf-is-zero-on-small-corpora](bm25-idf-is-zero-on-small-corpora.md) — FTS5 bm25 scores a term in half the corpus at exactly 0, so 8-doc synthetic fixtures cannot test any similarity/clustering code.
 - [ccenv-installed-vs-source-version](ccenv-installed-vs-source-version.md) — "Installed ccenv version" lives in ~/.config/ccenv/installed-version, NOT /src/ccenv/VERSION. NFS-shared /src makes the source VERSION useless as an…
 - [ccenvmcp-stdlib-mcp-shim](ccenvmcp-stdlib-mcp-shim.md) — ccenvmcp: stdlib-only Python 3.9+ FastMCP-compatible shim replacing the mcp SDK across ccmemory/ccusage/ccteam so the bundle installs on 3.9.
 - [ccloop-cli-flags-thread-as-params](ccloop-cli-flags-thread-as-params.md) — ccloop CLI flags thread as explicit params (cli→cmd_run/cmd_resume→loop), flag beats CCLOOP_* env; fake_claude FAKE_ARGS_FILE asserts spawned argv.
@@ -25,7 +28,10 @@
 - [ccprospect-module-created](ccprospect-module-created.md) — ccprospect v0.1.0 (bundle v0.8.0): prospective-memory sibling of ccmemory — immutable contracts + events.jsonl fold, evaluate-on-wake, counterfactual…
 - [claude-code-does-not-reap-task-output-files](claude-code-does-not-reap-task-output-files.md) — Claude Code does NOT delete a Bash background task's .output file when the command finishes — it persists for the whole session. Presence != liveness.
 - [commit-attribution-is-two-controls](commit-attribution-is-two-controls.md) — Killing the Co-Authored-By trailer does NOT kill the Claude-Session URL — separate keys. attribution.sessionUrl defaults true; coAuthoredBy is reject…
+- [compiled-ccenv-version-source-of-truth](compiled-ccenv-version-source-of-truth.md) — ccenv version handling: installed-vs-source marker, importlib.metadata for __version__, top-level bundle bump, CHANGELOG-only history.
 - [compiled-ccloop-lifecycle](compiled-ccloop-lifecycle.md) — ccloop session lifecycle: event-driven relay, Stop-hook blocking rules, two orphan-process mechanisms, CLI flag threading, handoff-doc history, cutof…
+- [compiled-claude-md-governance](compiled-claude-md-governance.md) — How ~/.claude/CLAUDE.md is assembled/owned by install.sh, why repo CLAUDE.md is its verbatim source, and CLAUDE.md's content boundary (no changelog).
+- [compiled-mcp-tool-availability](compiled-mcp-tool-availability.md) — ccmemory MCP tools going missing: install.sh healing stale registrations, alwaysLoad's real behavior, and defensive protocol design
 - [handoff-docs-must-be-freshness-stamped](handoff-docs-must-be-freshness-stamped.md) — REVERSED in v0.21.0 — the handoff doc itself was the mistake, not its freshness. Kept for the durable half: hand-maintained docs die; scraper caps.
 - [list-budget-must-trim-every-tier](list-budget-must-trim-every-tier.md) — ccmemory 0.19.0: a budget exempting a type from BOTH trimming and folding is not a budget. reference was write-only for 160 entries on mxfs.
 - [prescribed-remedy-must-not-assume-its-own-tool-exists](prescribed-remedy-must-not-assume-its-own-tool-exists.md) — Injected protocol text that prescribes a tool (ToolSearch) must gate on that tool existing — ccmemory v0.13.0 turned a silent failure into a dead-end…
@@ -41,4 +47,5 @@
 - [mcp-alwaysload-blocks-startup](mcp-alwaysload-blocks-startup.md) — alwaysLoad is REMOVED from ccenv as of v0.13.2. It was a 5s deadline that proceeds degraded, and on non-Anthropic models it erased ccmemory's tool su…
 - [mcp-heal-stale-command-pattern](mcp-heal-stale-command-pattern.md) — install.sh's register_mcp() compares stored Command+Args to the desired command and re-registers when stale — never simplify it away
 - [pythonuserbase-in-zshenv](pythonuserbase-in-zshenv.md) — PYTHONUSERBASE must be exported in ~/.zshenv (not ~/.zshrc) or Claude hooks/statusLine/MCP fail with ModuleNotFoundError
+- [src-is-nfs-so-sqlite-wal-cannot-open](src-is-nfs-so-sqlite-wal-cannot-open.md) — /src is an NFS mount: a WAL-mode SQLite file there cannot be opened at all, read or write. Check journal mode before blaming the code.
 - [src-tree-appledouble-sidecars](src-tree-appledouble-sidecars.md) — /src tree is on an xattr-less FS that spawns macOS ._* AppleDouble sidecars on every write; corrupts pip wheels — build from clean /tmp stage

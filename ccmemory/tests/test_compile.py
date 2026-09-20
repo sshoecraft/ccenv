@@ -18,24 +18,28 @@ def test_threshold_default_and_env(monkeypatch):
     assert compile_mod.threshold() == compile_mod.DEFAULT_THRESHOLD
 
 
-def test_compilable_and_always_listed_types_are_complementary():
-    # The drift that broke mxfs: _select ingested only 'project' while
-    # count_backlog counted every type, so 'reference' was in neither the
-    # compilable set nor the exempt set. It could not be retired from a
-    # listing and it could not be drained from the backlog — 144 permanently
-    # stuck memories against a threshold of 20. Any new type must land in
-    # exactly one of these tuples.
+def test_every_type_can_be_drained():
+    # A type nothing can retire grows without limit. 'reference' was that type
+    # until 0.19.0 (144 permanently stuck memories against a threshold of 20);
+    # 'user'/'feedback' were that type until 0.20.0, one tier up, which is how
+    # a store reached 56 feedback memories against a tier that holds ~30 and
+    # reported load_bearing_withheld on every listing forever.
     from ccmemory.store import Store
 
     known = {"user", "feedback", "project", "reference"}
-    assert set(Store.ALWAYS_LIST_TYPES).isdisjoint(compile_mod.COMPILABLE_TYPES)
-    assert set(Store.ALWAYS_LIST_TYPES) | set(compile_mod.COMPILABLE_TYPES) == known
+    assert set(compile_mod.COMPILABLE_TYPES) == known
+    # And the safety rule that makes folding them sound: a behavior group's
+    # article is itself always-listed, so the representative cannot be trimmed
+    # out of the tier the notes it retires were pinned to.
+    assert Store._is_always_listed(
+        compile_mod.POOL_ARTICLE_TYPE[compile_mod.BEHAVIOR_POOL])
+    assert not Store._is_always_listed(
+        compile_mod.POOL_ARTICLE_TYPE[compile_mod.KNOWLEDGE_POOL])
 
 
-def test_backlog_counts_only_what_a_compile_pass_can_act_on(memory_dir):
-    # An unsilenceable alarm is a broken alarm. Types _select will never ingest
-    # must not be counted, or the backlog has a floor above the threshold and
-    # the nudge fires forever no matter how much compaction runs.
+def test_backlog_counts_every_type_and_reaches_zero(memory_dir):
+    # An unsilenceable alarm is a broken alarm: the backlog must be drainable
+    # to zero from inside the system, whatever types the store holds.
     write_memory(memory_dir, "pref", type="user")
     for i in range(3):
         write_memory(memory_dir, f"corrected{i}", type="feedback")
@@ -43,20 +47,35 @@ def test_backlog_counts_only_what_a_compile_pass_can_act_on(memory_dir):
     write_memory(memory_dir, "fact", type="reference")
 
     b = compile_mod.count_backlog(memory_dir)
-    assert b["backlog"] == 2, "only the project + reference notes are actionable"
-    assert b["total_raw"] == 2
+    assert b["backlog"] == 6
+    assert b["total_raw"] == 6
 
-    # And compacting those two drives it to zero — the floor is reachable.
     write_memory(memory_dir, "compiled-topic", body="[[note]] [[fact]]")
+    write_memory(memory_dir, "compiled-behavior", type="feedback",
+                 body="[[pref]] " + " ".join(f"[[corrected{i}]]" for i in range(3)))
     assert compile_mod.count_backlog(memory_dir)["backlog"] == 0
 
 
-def test_select_offers_reference_notes_as_candidates(memory_dir):
+def test_behavior_note_stays_pending_until_a_feedback_article_cites_it(memory_dir):
+    # Citation alone is not retirement for a behavior note: a `type: project`
+    # article sits in a tier that can be budget-trimmed, so the note would be
+    # dropped from the listing with nothing of its own tier standing in for it.
+    write_memory(memory_dir, "corrected", type="feedback")
+    write_memory(memory_dir, "compiled-wrong-tier", type="project",
+                 body="[[corrected]]")
+    assert compile_mod.count_backlog(memory_dir)["backlog"] == 1
+
+    write_memory(memory_dir, "compiled-right-tier", type="feedback",
+                 body="[[corrected]]")
+    assert compile_mod.count_backlog(memory_dir)["backlog"] == 0
+
+
+def test_select_offers_every_compilable_type_as_a_candidate(memory_dir):
     write_memory(memory_dir, "note", type="project")
     write_memory(memory_dir, "fact", type="reference")
     write_memory(memory_dir, "pref", type="user")
     picks = compile_mod._select(memory_dir, topic=None, max_inputs=10)
-    assert {p["name"] for p in picks} == {"note", "fact"}
+    assert {p["name"] for p in picks} == {"note", "fact", "pref"}
 
 
 def test_backlog_all_raw_when_no_compiled(memory_dir):
@@ -194,3 +213,150 @@ def test_backlog_under_threshold_still_suppresses(memory_dir, monkeypatch):
         write_memory(memory_dir, f"note{i}")
     b = compile_mod.count_backlog(memory_dir)
     assert compile_mod.nudge_suppressed(b) is True
+
+
+# --- compaction_plan: the partition that makes fan-out possible --------------
+
+
+def plan_names(plan) -> list[str]:
+    return [n for g in plan["groups"] for n in g["names"]]
+
+
+def test_plan_covers_the_whole_backlog_exactly_once(memory_dir):
+    """Coverage and disjointness are the two properties the fan-out rests on.
+
+    A note in no group can never be cited, never retires from the listing and
+    never leaves the backlog — that is the permanent floor COMPILABLE_TYPES
+    documents. A note in two groups means two concurrent compactors write two
+    articles about it, which is what forced the groups to be split by hand.
+    """
+    for i in range(25):
+        write_memory(memory_dir, f"note{i}", body=f"body text {i}")
+    plan = compile_mod.compaction_plan(memory_dir)
+    names = plan_names(plan)
+    assert plan["backlog"] == 25
+    assert sorted(names) == sorted(f"note{i}" for i in range(25))
+    assert len(names) == len(set(names)), "groups must be disjoint"
+
+
+def test_plan_skips_cited_notes(memory_dir):
+    write_memory(memory_dir, "folded")
+    write_memory(memory_dir, "pending")
+    write_memory(memory_dir, "pref", type="user")
+    write_memory(memory_dir, "corrected", type="feedback")
+    write_memory(memory_dir, "compiled-prior", body="[[folded]]")
+    plan = compile_mod.compaction_plan(memory_dir)
+    assert sorted(plan_names(plan)) == ["corrected", "pending", "pref"]
+
+
+def test_plan_never_mixes_the_two_pools(memory_dir):
+    # A group names the article's type, and an article has exactly one. A group
+    # spanning both pools would have to mis-file one half of it.
+    for i in range(6):
+        write_memory(memory_dir, f"correction{i}", type="feedback")
+        write_memory(memory_dir, f"note{i}", type="project")
+    plan = compile_mod.compaction_plan(memory_dir)
+    assert plan["groups"], "both pools must be planned, not just one"
+    for g in plan["groups"]:
+        kinds = {n.startswith("correction") for n in g["names"]}
+        assert len(kinds) == 1, f"group {g['seed']} mixes pools: {g['names']}"
+        behavior = kinds == {True}
+        assert g["pool"] == (compile_mod.BEHAVIOR_POOL if behavior
+                             else compile_mod.KNOWLEDGE_POOL)
+        assert g["article_type"] == ("feedback" if behavior else "project")
+    planned = plan_names(plan)
+    assert len(planned) == 12 and len(set(planned)) == 12
+
+
+def test_plan_groups_notes_by_subject(memory_dir):
+    """A topic group must actually be a topic.
+
+    Note the corpus size: BM25 weights a term by how rare it is, and a term in
+    half the documents carries an IDF of zero. On a four-document-per-subject
+    toy store nothing discriminates and every group comes out `assorted` — the
+    clustering needs a realistic corpus to have any signal at all, which is
+    why this fixture is 40 notes and not 8.
+    """
+    subjects = {
+        "xfs": "xfs allocator agno bitmap extent inode",
+        "unit": "systemd socket activation dependency ordering",
+        "quota": "quota weekly bucket metered credit billing",
+        "hooks": "pretooluse hook settings dispatch matcher",
+    }
+    for subject, vocab in subjects.items():
+        for i in range(10):
+            text = f"{vocab} detail{subject}{i}"
+            write_memory(memory_dir, f"{subject}-case{i}", description=text, body=text)
+
+    plan = compile_mod.compaction_plan(memory_dir)
+    topic_groups = [g for g in plan["groups"] if g["kind"] == "topic"]
+    assert topic_groups, "a four-subject store must yield topic groups"
+    for g in topic_groups:
+        assert len({n.split("-case")[0] for n in g["names"]}) == 1, \
+            f"subjects must not be mixed: {g['names']}"
+
+
+def test_plan_pools_unclusterable_notes_into_assorted_groups(memory_dir):
+    # Nothing here shares vocabulary, so nothing clusters. Every note must
+    # still be dispatched: refusing to compile the awkward ones is exactly how
+    # a backlog acquires a floor it can never get under.
+    subjects = ["quantum", "asparagus", "bicycle", "tungsten", "monsoon"]
+    for s in subjects:
+        write_memory(memory_dir, f"note-{s}", description=s, body=s)
+    plan = compile_mod.compaction_plan(memory_dir)
+    assert sorted(plan_names(plan)) == sorted(f"note-{s}" for s in subjects)
+    assert all(g["kind"] == "assorted" for g in plan["groups"])
+
+
+def test_plan_respects_group_size(memory_dir):
+    body = "identical shared vocabulary across every single one of these notes"
+    for i in range(30):
+        write_memory(memory_dir, f"note{i}", description=body, body=body)
+    plan = compile_mod.compaction_plan(memory_dir, size=5)
+    assert plan["group_size"] == 5
+    assert all(g["size"] <= 5 for g in plan["groups"])
+    assert len(plan_names(plan)) == 30
+
+
+def test_plan_seed_addressing_returns_one_group(memory_dir):
+    for i in range(10):
+        write_memory(memory_dir, f"note{i}", body=f"body {i}")
+    full = compile_mod.compaction_plan(memory_dir)
+    seed = full["groups"][0]["seed"]
+    one = compile_mod.compaction_plan(memory_dir, seed=seed)
+    assert one["status"] == "ok"
+    assert len(one["groups"]) == 1
+    assert one["groups"][0]["names"] == full["groups"][0]["names"]
+    assert one["group_count"] == full["group_count"]
+
+
+def test_plan_reports_done_for_an_already_compiled_seed(memory_dir):
+    """The agent must be told to stop, not to go find other work: picking a
+    different group is how two agents end up on the same notes."""
+    write_memory(memory_dir, "note0")
+    plan = compile_mod.compaction_plan(memory_dir, seed="never-existed")
+    assert plan["status"] == "done"
+    assert plan["groups"] == []
+    assert "Do NOT pick a different group" in plan["how"]
+
+
+def test_plan_on_an_empty_backlog(memory_dir):
+    write_memory(memory_dir, "folded")
+    write_memory(memory_dir, "compiled-prior", body="[[folded]]")
+    plan = compile_mod.compaction_plan(memory_dir)
+    assert plan["backlog"] == 0
+    assert plan["groups"] == []
+    assert plan["group_count"] == 0
+
+
+def test_plan_size_and_wave_env_overrides(monkeypatch):
+    monkeypatch.delenv("CCMEMORY_COMPILE_GROUP_SIZE", raising=False)
+    monkeypatch.delenv("CCMEMORY_COMPILE_WAVE", raising=False)
+    assert compile_mod.plan_group_size() == compile_mod.DEFAULT_GROUP_SIZE
+    assert compile_mod.plan_wave_size() == compile_mod.DEFAULT_WAVE
+    monkeypatch.setenv("CCMEMORY_COMPILE_GROUP_SIZE", "4")
+    monkeypatch.setenv("CCMEMORY_COMPILE_WAVE", "2")
+    assert compile_mod.plan_group_size() == 4
+    assert compile_mod.plan_wave_size() == 2
+    monkeypatch.setenv("CCMEMORY_COMPILE_GROUP_SIZE", "garbage")
+    assert compile_mod.plan_group_size() == compile_mod.DEFAULT_GROUP_SIZE

@@ -63,15 +63,30 @@ default listing changes.
 
 `path` was 43% of the payload and unusable — `memory_get` keys on name.
 
-### What is never withheld
+### What gets first claim
 
-`Store.ALWAYS_LIST_TYPES` (`user`, `feedback`, `reference`) plus untyped
-memories are never folded and never budget-trimmed — one predicate,
-`Store._is_always_listed`, governs both. These carry behavior, conventions,
-preferences and durable facts, and the PreToolUse auto-injection only fires on
-a file Read, so nothing else surfaces them. On the mxfs store that is 90
-entries out of 1,695: keeping all of them always is affordable, and it is
-precisely what the mandatory session-start call exists for.
+`Store.ALWAYS_LIST_TYPES` (`user`, `feedback`) plus untyped memories are spent
+first, before articles and before raw notes — one predicate,
+`Store._is_always_listed`, governs the priority. These carry behavior,
+conventions and preferences, and the PreToolUse auto-injection only fires on a
+file Read, so nothing else surfaces them.
+
+First claim is not exemption. The tier is trimmable like any other (that is
+what makes the budget a budget), and `counts["load_bearing_withheld"]` reports
+what did not fit. Two things keep that number at zero in practice:
+
+- **A filtered listing gets the whole budget.** `memory_list(type="feedback")`
+  skips the tier split entirely — the shares ration a mixed listing and have
+  nothing to ration in a homogeneous one. Without that the filtered call was
+  still capped at tier 1's 25%, which made the escape hatch a no-op: 34 of 56
+  feedback memories withheld twice in a row on a 331-memory store.
+- **They compact.** Until 0.20.0 they were outside `COMPILABLE_TYPES`, so
+  nothing could ever retire one and every long-lived project eventually
+  overflowed the tier permanently. They now fold like anything else, but only
+  into an article that is itself always-listed (`article_type: feedback`) —
+  `Store.folded_names` will not fold a behavior note into a `project` article,
+  because that swaps an entry with first claim for a representative the budget
+  may drop.
 
 Truncation is never silent. `list_all` returns explicit
 `total` / `shown` / `folded` / `withheld` counts, and `mcp_server._list_note`
@@ -86,7 +101,8 @@ everything older than itself. On the mxfs store it reported **249** while
 than the newest article but had never actually been folded into one, so they
 were invisible to the nudge permanently.
 
-It now counts uncited memories from `mem_edges`. This is exact, and it still
+It now counts unfolded memories from `mem_edges` — cited, and cited by an
+article that can represent the note in the listing. This is exact, and it still
 quiets down after compaction, because citing an input is what retires it.
 `_select()` prefers never-cited candidates for the same reason: recompiling an
 already-folded note adds an article without retiring anything, which is how
@@ -104,7 +120,7 @@ as mandatory.
 | Env var | Default | Effect |
 |---|---|---|
 | `CCMEMORY_LIST_TOKEN_BUDGET` | 6000 | Per-call `memory_list` token ceiling; 0 = unbounded |
-| `CCMEMORY_COMPILE_THRESHOLD` | 20 | Uncited count at which the in-band COMPACTION DUE directive appears |
+| `CCMEMORY_COMPILE_THRESHOLD` | 20 | Unfolded count at which the in-band backlog line appears (a count, not an instruction to compact) |
 
 `memory_stats` reports `list_tokens_actual`, `list_tokens_unbounded`,
 `folded` and `list_counts`, so listing pressure is measurable before it hurts.

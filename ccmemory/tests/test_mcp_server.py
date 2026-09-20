@@ -116,29 +116,30 @@ def test_budget_truncation_is_never_silent(memory_dir, monkeypatch):
     assert "token budget" in payload["note"]
 
 
-def test_note_carries_compaction_directive_in_band(memory_dir, monkeypatch):
-    # The SessionStart reminder gets ignored; the payload the model already
-    # reads is where the ask has to live.
+def test_note_reports_backlog_without_commanding_the_work(memory_dir, monkeypatch):
+    # The count rides back in-band because the model already reads this payload.
+    # The ASK must not: memory_list is the mandatory first call of the session,
+    # so a dispatch instruction here arrives before the user's first message,
+    # with no task to run the agents alongside. Dispatch-then-block was the only
+    # behavior it could produce, and it spent the opening turn on housekeeping.
     monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
     for i in range(5):
         write_memory(memory_dir, f"note{i}")
     payload = call_json("memory_list")
-    assert "COMPACTION DUE" in payload["note"]
-    # The ask must be a background dispatch, not "do it yourself now". Asking
-    # the session to do the work inline is what left 29 of 30 project memory
-    # dirs at zero compiled articles.
-    assert "memory-compactor" in payload["note"]
-    assert "Do NOT stop" in payload["note"]
+    assert "Compaction backlog: 5" in payload["note"]
+    assert "NOT a task" in payload["note"]
+    assert "memory-compactor" not in payload["note"]
+    assert "Agent(" not in payload["note"]
 
 
-def test_no_compaction_directive_once_cited(memory_dir, monkeypatch):
+def test_no_backlog_report_once_cited(memory_dir, monkeypatch):
     monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
     for i in range(5):
         write_memory(memory_dir, f"note{i}")
     write_memory(memory_dir, "compiled-topic",
                  body=" ".join(f"[[note{i}]]" for i in range(5)))
     payload = call_json("memory_list")
-    assert "COMPACTION DUE" not in payload["note"]
+    assert "Compaction backlog" not in payload["note"]
 
 
 def test_type_filter_still_works(memory_dir):
@@ -161,3 +162,30 @@ def test_stats_reports_listing_pressure(memory_dir):
 def test_empty_store_lists_cleanly(memory_dir):
     payload = call_json("memory_list")
     assert payload["total"] == 0 and payload["memories"] == []
+
+
+def test_compaction_plan_tool_returns_disjoint_groups(memory_dir):
+    for i in range(15):
+        write_memory(memory_dir, f"note{i}", body=f"unrelated body {i}")
+    plan = call_json("memory_compaction_plan")
+    assert plan["backlog"] == 15
+    names = [n for g in plan["groups"] for n in g["names"]]
+    assert sorted(names) == sorted(f"note{i}" for i in range(15))
+    assert len(names) == len(set(names))
+    assert plan["wave"] >= 1
+
+
+def test_compaction_plan_tool_fetches_one_group_by_seed(memory_dir):
+    for i in range(15):
+        write_memory(memory_dir, f"note{i}", body=f"unrelated body {i}")
+    seed = call_json("memory_compaction_plan")["groups"][0]["seed"]
+    one = call_json("memory_compaction_plan", seed=seed)
+    assert len(one["groups"]) == 1
+    assert one["groups"][0]["seed"] == seed
+
+
+def test_compaction_plan_tool_says_done_for_a_compiled_seed(memory_dir):
+    write_memory(memory_dir, "note0")
+    plan = call_json("memory_compaction_plan", seed="already-gone")
+    assert plan["status"] == "done"
+    assert plan["groups"] == []

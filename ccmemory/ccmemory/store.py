@@ -200,20 +200,70 @@ class Store:
         else:
             self.db_path = self.memory_dir / INDEX_DB_NAME
             self._drop_legacy_index()
-        # isolation_level=None (autocommit) so hooks/claim_injections can issue
-        # explicit BEGIN IMMEDIATE for lock-free-until-needed writer semantics
-        # (see _write_txn). Every write path below opts into a transaction
-        # explicitly; nothing relies on sqlite3's implicit-transaction default.
-        self.db = sqlite3.connect(self.db_path, isolation_level=None)
+        rebuilt = False
+        try:
+            self.db = self._open()
+        except sqlite3.OperationalError:
+            # A WAL-mode index on a filesystem that cannot host one cannot be
+            # opened AT ALL — not even read-only — because WAL needs a shared
+            # -shm mapping. NFS has no such mapping, so sqlite answers "unable
+            # to open database file" for every statement, and a store written
+            # on one host is unreadable from another that mounts the same tree
+            # over NFS. Observed on /src (nfs from 192.168.1.4): every ccmemory
+            # tool in every project on that volume failed, the hooks failed
+            # open, and the session read as one with no memories rather than
+            # one whose memory was unreachable.
+            #
+            # The index is derived from the .md files, so the repair is to
+            # throw it away and rebuild. Nothing is lost that the markdown
+            # does not already hold.
+            self._discard_index()
+            self.db = self._open()
+            rebuilt = True
         self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA busy_timeout = 3000")
-        self.db.execute("PRAGMA synchronous = NORMAL")
-        # journal_mode=WAL is persisted in the file itself; only touch it if
-        # it isn't already set, since changing it requires an exclusive lock
-        # that a plain read of the current mode does not.
-        if self.db.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
-            self.db.execute("PRAGMA journal_mode = WAL")
         self.db.executescript(SCHEMA)
+        if rebuilt:
+            self.reindex()
+
+    def _open(self) -> sqlite3.Connection:
+        """Connect, and settle on a journal mode this filesystem supports.
+
+        isolation_level=None (autocommit) so hooks/claim_injections can issue
+        explicit BEGIN IMMEDIATE for lock-free-until-needed writer semantics
+        (see _write_txn). Every write path opts into a transaction explicitly;
+        nothing relies on sqlite3's implicit-transaction default.
+
+        WAL is preferred and TRUNCATE is the fallback. Writers block readers
+        under TRUNCATE, which busy_timeout absorbs; an index that cannot be
+        opened has no concurrency story at all.
+        """
+        db = sqlite3.connect(self.db_path, isolation_level=None)
+        db.execute("PRAGMA busy_timeout = 3000")
+        # First statement that actually has to open the file — a failed WAL
+        # mapping surfaces here, not at connect(), which is lazy.
+        db.execute("PRAGMA synchronous = NORMAL")
+        # journal_mode is persisted in the file itself; only touch it if it is
+        # not already what we want, since changing it takes an exclusive lock
+        # that reading it does not.
+        mode = db.execute("PRAGMA journal_mode").fetchone()[0]
+        if mode != "wal":
+            try:
+                mode = db.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+            except sqlite3.OperationalError:
+                mode = ""
+            if mode != "wal":
+                db.execute("PRAGMA journal_mode = TRUNCATE")
+        return db
+
+    def _discard_index(self):
+        """Delete the derived index and its sidecars. Best-effort."""
+        for suffix in ("", "-journal", "-wal", "-shm"):
+            for p in (self.db_path.with_name(self.db_path.name + suffix),
+                      self.db_path.with_name("._" + self.db_path.name + suffix)):
+                try:
+                    p.unlink()
+                except (FileNotFoundError, OSError):
+                    pass
 
     def close(self):
         self.db.close()
@@ -383,19 +433,38 @@ class Store:
         wikilinks recorded in ``mem_edges`` are the retirement record we
         already have; this reads it.
 
-        ``ALWAYS_LIST_TYPES`` and untyped memories are NEVER folded, whatever
-        cites them — the same rule that gives them first claim on the budget.
-        They carry behavior, conventions and preferences: the exact thing the
-        session-start listing exists to surface, and the exact thing no other
-        retrieval path reaches. There are few enough of them that keeping all
-        of them costs nothing — 20 entries on mxfs's 1,848-memory store.
+        ``ALWAYS_LIST_TYPES`` and untyped memories retire only into an article
+        that is ITSELF always-listed. They carry behavior, conventions and
+        preferences — the thing the session-start listing exists to surface and
+        the thing no other retrieval path reaches — so folding one into a
+        tier-2 ``compiled-`` article would trade an entry that is listed first
+        for a representative that can be budget-trimmed. That is strictly worse
+        than not folding it at all.
 
-        Keep that tuple SMALL. Every type listed there is a type nothing can
-        ever retire; ``reference`` sat in it until 0.19.0 and grew to 160
-        permanently-pinned entries.
+        They were never folded at all until 0.20.0, and that had no drain: with
+        ``user``/``feedback`` outside COMPILABLE_TYPES, nothing in the system
+        could ever retire one. Every project crossed the tier's budget share
+        eventually and then reported ``load_bearing_withheld`` permanently — 34
+        of 56 feedback memories withheld on a 331-memory store, and the count
+        only ever goes up.
         """
-        return {n for n in self.cited_names()
-                if not self._is_always_listed(self._row_type(n))}
+        rows = self.db.execute(
+            """
+            SELECT DISTINCT e.dst_name, c.type AS article_type, d.type AS note_type
+            FROM mem_edges e
+            JOIN mem c ON c.name = e.src_name
+            JOIN mem d ON d.name = e.dst_name
+            WHERE c.name LIKE 'compiled-%'
+              AND d.name NOT LIKE 'compiled-%'
+            """
+        ).fetchall()
+        folded = set()
+        for r in rows:
+            if self._is_always_listed(r["note_type"]) and not self._is_always_listed(
+                    r["article_type"]):
+                continue
+            folded.add(r["dst_name"])
+        return folded
 
     def cited_names(self) -> set[str]:
         """Every existing raw memory cited by a ``compiled-`` article.
@@ -439,8 +508,11 @@ class Store:
     #: the pinned set had reached 160 entries / ~14.9k tokens and had crowded
     #: every project note out of the listing entirely.
     #:
-    #: Kept complementary to compile.COMPILABLE_TYPES — every type must be one
-    #: or the other, or memories land in a backlog nothing can drain.
+    #: These are now compilable like any other type (compile.COMPILABLE_TYPES
+    #: covers all four), but only into an article of an always-listed type —
+    #: ``folded_names`` enforces that. Membership here decides two things and
+    #: no longer decides retirement: first claim on the listing budget, and
+    #: which articles are allowed to represent the memory.
     ALWAYS_LIST_TYPES = ("user", "feedback")
 
     #: Cumulative share of the listing budget available after each tier fills.
@@ -563,7 +635,16 @@ class Store:
         shown: list[dict] = []
         spent = 0
         for tier, share in zip(tiers, self.LIST_TIER_SHARES):
-            cap = int(token_budget * share) if token_budget else 0
+            # A filtered listing is homogeneous, so the tier split has nothing
+            # left to ration and the whole budget belongs to the one tier that
+            # can be non-empty. Without this it could not: the shares are
+            # cumulative and donate DOWNWARD only, so an empty tier 2 and 3
+            # strand 75% of the budget above a feedback-only listing. That is
+            # the exact call the load_bearing_withheld warning tells the caller
+            # to make, and it returned the same truncated set as the unfiltered
+            # listing it was supposed to repair — 34 of 56 feedback memories
+            # still withheld on a 331-memory store.
+            cap = int(token_budget * (1.0 if type_filter else share)) if token_budget else 0
             for e in tier:
                 if limit and len(shown) >= limit:
                     break
