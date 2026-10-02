@@ -31,6 +31,10 @@ Follow the project-awareness skill protocol. Steps:
 6. **Install commands**: Copy command templates to `.claude/commands/project/`.
 
 7. **Report**: What was documented, token count of map, gaps needing human input.
+   End the report by telling the user plainly: **restart Claude for the changes to take
+   effect.** CLAUDE.md is read once, at session start — this session still runs on the
+   version it started with and does not have the [AWARENESS] section or routing table
+   it just wrote.
 
 CRITICAL: Always ask the user to review invariants. You will miss some. The user knows
 things about the system that the code doesn't express.

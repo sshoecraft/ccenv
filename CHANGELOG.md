@@ -2,6 +2,18 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-10-02 — v0.37.1
+
+**ccproject: the awareness bootstrap tells the user to restart Claude.**
+
+The bootstrap writes the project's CLAUDE.md, but CLAUDE.md is read once, at
+session start. The session that ran the bootstrap kept running on the old file:
+no [AWARENESS] section, no routing table. It still reported the work as done,
+so nothing indicated that the new protocol was not in effect until the next
+session. The final report in both the skill's bootstrap protocol and
+`/project:bootstrap-awareness` now ends by saying that Claude must be restarted
+for the changes to take effect.
+
 ## 2026-09-20 — v0.37.0
 
 **ccmemory v0.20.0: withheld corrections are recoverable, and session start

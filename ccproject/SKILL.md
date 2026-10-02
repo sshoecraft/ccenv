@@ -154,6 +154,10 @@ Tell the user:
 - Any gaps or areas that need human input (invariants you couldn't determine
   from code alone — these ALWAYS exist, ask the user)
 - Suggest the user review the invariants section especially
+- **Claude must be restarted for the changes to take effect.** Say this last, and
+  plainly. CLAUDE.md is read once, at session start, so the session that ran the
+  bootstrap still runs on the CLAUDE.md it started with — it does not have the
+  [AWARENESS] section or the routing table it just wrote, and will not follow them.
 
 ## Session Protocol (Every Session)
 
