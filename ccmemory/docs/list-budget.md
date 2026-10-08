@@ -92,6 +92,23 @@ Truncation is never silent. `list_all` returns explicit
 `total` / `shown` / `folded` / `withheld` counts, and `mcp_server._list_note`
 states what was withheld and how to reach it.
 
+### Who an overflow is reported to
+
+A non-zero `load_bearing_withheld` is the session's problem, not the user's.
+The user's only lever is an env var. The session can fix it directly by
+compacting behavior notes into always-listed articles, which is a background
+dispatch. So `_list_note` routes on `count_backlog`'s `behavior_backlog`:
+
+- **Uncompiled behavior notes remain.** The note tells the session to recover
+  the entries with a type-filtered listing, to make sure the behavior groups
+  (which `compaction_plan` lists first) go in the first compactor wave, and
+  not to report the overflow. The dispatch is requested even under the
+  threshold, because the threshold paces routine compaction and a withheld
+  correction is not routine. The cooldown still applies.
+- **Nothing is left to compact.** Every behavior entry is already a compiled
+  article, so only a bigger budget makes room. That is the one case where the
+  note says to tell the user, and it names the current budget.
+
 ## Backlog counting
 
 `count_backlog` used to define the backlog as raw memories *newer than the
@@ -119,7 +136,7 @@ as mandatory.
 
 | Env var | Default | Effect |
 |---|---|---|
-| `CCMEMORY_LIST_TOKEN_BUDGET` | 6000 | Per-call `memory_list` token ceiling; 0 = unbounded |
+| `CCMEMORY_LIST_TOKEN_BUDGET` | 16384 | Per-call `memory_list` token ceiling; 0 = unbounded |
 | `CCMEMORY_COMPILE_THRESHOLD` | 20 | Unfolded count at which the in-band backlog line appears (a count, not an instruction to compact) |
 
 `memory_stats` reports `list_tokens_actual`, `list_tokens_unbounded`,

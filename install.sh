@@ -1090,9 +1090,9 @@ if should_install ccmemory; then
     # "alwaysLoad": true on this entry. See strip_always_load for why it goes.
     strip_always_load ccmemory
 
-    # Install the compile-memories skill. Compaction runs in the interactive
-    # session (no claude -p / no metered Agent-SDK credit); the skill carries
-    # the procedure and the SessionStart hook nudges when the backlog is high.
+    # Install the compile-memories skill: the inline compaction procedure, for
+    # when the background memory-compactor agent is unavailable or the user
+    # asks for compaction in-session.
     CCMEM_SKILL_DIR="$HOME/.claude/skills/compile-memories"
     mkdir -p "$CCMEM_SKILL_DIR"
     cp "$SCRIPT_DIR/ccmemory/skills/compile-memories/SKILL.md" "$CCMEM_SKILL_DIR/SKILL.md"

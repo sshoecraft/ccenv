@@ -374,23 +374,22 @@ def test_handler_dispatch_fail_open_on_unknown():
     assert rc == 0
 
 
-def test_compaction_nudge_offers_but_does_not_order(memory_dir, monkeypatch):
-    """The SessionStart nudge reports the backlog and holds the fan-out until
-    the user asks for it. It fires before the first user message, so 'dispatch
-    these and carry on' had nothing to carry on with: the session launched one
-    agent per group and then waited on them, spending the opening turn on
-    housekeeping. The Agent call stays in the text as the recipe for when the
-    user does ask — it must not read as an instruction for right now."""
+def test_compaction_nudge_dispatches_in_background(memory_dir, monkeypatch):
+    """The SessionStart nudge asks for the background dispatch and for the
+    session to carry on without waiting. Holding the dispatch until the user
+    asked left compaction to happen only when someone remembered to ask, and
+    the backlog grew until behavior notes overflowed the listing budget."""
     from ccmemory import hooks
     monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
     for i in range(5):
         write_memory(memory_dir, f"note{i}")
     msg = hooks._compaction_nudge(memory_dir)
     assert "Memory compaction available" in msg
-    assert "status line, not a task" in msg
-    assert "Do not start compaction now and do not dispatch agents for it" in msg
-    assert "When the user asks for it" in msg
+    assert "Do not stop what you are doing" in msg
+    assert "Do not wait on the agents" in msg
+    assert "once per session" in msg
     assert 'subagent_type="memory-compactor"' in msg
+    assert "not a task" not in msg
 
 
 def test_compaction_nudge_quiet_under_threshold(memory_dir, monkeypatch):

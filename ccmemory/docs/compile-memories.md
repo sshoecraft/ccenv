@@ -36,11 +36,11 @@ Three pieces, no LLM subprocess:
     in a `compiled/` subdirectory.
 - **`ccmemory/hooks.py` → `session_handler`** — appends a nudge to the
   SessionStart `additionalContext` when `backlog >= threshold`, naming the plan's
-  group seeds and the fan-out recipe **for when the user asks for it**. It does
-  not ask for the work: it arrives before the first user message, so "dispatch
-  these and carry on" has nothing to carry on with and the session ends up
-  waiting on agents instead of answering. Fail-open (`_compaction_nudge`
-  swallows errors → no nudge). Under threshold it injects nothing.
+  group seeds and asking the session to dispatch one background
+  `memory-compactor` per group and carry straight on, without waiting. The
+  `memory_list` note carries the same request for sessions the hook did not
+  reach. Fail-open (`_compaction_nudge` swallows errors → no nudge). Under
+  threshold or inside the cooldown it injects nothing.
 - **`agents/memory-compactor.md`** (top-level ccenv, installed to
   `~/.claude/agents/`) — the background worker. Takes a seed slug, fetches its
   own group via `memory_compaction_plan`, compiles that group and nothing else.
@@ -89,18 +89,20 @@ rarity, so on a small store nothing discriminates and every group comes out
 A skill with no trigger never gets invoked, so compaction has two triggers that
 both reference the same threshold:
 
-1. **Active push** — the SessionStart hook nudge, fired off the live backlog count.
+1. **Active push** — the SessionStart nudge and the `memory_list` note, fired
+   off the live backlog count, which dispatch the background compactors.
 2. **Passive trigger** — the skill's own description lists trigger phrases so it
-   auto-activates when the user asks or the nudge appears.
+   activates when the user asks for compaction in-session.
 
 ## Why no `claude -p`
 
-The original `compile.py` shelled out to a headless `claude -p` subprocess.
-Anthropic is moving the Agent SDK / `claude -p` / Claude Code GitHub Actions off
-subscription usage onto a separate metered monthly credit pool (full API rates,
-no rollover), so every compile run would burn that credit. Compaction now runs in
-the live INTERACTIVE session (unaffected by the change) — zero `claude -p`, zero
-metered credit, full LLM-quality synthesis.
+The original `compile.py` shelled out to a headless `claude -p` subprocess. It
+was removed on the premise that `claude -p` was moving to a separate API-rate
+credit pool; that change was paused before it took effect, and `claude -p`
+draws from subscription usage limits. The subprocess is still not needed: the
+session that sees the backlog is already a model, and a background Agent-tool
+subagent does the synthesis without a second process, a second CLI
+invocation, or any wait in the caller.
 
 ## Why count the backlog, not the total
 

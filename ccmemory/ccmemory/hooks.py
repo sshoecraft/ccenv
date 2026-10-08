@@ -193,7 +193,7 @@ repeat mistakes the user already corrected.
 The listing is **bounded**, and what it withholds is stated in the `note`
 field of its own response — read that field, don't skip it:
 
-- The token budget (`CCMEMORY_LIST_TOKEN_BUDGET`, default 6000) is spent in
+- The token budget (`CCMEMORY_LIST_TOKEN_BUDGET`, default 16384) is spent in
   tiers, newest-first inside each: `user`/`feedback` first (behavior and
   corrections — nothing else surfaces these), then `compiled-<topic>`
   articles, then raw `project`/`reference` notes. An underspending tier
@@ -208,13 +208,17 @@ field of its own response — read that field, don't skip it:
 - `load_bearing_withheld` counts `user`/`feedback` memories that did not fit
   even in the first tier. They record behavior and corrections and have no
   topic to search for, so you are missing instructions you cannot know to ask
-  about. If it is non-zero, say so and call `memory_list(type="feedback")` —
-  a filtered listing gives that one type the entire budget rather than the
-  first tier's share, so it returns what the mixed listing could not hold.
+  about. If it is non-zero, call `memory_list(type="feedback")` (and
+  `type="user"`) — a filtered listing gives that one type the entire budget
+  rather than the first tier's share, so it returns what the mixed listing
+  could not hold. Do not report the overflow to the user: compaction is what
+  makes room, and the note says how. Tell the user only when the note says
+  nothing is left to compact.
 
-The note also reports a compaction backlog when there is one. That is a status
-count, not a task: do not start compaction and do not dispatch agents for it
-unless the user asks. It is their turn to spend, not yours.
+The note also reports a compaction backlog when there is one. When it does,
+dispatch the `memory-compactor` agents it names in the background, once per
+session, and carry straight on with the user's request — do not wait on them
+and do not do the compaction inline.
 
 After that initial memory_list, use the decision rules below for the
 rest of the session.
@@ -341,25 +345,21 @@ def _compaction_nudge(memory_dir: Path) -> str:
             f"\n\n---\n📦 Memory compaction available: {b['backlog']} of "
             f"{b['total_raw']} raw memories have never been folded into a "
             f"`compiled-` article (threshold {b['threshold']}).\n\n"
-            f"**This is a status line, not a task.** Do not start compaction now "
-            f"and do not dispatch agents for it. It arrives before the user's "
-            f"first message, so there is no task to run it alongside — firing the "
-            f"agents here means waiting on them, and the user's opening turn goes "
-            f"to housekeeping they did not ask for. Say one line about it if it is "
-            f"worth raising at all, then do what they actually asked.\n\n"
-            f"When the user asks for it: the backlog is already partitioned into "
-            f"{plan['group_count']} disjoint groups, which share no notes and are "
-            f"safe to run concurrently — one background agent per group, "
-            f"{plan['wave']} at a time, launching the next batch as they "
-            f"finish:\n\n"
+            f"**Do not stop what you are doing.** With your first tool calls, "
+            f"dispatch one background agent per group, then carry straight on "
+            f"with the user's request. Do not wait on the agents and do not "
+            f"report on them unless one fails. The backlog is already "
+            f"partitioned into {plan['group_count']} disjoint groups, which share "
+            f"no notes and are safe to run concurrently — {plan['wave']} at a "
+            f"time, launching the next batch as they finish:\n\n"
             f"    {compile_mod.AGENT_CALL}\n\n"
             f"Group seeds: {seeds}\n\n"
-            f"Each agent runs on sonnet, fetches its own group via "
-            f"`memory_compaction_plan`, and the memory bodies it reads never enter "
-            f"your context; the `compile-memories` skill does the same work inline "
-            f"instead. Compacting shrinks every future `memory_list`: citing a note "
-            f"in a compiled article retires it from the listing while leaving it "
-            f"searchable."
+            f"Dispatch once per session; the `memory_list` note repeats this "
+            f"backlog and is not a second request. Each agent runs on sonnet, "
+            f"fetches its own group via `memory_compaction_plan`, and the memory "
+            f"bodies it reads never enter your context. Compacting shrinks every "
+            f"future `memory_list`: citing a note in a compiled article retires "
+            f"it from the listing while leaving it searchable."
         )
     except Exception:
         return ""

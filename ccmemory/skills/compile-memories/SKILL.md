@@ -2,23 +2,20 @@
 name: compile-memories
 description: >
   Compact a project's raw ccmemory notes into a dense, deduplicated, cross-referenced
-  `compiled-<topic>` knowledge article — running entirely in THIS interactive session
-  (no `claude -p`, no metered Agent-SDK credit). Use this skill whenever: a SessionStart
-  nudge reports uncompiled memories over threshold ("📦 Memory compaction available"); the
-  user says "compile memories", "compact memory", "the memories are cluttered/piling up",
-  "densify my notes", "consolidate memory", "clean up ccmemory"; `ccmemory compile` /
-  `memory_stats` shows a large backlog; or you notice many overlapping raw memories on one
-  topic. This is OCCASIONAL maintenance — do not run it unprompted on every session; run it
-  when a trigger above fires. It replaces the old `ccmemory compile` `claude -p` path, which
-  was removed because headless `claude -p` now bills against a separate metered credit pool.
+  `compiled-<topic>` knowledge article — running inline in THIS session. Normally the
+  "📦 Memory compaction available" nudge is handled by dispatching background
+  `memory-compactor` agents, not by this skill. Use this skill when: the user says "compile
+  memories", "compact memory", "the memories are cluttered/piling up", "densify my notes",
+  "consolidate memory", "clean up ccmemory" and wants it done in this session; or the
+  `memory-compactor` agent is unavailable when a nudge fires. Do not run it unprompted on
+  every session.
 ---
 
-# Compile memories (interactive, zero-cost compaction)
+# Compile memories (inline compaction)
 
 Raw per-session ccmemory notes accumulate faster than they get curated. This skill folds a
 batch of related raw memories into ONE dense article so the index stays useful. It runs in
-the current interactive session using the ccmemory MCP tools — it never shells out to
-`claude -p`, so it costs nothing beyond normal subscription usage.
+the current session using the ccmemory MCP tools, so it is ordinary session usage.
 
 ## This is the fallback path
 
@@ -44,9 +41,9 @@ the same notes.
 
 ## When to run it
 
-Run when a trigger fires (a SessionStart "📦 Memory compaction available" nudge, the user
-asking, or an obviously large/overlapping backlog). Do NOT run it speculatively every
-session — compaction is deliberate maintenance, not a background habit.
+Run when the user asks for inline compaction, or when a "📦 Memory compaction available"
+nudge fires and the `memory-compactor` agent is not available. Do NOT run it speculatively
+every session.
 
 To inspect the backlog and candidate inputs first (optional): `ccmemory compile` (and
 `ccmemory compile --topic "<topic>"`). That command no longer calls any LLM — it just

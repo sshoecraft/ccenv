@@ -114,25 +114,24 @@ ccloop picks a mode from whether it's attached to a terminal:
   statusline cache and, if it crosses the hard threshold, auto-relays to a
   fresh session *before* you hit the context wall.
 - **Headless** (`claude -p`, parsed output, fully autonomous): for
-  overnight / unattended runs. **Requires explicit opt-in.** Headless usage
-  bills against the metered Agent SDK credit at full API rates (not your
-  subscription — per Anthropic's June 2026 billing change), so ccloop will
-  **never** select it implicitly. You must pass **both** `--headless` and
-  `--accept-api-cost`.
+  overnight / unattended runs. Selected only by `--headless`. `claude -p`
+  also draws on your subscription's usage limits.
 
 > **No silent fallback.** If ccloop is launched with no TTY (piped,
 > redirected, cron, `nohup`, backgrounded) and you did *not* pass
-> `--headless --accept-api-cost`, it **errors out** instead of quietly
-> running metered `claude -p`. This is deliberate: an unattended job should
-> never start spending API credit without you having said so.
+> `--headless`, it **errors out** instead of picking a mode for you: the TUI
+> cannot run without a terminal, and an unattended job should say which mode
+> it wants.
 
 ```sh
-ccloop "" "task"                                   # in a terminal → interactive (subscription)
+ccloop "" "task"                                   # in a terminal → interactive
 ccloop -i "" "task"                                # force interactive
-ccloop --headless --accept-api-cost "" "task"      # autonomous, at API cost (both flags required)
-ccloop --headless --accept-api-cost "" "task" >run.log 2>&1 &   # unattended overnight run
-ccloop "" "task" >run.log 2>&1 &                   # no TTY, not authorized → errors out
+ccloop --headless "" "task"                        # autonomous
+ccloop --headless "" "task" >run.log 2>&1 &        # unattended overnight run
+ccloop "" "task" >run.log 2>&1 &                   # no TTY, no --headless → errors out
 ```
+
+`--accept-api-cost` is still accepted and has no effect.
 
 In **headless** mode, each session's output streams live and Ctrl-C
 terminates the whole session process group and stops the loop. In

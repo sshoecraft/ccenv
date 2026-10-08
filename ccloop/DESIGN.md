@@ -127,22 +127,20 @@ surfaces as the `Prompt is too long` guard rather than an argv error.
 #### Modes: headless vs interactive
 
 The mode is resolved in `cli._resolve_interactive()`. Headless `claude -p`
-is **never** selected implicitly — it bills against the metered Agent SDK
-credit at API rates (Anthropic's June 2026 billing change moved headless /
-Agent SDK usage off the subscription), so it demands an explicit, acknowledged
-opt-in. Resolution order:
+is selected only by `--headless`; both modes draw on the subscription's usage
+limits. Resolution order:
 
 1. `--interactive`/`-i` + `--headless` together → usage error.
-2. `--headless` → requires `--accept-api-cost` too, else usage error. Both
-   present → headless.
+2. `--headless` → headless. `--accept-api-cost` is still accepted and ignored,
+   so older invocations keep working.
 3. `--interactive`/`-i` → interactive.
 4. Auto: a real TTY (`sys.stdin.isatty()` **and** `sys.stdout.isatty()`) →
    interactive. **No TTY → usage error**, never a silent headless fallback —
-   an unattended job must not start spending API credit unasked. Only
-   `cmd_run`/`cmd_resume` resolve the mode; `--list`/`--prune`/`install`/
-   `--help` work with no TTY.
+   the TUI cannot run without a terminal, and an unattended job should say
+   which mode it wants. Only `cmd_run`/`cmd_resume` resolve the mode;
+   `--list`/`--prune`/`install`/`--help` work with no TTY.
 
-- **Headless** (`--headless --accept-api-cost`): `claude -p --output-format
+- **Headless** (`--headless`): `claude -p --output-format
   stream-json --verbose`, stdout piped and parsed for live output, session in
   its own process group, SIGINT → killpg. Fully autonomous; the loop relays
   on each exit.

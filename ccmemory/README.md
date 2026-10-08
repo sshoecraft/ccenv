@@ -263,7 +263,7 @@ to re-enable regeneration.
         +-- ccmemory.installer           atomic settings.json updates (ccloop pattern)
         +-- ccmemory.hooks               session / stop / guard / inject handlers
         +-- ccmemory.mcp_server          memory_search / get / write / stats / regen_index
-        +-- ccmemory.compile             LLM knowledge compiler (claude -p)
+        +-- ccmemory.compile             backlog count + compaction plan (no LLM)
 ```
 
 ### Injection ledger (session-scoped Read-hook dedup + budget)

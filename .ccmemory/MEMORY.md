@@ -1,6 +1,7 @@
 ## feedback
 - [bump-top-level-bundle-version-not-just-subdir](bump-top-level-bundle-version-not-just-subdir.md) — ccenv: bump ONCE per session, before the first change — top-level bundle VERSION + CHANGELOG.md too, not just the component subdir.
 - [ccloop-cutoff-lowering-already-tried-and-lost](ccloop-cutoff-lowering-already-tried-and-lost.md) — Never propose lowering ccloop --cutoff. 500→145 lost to restart churn, and startup context (65k, ~75% CLI floor) can't be cut enough to change that.
+- [changelog-rationale-is-not-evidence](changelog-rationale-is-not-evidence.md) — Never repeat a CHANGELOG/doc rationale as fact. Two false ones (claude -p metered billing; compactor blocks session start) cost compaction for months.
 - [enforcement-hooks-that-check-file-written](enforcement-hooks-that-check-file-written.md) — A Stop hook that gates on "was the doc edited" is satisfiable by a no-op write. ccproject's awareness hooks removed in v0.33.0 — measured, not guesse…
 - [install-claude-md-component-owned](install-claude-md-component-owned.md) — Top-level install.sh owns only the BASE ~/.claude/CLAUDE.md (in a [CCENV MANAGED] marker region); each component owns/appends its own section.
 - [install-never-writes-to-source-tree](install-never-writes-to-source-tree.md) — No install.sh may write into the source tree — installs run as other users, or from someone else's git clone. Claude as steve can't see installs.

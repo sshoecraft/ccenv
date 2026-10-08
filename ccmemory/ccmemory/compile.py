@@ -8,14 +8,15 @@ memory-dir root alongside the raw notes). The raw inputs stay where they
 are — the compiled article is an additional, denser entry.
 
 This module used to shell out to ``claude -p`` (Claude Code headless mode).
-That path was removed: ``claude -p`` / the Agent SDK draws from a metered
-monthly credit pool (full API rates, no rollover) rather than the
-subscription, so every compile run cost real money. Compaction now runs in
-the live INTERACTIVE session via the ``compile-memories`` skill, which is
-unaffected by that billing change. This module no longer calls any LLM; it
-only (a) detects how big the uncompiled backlog is, so the SessionStart hook
-can nudge, and (b) selects + formats the candidate inputs and exposes the
-compiler prompt the skill uses.
+That path was removed on the premise that ``claude -p`` would move onto a
+metered API-rate credit pool. Anthropic paused that change on the day it was
+due and it never took effect: ``claude -p`` draws from the subscription's
+usage limits. The removal stands for a different reason — compaction is done
+by ``memory-compactor`` subagents dispatched in the background from the live
+session, which need no separate process at all. This module calls no LLM; it
+only (a) detects how big the uncompiled backlog is, so the nudge sites can ask
+for the dispatch, and (b) partitions the backlog into groups and exposes the
+compiler prompt the agents and the ``compile-memories`` skill use.
 
 ``COMPILER_PROMPT`` is the single source of truth for the synthesis rules —
 the ``compile-memories`` skill embeds the same text. Keep them in sync.
@@ -64,8 +65,8 @@ def group_pool(note_type: str | None) -> str:
     """The pool a raw note compacts within, from its own type."""
     return BEHAVIOR_POOL if Store._is_always_listed(note_type) else KNOWLEDGE_POOL
 
-# Default uncompiled-backlog count at/above which the SessionStart hook
-# suggests running the compile-memories skill. Matches the default
+# Default uncompiled-backlog count at/above which the nudge sites ask for the
+# background compactor dispatch. Matches the default
 # max_inputs batch size: "more raw notes than one compile pass folds in".
 DEFAULT_THRESHOLD = 20
 
@@ -200,11 +201,17 @@ def count_backlog(memory_dir: Path) -> dict[str, Any]:
         # not actually been retired and still needs a compile pass.
         cited = s.folded_names()
         placeholders = ",".join("?" * len(COMPILABLE_TYPES))
-        raw = {r["name"] for r in s.db.execute(
-            f"SELECT name FROM mem WHERE type IN ({placeholders}) "
+        raw = {r["name"]: r["type"] for r in s.db.execute(
+            f"SELECT name, type FROM mem WHERE type IN ({placeholders}) "
             "AND name NOT LIKE 'compiled-%'", COMPILABLE_TYPES)}
+    pending = set(raw) - cited
     return {
-        "backlog": len(raw - cited),
+        "backlog": len(pending),
+        # Uncompiled user/feedback notes. When the first listing tier
+        # overflows, these are the only notes whose compaction makes room in
+        # it; zero means compaction cannot help and the budget is too small.
+        "behavior_backlog": sum(
+            1 for n in pending if group_pool(raw[n]) == BEHAVIOR_POOL),
         "total_raw": len(raw),
         "has_compiled": newest is not None,
         "threshold": threshold(),
@@ -227,12 +234,15 @@ def cooldown_seconds() -> int:
     return env_int("CCMEMORY_COMPILE_COOLDOWN", DEFAULT_COOLDOWN_SECONDS, 0)
 
 
-def nudge_suppressed(b: dict[str, Any]) -> bool:
-    """True when a backlog dict should NOT produce a compaction nudge."""
-    if b["backlog"] < b["threshold"]:
-        return True
+def in_cooldown(b: dict[str, Any]) -> bool:
+    """True when a compiled article was written within the cooldown window."""
     since = b.get("since_compiled")
     return since is not None and since < cooldown_seconds()
+
+
+def nudge_suppressed(b: dict[str, Any]) -> bool:
+    """True when a backlog dict should NOT produce a compaction nudge."""
+    return b["backlog"] < b["threshold"] or in_cooldown(b)
 
 
 def _build_input(memories: list[dict]) -> str:
@@ -453,10 +463,10 @@ def compile_status(
 ) -> dict[str, Any]:
     """Report the compaction backlog and the candidate input batch — no LLM.
 
-    This is the non-metered replacement for the old ``claude -p`` run. It does
-    not produce an article; it shows what the ``compile-memories`` skill would
-    work on. Run that skill inside an interactive session to actually compile
-    (free — no ``claude -p``, no Agent-SDK credit burn).
+    This replaced the old ``claude -p`` run. It does not produce an article; it
+    shows what a compile pass would work on. The compaction itself runs inside
+    a Claude session, as background ``memory-compactor`` agents or the
+    ``compile-memories`` skill.
     """
     backlog = count_backlog(memory_dir)
     picks = _select(memory_dir, topic=topic, max_inputs=max_inputs)
@@ -468,6 +478,7 @@ def compile_status(
         "over_threshold": over,
         "candidate_count": len(picks),
         "candidate_names": [p["name"] for p in picks],
-        "how": "Run the compile-memories skill in an interactive Claude session to "
-               "compile these into a `compiled-<topic>` article (no claude -p / no metered credit).",
+        "how": "A Claude session compiles these into `compiled-<topic>` articles: it "
+               "dispatches memory-compactor agents when the backlog is over threshold, "
+               "or run the compile-memories skill to do it inline.",
     }

@@ -153,36 +153,36 @@ def test_interactive_flag_forces_true(monkeypatch):
     assert captured["task"] == "do a thing"
 
 
-def test_headless_without_accept_errors(monkeypatch, capsys):
-    # --headless alone must NOT run -p — it requires --accept-api-cost too.
+def test_headless_alone_forces_false(monkeypatch):
+    # --headless alone selects headless -p, even on a TTY.
     captured = _stub_run(monkeypatch)
     monkeypatch.setattr("sys.stdin", _FakeStream(True))
     monkeypatch.setattr("sys.stdout", _FakeStream(True))
-    assert cli.main(["--headless", "", "do a thing"]) == 2
-    assert "--accept-api-cost" in capsys.readouterr().err
-    assert "interactive" not in captured  # run never dispatched
+    assert cli.main(["--headless", "", "do a thing"]) == 0
+    assert captured["interactive"] is False
 
 
-def test_headless_with_accept_forces_false(monkeypatch):
+def test_headless_with_legacy_accept_flag_still_runs(monkeypatch):
+    # Existing invocations that pass --accept-api-cost keep working.
     captured = _stub_run(monkeypatch)
-    # Even on a TTY, the two flags together select headless -p.
     monkeypatch.setattr("sys.stdin", _FakeStream(True))
     monkeypatch.setattr("sys.stdout", _FakeStream(True))
     assert cli.main(["--headless", "--accept-api-cost", "", "do a thing"]) == 0
     assert captured["interactive"] is False
+    assert captured["task"] == "do a thing"
 
 
-def test_no_tty_headless_authorized_runs(monkeypatch):
+def test_no_tty_headless_runs(monkeypatch):
     captured = _stub_run(monkeypatch)
     monkeypatch.setattr("sys.stdin", _FakeStream(False))
     monkeypatch.setattr("sys.stdout", _FakeStream(False))
-    assert cli.main(["--headless", "--accept-api-cost", "", "do a thing"]) == 0
+    assert cli.main(["--headless", "", "do a thing"]) == 0
     assert captured["interactive"] is False
 
 
 def test_interactive_and_headless_mutually_exclusive(monkeypatch, capsys):
     captured = _stub_run(monkeypatch)
-    assert cli.main(["-i", "--headless", "--accept-api-cost", "", "x"]) == 2
+    assert cli.main(["-i", "--headless", "", "x"]) == 2
     assert "mutually exclusive" in capsys.readouterr().err
     assert "interactive" not in captured
 
@@ -205,7 +205,7 @@ def test_autodetect_interactive_on_tty(monkeypatch):
 
 
 def test_no_tty_no_auth_errors(monkeypatch, capsys):
-    # No TTY and no --headless --accept-api-cost → error out, never silent -p.
+    # No TTY and no --headless → error out; the mode is never picked silently.
     captured = _stub_run(monkeypatch)
     monkeypatch.setattr("sys.stdin", _FakeStream(False))
     monkeypatch.setattr("sys.stdout", _FakeStream(False))

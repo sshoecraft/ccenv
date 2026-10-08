@@ -48,7 +48,7 @@ def _resolve_dir() -> Path:
 #: before the user's first message and, under ccloop, again on every relay. An
 #: unbounded listing measured ~171k tokens (86% of a 200k window) on a
 #: 1,695-memory store. Small stores never reach this and are unaffected.
-DEFAULT_LIST_TOKEN_BUDGET = 6000
+DEFAULT_LIST_TOKEN_BUDGET = 16384
 
 
 #: Tokens held back from the entry budget for the payload envelope — the
@@ -69,20 +69,20 @@ def list_token_budget() -> int:
     return DEFAULT_LIST_TOKEN_BUDGET
 
 
-def _list_note(memory_dir, counts: dict, *, include_folded: bool) -> str:
+def _list_note(memory_dir, counts: dict, *, include_folded: bool,
+               type_filter: str | None = None) -> str:
     """What was withheld and what to do about it — carried IN-BAND.
 
     Two jobs. First, truncation must never be silent: a listing that quietly
     drops 1,500 entries reads as "that is everything this project knows".
 
-    Second, it reports the compaction backlog as a COUNT and nothing more.
-    It used to prescribe the work — call memory_compaction_plan(), fan out one
-    background agent per group — and that directive arrives before the user's
-    first message, when there is no task to interleave the agents with. The
-    only behavior available to the caller was dispatch-then-block: a store with
-    23 uncompiled notes spent the first ~90 seconds and the whole opening turn
-    on housekeeping nobody asked for. Whether memory maintenance is worth a
-    turn is the user's call, so the count rides back and the decision does not.
+    Second, it carries the compaction dispatch in-band. The caller is a model
+    at session start that already reads this payload, and the SessionStart
+    nudge does not reach every session, so the ask rides back here too: one
+    background memory-compactor per group, then carry on. The compactors run
+    as Agent-tool subagents of the live session, so the work never blocks the
+    caller and never goes through `claude -p`. It is worded as the same request
+    the SessionStart nudge makes, so a session that sees both dispatches once.
     """
     parts = []
     if counts["folded"]:
@@ -91,43 +91,83 @@ def _list_note(memory_dir, counts: dict, *, include_folded: bool) -> str:
             "articles and are not listed; they remain fully searchable via "
             "memory_search/memory_get, or pass include_folded=true."
         )
-    if counts["withheld"]:
+    # user/feedback overflow is reported on its own below, with its own remedy.
+    raw_withheld = counts["withheld"] - counts.get("load_bearing_withheld", 0)
+    if raw_withheld > 0:
         parts.append(
-            f"{counts['withheld']} further memories were withheld to stay within "
+            f"{raw_withheld} further memories were withheld to stay within "
             "the listing token budget. The budget is spent in tiers: "
             "user/feedback first, then `compiled-` articles, then raw "
             "project/reference newest-first — so the withheld entries are the "
             "oldest raw notes. Reach them with memory_search(<topic>) or raise "
             "CCMEMORY_LIST_TOKEN_BUDGET."
         )
-    if counts.get("load_bearing_withheld"):
-        parts.append(
-            f"WARNING: {counts['load_bearing_withheld']} user/feedback memories did "
-            "not fit even in the first budget tier. These record behavior and "
-            "corrections and have no topic to search for, so unlike the notes "
-            "above they are NOT recoverable with memory_search — you are missing "
-            "instructions you cannot know to ask about. Raise "
-            "CCMEMORY_LIST_TOKEN_BUDGET, or call memory_list(type=\"feedback\")."
-        )
-    if include_folded:
-        parts.append("include_folded=true: folded memories are included in this listing.")
-
     try:
         from . import compile as compile_mod
         b = compile_mod.count_backlog(Path(memory_dir))
-        if not compile_mod.nudge_suppressed(b):
+    except Exception:
+        compile_mod = b = None
+
+    # An overflowing first tier is the session's to fix, not the user's: the
+    # user's only lever is an env var, and the real fix — compacting the
+    # behavior notes into always-listed articles — is a dispatch the session
+    # can make itself. Only when no behavior note is left to compact does the
+    # budget itself have to grow, and that is the one case worth telling the
+    # user about.
+    lb = counts.get("load_bearing_withheld")
+    behavior = b["behavior_backlog"] if b else None
+    if lb:
+        lead = (
+            f"{lb} user/feedback memories did not fit "
+            + ("even in this filtered listing" if type_filter else
+               "in the first budget tier")
+            + ". They record behavior and corrections and have no topic to "
+            "search for, so memory_search cannot recover them."
+        )
+        if behavior:
+            recover = "" if type_filter else (
+                " Recover them now with memory_list(type=\"feedback\") and "
+                "memory_list(type=\"user\").")
+            parts.append(
+                f"{lead}{recover} {behavior} user/feedback notes are still "
+                "uncompiled, and compacting them is what makes room: "
+                "memory_compaction_plan() lists their groups first, so they go "
+                "in the first wave of the compactor dispatch. This resolves "
+                "itself — do not report it to the user."
+            )
+        elif behavior == 0:
+            parts.append(
+                f"WARNING: {lead} Every user/feedback note is already compiled, "
+                "so compaction cannot make room. Tell the user: "
+                f"CCMEMORY_LIST_TOKEN_BUDGET (currently {list_token_budget()}) "
+                "is too small for this project's behavior memories, and raising "
+                "it is the fix."
+            )
+        else:
+            parts.append(
+                f"{lead} Recover them with memory_list(type=\"feedback\") and "
+                "memory_list(type=\"user\")."
+            )
+    if include_folded:
+        parts.append("include_folded=true: folded memories are included in this listing.")
+
+    if b is not None:
+        # The overflow asks for the dispatch even under the threshold: the
+        # threshold paces routine compaction, and a withheld correction is not
+        # routine. The cooldown still applies — a compile pass that just ran
+        # may still have agents in flight on these notes.
+        overflow = bool(lb and behavior) and not compile_mod.in_cooldown(b)
+        if overflow or not compile_mod.nudge_suppressed(b):
             parts.append(
                 f"Compaction backlog: {b['backlog']} memories have never been "
                 f"folded into a compiled- article (threshold {b['threshold']}). "
-                "This is a status count, NOT a task: do not start compaction, do "
-                "not dispatch agents for it, and do not let it delay the user's "
-                "first message. Mention it in one line if it is worth raising at "
-                "all. When the user asks for it, memory_compaction_plan() returns "
-                "the disjoint groups the backlog splits into and the "
-                "compile-memories skill runs them."
+                "Do not stop what you are doing: unless you already dispatched "
+                "them this session, call memory_compaction_plan() and make one "
+                f"background {compile_mod.AGENT_CALL} call per group, "
+                f"{compile_mod.plan_wave_size()} at a time, then carry straight "
+                "on with the user's request. Do not wait on the agents and do "
+                "not compact inline."
             )
-    except Exception:
-        pass
 
     return " ".join(parts)
 
@@ -226,7 +266,8 @@ def build_app():
                         token_budget=entry_budget,
                         limit=limit,
                     )
-                    note = _list_note(d, counts, include_folded=include_folded)
+                    note = _list_note(d, counts, include_folded=include_folded,
+                                      type_filter=type_filter)
                 payload = {**counts, "note": note, "memories": results}
                 # Compact separators, not indent=2. Pretty-printing cost ~96
                 # chars per entry in indentation and line breaks alone — 29% of

@@ -47,7 +47,7 @@ Three, with different costs and different blind spots:
 ccloop relay. An unbounded listing on a 1,700-memory store measured ~171k
 tokens, so it is bounded by construction.
 
-`CCMEMORY_LIST_TOKEN_BUDGET` (default 6000) caps the **whole serialized
+`CCMEMORY_LIST_TOKEN_BUDGET` (default 16384) caps the **whole serialized
 payload**. `LIST_ENVELOPE_TOKENS` is held back for the `note` and counts; the
 remainder is spent on entries across three tiers with **cumulative** caps
 (`Store.LIST_TIER_SHARES = (0.25, 0.70, 1.00)`), newest-first inside each:
@@ -102,18 +102,18 @@ than not folding it.
 `cited_names`: a note is pending until something that can actually represent it
 in the listing cites it.
 
-Compaction is **not automatic**, and it is **not self-dispatching**. `claude -p`
-was removed (it bills metered credit), so nothing in this module runs a model.
-The backlog surfaces as text in two places — the SessionStart nudge
+Compaction is **automatic, dispatched by the session**. Nothing in this module
+runs a model: the MCP server has none, and no separate `claude -p` process is
+needed, because the session that reads the backlog is already a model. The
+backlog surfaces as text in two places — the SessionStart nudge
 (`hooks._compaction_nudge`) and the backlog clause in the `memory_list` note —
-and both report a count without ordering the work. They used to prescribe a
-fan-out, one background agent per group. Both fire before the user's first
-message, where there is no task to run agents alongside, so the only available
-behavior was dispatch-then-block: sessions opened by spending ~90s and their
-first turn on memory housekeeping nobody had asked for. Whether that turn is
-worth spending is the user's call; the count rides back and the decision does
-not. The user asks, and then the plan and the `compile-memories` skill (or the
-`memory-compactor` agent, one per group) do the work.
+and both ask for the same thing: one background `memory-compactor` agent per
+plan group, a wave at a time, and then carry on with the user's request
+without waiting. The agents are Agent-tool subagents of the live session, so
+they draw on the session's own usage and never block it. The two sites are
+worded as one request so a session that sees both dispatches once. The
+`compile-memories` skill does the same work inline, for when the agent is
+unavailable or the user asks for it in-session.
 
 ## History
 
@@ -164,8 +164,14 @@ that reports the store's health instead of degrading politely.
 - Any budget must be able to trim every tier, or it is not a budget.
 - A filtered listing gets the whole budget; the tier shares exist to ration a
   mixed listing and have nothing to ration in a filtered one.
-- Neither nudge site may order work. They are read before the user's first
-  message, where "dispatch this and carry on" has nothing to carry on with.
+- A first-tier overflow is reported to the user only when no behavior note is
+  left to compact. While one is, compaction is the fix and the session
+  dispatches it; an env var is the user's only lever and the wrong one to
+  point at first.
+- A nudge site may ask only for background dispatch, never for inline
+  compaction. An inline ask loses to whatever the user is waiting on, which is
+  why interactive projects sat at zero compiled articles until the
+  background agent existed.
 - If `_entry_tokens` and the server's serialization drift apart, the budget
   silently stops meaning anything —
   `test_entry_tokens_tracks_real_wire_size` pins them together.

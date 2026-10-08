@@ -2,6 +2,45 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-10-08 — v0.38.0
+
+**ccmemory v0.21.0: memory compaction is automatic again.**
+
+When the backlog is over threshold, the SessionStart nudge and the
+`memory_list` note ask the session to dispatch one background
+`memory-compactor` agent per plan group and carry on without waiting, as they
+did before v0.37.0. v0.37.0 removed that on the claim that sessions waited
+on the agents and lost their first turn. No transcript or measurement backed
+the claim, and the user observed the agents running in the background
+without blocking anything. With nothing dispatching them, a store's
+backlog grew to 165 notes and its feedback memories overflowed even a
+feedback-only listing.
+
+That overflow was reported to the user as "CCMEMORY_LIST_TOKEN_BUDGET is too
+small", when the fix was to compact the uncompiled corrections, which the
+session could dispatch itself. The session now handles the overflow itself
+while behavior notes remain to compact: it recovers the entries, puts the
+behavior groups first in the compactor wave, and stays quiet about it. The user
+is told only when everything is already compiled and the budget really is too
+small. The default listing budget goes from 6000 to 16384 tokens.
+
+**The `claude -p` billing claim is corrected.**
+
+Bundle v0.1.5 removed the `claude -p` compile path and gated ccloop's headless
+mode, both because Anthropic had announced that `claude -p` and Agent SDK usage
+would move onto a separate API-rate credit pool on 2026-06-15. Anthropic paused
+that change on the day it was due, and it never took effect: `claude -p` draws
+from subscription usage limits. The v0.1.5 and v0.24.0 entries below state the
+change as fact; it was not.
+
+- ccloop v0.19.0: `--headless` alone selects headless mode. `--accept-api-cost`
+  is still accepted and does nothing, so existing invocations keep working. With
+  no TTY and no `--headless`, ccloop still errors out, because the TUI cannot
+  run without a terminal; the message no longer claims API billing.
+- The claim is removed from ccloop's help text, README and DESIGN, from
+  ccmemory's `compile.py`, `compile-memories` skill, docs and README, and from
+  the `install.sh` comment on the skill.
+
 ## 2026-10-02 — v0.37.1
 
 **ccproject: the awareness bootstrap tells the user to restart Claude.**

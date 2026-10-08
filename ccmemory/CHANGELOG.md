@@ -2,6 +2,61 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.21.0
+
+**Compaction is automatic again.**
+
+The SessionStart nudge and the `memory_list` note both ask for the background
+dispatch again: one `memory-compactor` agent per plan group, a wave at a time,
+then carry straight on with the user's request without waiting. The note says
+"unless you already dispatched them this session", so a session that sees both
+sites dispatches once. The `compile-memories` skill is back to being the inline
+fallback, and its description no longer triggers on the nudge.
+
+**A feedback overflow is the session's to fix, and the budget is 16384.**
+
+The listing note used to tell the session to report every `user`/`feedback`
+overflow, which put "CCMEMORY_LIST_TOKEN_BUDGET is too small" in front of the
+user while uncompiled corrections sat in the store. Compacting those
+corrections was the fix, and the session could dispatch it. Now
+`count_backlog` reports `behavior_backlog`, and `_list_note` routes on it:
+
+- While behavior notes remain uncompiled, the note tells the session to
+  recover the withheld entries with a type-filtered listing, to put the
+  behavior groups in the first compactor wave (the plan already lists them
+  first), and not to report the overflow. It asks for the dispatch even under
+  the threshold, but not inside the cooldown.
+- When every behavior entry is already compiled, compaction cannot help. The
+  note says to tell the user and names the current budget.
+- A filtered listing no longer tells the caller to make the filtered call it
+  just made. Withheld feedback is no longer counted in the "oldest raw notes,
+  reach them with memory_search" clause, since memory_search cannot find a
+  correction.
+
+`DEFAULT_LIST_TOKEN_BUDGET` goes from 6000 to 16384. At 6000 the first tier
+held about 30 entries, and a long-lived project outgrew even a feedback-only
+listing.
+
+v0.20.0 took the dispatch out on the claim that sessions launched the agents
+and then waited on them for ~90 seconds. Nothing recorded supports that claim:
+no transcript or measurement is cited for it, the agents are background
+Agent-tool subagents, and the nudge told the session to carry on. In practice
+the user observed the agents running in the background without holding up
+the turn. Removing the dispatch left the backlog to grow until someone asked,
+which is how a store reached 165 uncompiled notes with its feedback memories
+overflowing even a feedback-only listing.
+
+**The `claude -p` billing claim is corrected everywhere it was stated.**
+
+v0.10.0 removed the `claude -p` compile path because Anthropic had announced
+that `claude -p` and Agent SDK usage would move onto a separate API-rate credit
+pool on 2026-06-15. Anthropic paused that change on the day it was due, and it
+never took effect: `claude -p` draws from the subscription's usage limits.
+The v0.10.0 and v0.16.0 entries below state the billing change as fact; it was
+not. The `claude -p` path stays removed, because the background agents need no
+separate process. The false claim is gone from `compile.py`, the
+`compile-memories` skill, the compile docs and the README.
+
 ## v0.20.0
 
 **The index no longer requires WAL, and repairs one that cannot be opened.**
