@@ -12,4 +12,4 @@ Two facts that follow, and that any versioning or release-detection design has t
 - The user codes as `steve` and installs as the application user. `~/.config/ccenv/installed-version` sits in the installing user's home, so a Claude session running as `steve` cannot see what was installed or when.
 - Other users install from their own `git clone`. An install is not an event this tree or this session ever observes.
 
-So Claude cannot detect a release. Anything that has to happen "at release" has to happen before it instead. That is why version bumps occur once per session, before the first change ([[bump-top-level-bundle-version-not-just-subdir]]).
+So Claude cannot detect a release. Anything that has to happen "at release" has to happen before it instead. That is why a version is bumped before the first change of its CHANGELOG entry, not at release ([[bump-top-level-bundle-version-not-just-subdir]]).

@@ -2,6 +2,23 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-10-11 — v0.38.1
+
+**Base rules: the version bump was triggered by sessions instead of by problems.**
+
+The versioning rule bumped once per session, before its first change. A
+ccloop run restarts the session every time a context window fills, so one
+problem worked across several sessions got a new version in each of them:
+0.90.31 became 0.90.122 in twelve days with six releases among them.
+
+A version now corresponds to one `CHANGELOG.md` entry. Before its first change,
+a session reads the top entry; a change that belongs in it joins that version,
+and only a change that needs an entry of its own bumps. The entry is written
+at the bump and names the problem, so a later session can tell what the open
+version is for. This works in projects that have never been committed, where
+there is no commit to mark a boundary. A commit, push or install still closes
+the open version, as does the owner saying so.
+
 ## 2026-10-08 — v0.38.0
 
 **ccmemory v0.21.0: memory compaction is automatic again.**

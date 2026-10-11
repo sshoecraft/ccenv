@@ -218,19 +218,24 @@ is recoverable.*
   run and session number, while the durable material — `trap-`, `technique-`, `feedback-` — came to
   97 files.
 
-## RULE NINETEEN — ONE VERSION BUMP PER SESSION, BEFORE THE FIRST CHANGE
+## RULE NINETEEN — ONE VERSION PER CHANGELOG ENTRY
 
-- Rev the version only when a change to the project's source is about to be made — immediately
-  before the first one in the session, and never a second time in that session. A session that
-  changes nothing bumps nothing.
+- Before the first change to the project's source in a session, read the top entry of
+  `CHANGELOG.md`. It names the open version and the problem it is for.
+- If the change belongs in that entry, it joins that version — do not bump. A new session is not
+  a new problem.
+- If the change needs an entry of its own, bump the version immediately before making it.
+- Write the new `CHANGELOG.md` entry at the bump, naming the problem rather than the fix, so the
+  next session can tell what the open version is for.
+- If the project has no `CHANGELOG.md`, the first bump creates it.
+- A commit, a push or an install of the open version closes it, and so does the owner saying so;
+  the next change opens a new version even for the same problem.
 - A write to `.ccmemory/` is not a change to the source and never bumps the version.
-- Every later change in the session joins that version. The number moves again only to raise its
-  size — patch to minor, minor to major — never to add a step.
-- A release seen during the session — an install or a push run inside it — closes that version;
-  the next change after it opens a new one.
-- One uninterrupted bug-fixing session revved the version seven times before a single release was
-  made — seven versions that were never installed, never pushed, and never existed anywhere but the
-  working tree.
+- The number moves within an open version only to raise its size — patch to minor, minor to
+  major — never to add a step.
+- Once-per-session counted context windows, not work: ccloop restarts a session every time one
+  fills, and 0.90.31 became 0.90.122 in twelve days with six releases among them. Before that, one
+  uninterrupted session revved seven times before a single release.
 - The bump cannot wait for the release, because Claude never sees one: installs run as another
   user, or from someone else's clone, and nothing an install does is allowed to write back into the
   source tree.

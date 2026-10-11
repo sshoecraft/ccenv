@@ -22,7 +22,7 @@ Rule: any "is this machine's ccenv current?" check reads `~/.config/ccenv/instal
 
 Fixing a component under `/src/ccenv` (ccloop/, ccmemory/, ccusage/, ccteam/) and bumping only that component's `pyproject.toml`/`__init__.py` leaves the thing that actually ships — the top-level `/src/ccenv` bundle — unversioned, so the fix is invisible to the installer. User called this out repeatedly ("you keep doing this").
 
-Rule: the version is bumped once per session, before the first change, and never again in that session. It moves again only to raise its size (patch → minor → major). A session that touches a component bumps BOTH the component version AND `/src/ccenv/VERSION`, plus one `/src/ccenv/CHANGELOG.md` entry for that version that cites the component version (e.g. "ccloop v0.5.1: …").
+Rule: one version per `CHANGELOG.md` entry, bumped before the entry's first change; a change that belongs in the top entry joins it, even in a later session (once-per-session was replaced in v0.38.1 because it bumped once per ccloop context window). It moves within an open version only to raise its size (patch → minor → major). A bump that touches a component bumps BOTH the component version AND `/src/ccenv/VERSION`, plus one `/src/ccenv/CHANGELOG.md` entry for that version that cites the component version (e.g. "ccloop v0.5.1: …").
 
 This used to say "in the same change." Together with the old CLAUDE.md line "the version is revved as part of the change," that produced seven bumps in one bug-fixing session before any release existed. Bumping at release time was rejected because Claude cannot observe a release: installs run as another user or from another clone, and no install may write to the source tree ([[install-never-writes-to-source-tree]]). Decided 2026-09-19.
 
