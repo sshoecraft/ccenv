@@ -2,6 +2,22 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-10-11 — v0.38.2
+
+**Base rules: the versioning rule let each defect count as its own problem.**
+
+v0.38.1 tied a version to a `CHANGELOG.md` entry and told the session to name
+the entry for "the problem". A defect is a problem, so a session doing 16-node
+mpath testing named its entry for the hang it was fixing. The next session
+found a second hang, saw that it did not match the entry, and opened another
+version: 0.90.123 and 0.90.124 for one piece of work.
+
+The unit is now the work being done ("mpath", "DRBD", "the installer"), never
+each defect, fix or test failure found while doing it. The entry names the
+work, and a new bug found during it joins the open version. Closing is
+unchanged: a commit, push or install of the open version, or the owner saying
+so.
+
 ## 2026-10-11 — v0.38.1
 
 **Base rules: the version bump was triggered by sessions instead of by problems.**

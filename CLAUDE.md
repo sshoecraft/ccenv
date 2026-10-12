@@ -218,24 +218,28 @@ is recoverable.*
   run and session number, while the durable material — `trap-`, `technique-`, `feedback-` — came to
   97 files.
 
-## RULE NINETEEN — ONE VERSION PER CHANGELOG ENTRY
+## RULE NINETEEN — ONE VERSION PER PIECE OF WORK
 
+- The unit of a version is the work being done — "mpath", "DRBD", "the installer" — never each
+  defect, fix or test failure found while doing it.
 - Before the first change to the project's source in a session, read the top entry of
-  `CHANGELOG.md`. It names the open version and the problem it is for.
-- If the change belongs in that entry, it joins that version — do not bump. A new session is not
-  a new problem.
-- If the change needs an entry of its own, bump the version immediately before making it.
-- Write the new `CHANGELOG.md` entry at the bump, naming the problem rather than the fix, so the
+  `CHANGELOG.md`. It names the open version and the work it is for.
+- If the change is part of that work, it joins that version — do not bump. A new session is not
+  new work, and neither is a new bug found during it.
+- If the change is for different work, bump the version immediately before making it.
+- Write the new `CHANGELOG.md` entry at the bump, naming the work rather than the fix, so the
   next session can tell what the open version is for.
 - If the project has no `CHANGELOG.md`, the first bump creates it.
 - A commit, a push or an install of the open version closes it, and so does the owner saying so;
-  the next change opens a new version even for the same problem.
+  the next change opens a new version even for the same work.
 - A write to `.ccmemory/` is not a change to the source and never bumps the version.
 - The number moves within an open version only to raise its size — patch to minor, minor to
   major — never to add a step.
 - Once-per-session counted context windows, not work: ccloop restarts a session every time one
   fills, and 0.90.31 became 0.90.122 in twelve days with six releases among them. Before that, one
-  uninterrupted session revved seven times before a single release.
+  uninterrupted session revved seven times before a single release. Once-per-entry then counted
+  bugs: 16-node mpath testing opened 0.90.123 and 0.90.124 for two hangs it found, because the
+  entry named a defect and the next defect did not match it.
 - The bump cannot wait for the release, because Claude never sees one: installs run as another
   user, or from someone else's clone, and nothing an install does is allowed to write back into the
   source tree.
