@@ -4,8 +4,11 @@ Pattern from claude-memory-compiler: raw per-session lessons accumulate
 faster than humans can curate them. Periodically a compiler reads N raw
 memories and produces one structured, cross-referenced knowledge article
 named ``compiled-<topic>`` (written via ``memory_write``, so it lives at the
-memory-dir root alongside the raw notes). The raw inputs stay where they
-are — the compiled article is an additional, denser entry.
+memory-dir root alongside the raw notes). The article replaces its inputs: it
+is a lossless merge, and once it is verified against each input that input is
+deleted (``Store.delete_folded``). Compaction used to leave the inputs in
+place, which made every pass grow the store — on mxfs 638 of 650 raw notes sat
+on disk beside the articles that already held them.
 
 This module used to shell out to ``claude -p`` (Claude Code headless mode).
 That path was removed on the premise that ``claude -p`` would move onto a
@@ -109,14 +112,19 @@ AGENT_CALL = ('Agent(subagent_type="memory-compactor", '
 
 
 COMPILER_PROMPT = """\
-You are compiling raw per-session memory files into a single dense knowledge
-article. Read the inputs below. Produce ONE markdown article that:
+You are merging raw memory files into a single knowledge article that
+REPLACES them: once it is written and verified, the inputs are deleted, so
+anything the article leaves out is lost. Read the inputs below. Produce ONE
+markdown article that:
 
 1. Identifies the central topic the inputs share.
-2. Extracts every decision, lesson, and recurring failure mode — deduplicated
-   and chronologically ordered when timing matters.
-3. Cross-references the source sessions using the literal slugs you see in
-   the input (e.g. `[[sess79_lessons]]`).
+2. Keeps every concrete fact from every input — decisions, lessons, failure
+   modes, and the specifics behind them: exact quotes, numbers, versions,
+   paths, commands, error text, measured results, and who said what.
+   Deduplicate only where two inputs say the same thing; never trade a
+   specific for a summary of it. Order chronologically when timing matters.
+3. Cites every input by its literal slug as a wikilink (e.g.
+   `[[sess79_lessons]]`), next to the facts it contributed.
 4. Ends with a YAML frontmatter block at the very TOP of the article in this
    exact format:
 
@@ -129,7 +137,8 @@ article. Read the inputs below. Produce ONE markdown article that:
    tags: [compiled, <topic-tags>]
    ---
 
-5. Be terse. Engineering prose, no platitudes, no headers like "## Summary".
+5. Is terse in its prose, never in its facts. Engineering prose, no
+   platitudes, no headers like "## Summary".
 
 Output ONLY the article markdown. No explanation before or after."""
 
@@ -207,6 +216,10 @@ def count_backlog(memory_dir: Path) -> dict[str, Any]:
     pending = set(raw) - cited
     return {
         "backlog": len(pending),
+        # Folded notes still on disk: an article already holds them, and the
+        # backfill groups exist to verify that and delete them. They are work
+        # for the compactor exactly as the backlog is.
+        "retained": len(set(raw) & cited),
         # Uncompiled user/feedback notes. When the first listing tier
         # overflows, these are the only notes whose compaction makes room in
         # it; zero means compaction cannot help and the budget is too small.
@@ -241,8 +254,13 @@ def in_cooldown(b: dict[str, Any]) -> bool:
 
 
 def nudge_suppressed(b: dict[str, Any]) -> bool:
-    """True when a backlog dict should NOT produce a compaction nudge."""
-    return b["backlog"] < b["threshold"] or in_cooldown(b)
+    """True when a backlog dict should NOT produce a compaction nudge.
+
+    Retained notes count toward the threshold with the backlog: a store whose
+    notes are all folded but still on disk has nothing left to compile and
+    everything left to delete, and without this it never asks for the backfill.
+    """
+    return b["backlog"] + b.get("retained", 0) < b["threshold"] or in_cooldown(b)
 
 
 def _build_input(memories: list[dict]) -> str:
@@ -412,6 +430,13 @@ def compaction_plan(
             pool: _cluster(s, [n for n in pending if group_pool(n["type"]) == pool], size)
             for pool in (BEHAVIOR_POOL, KNOWLEDGE_POOL)
         }
+        # Articles that still have folded sources on disk. Each is one backfill
+        # group, never split: two agents rewriting the same article would
+        # overwrite each other.
+        backfill = [
+            (article, names, s._row_type(article))
+            for article, names in sorted(s.folded_by().items())
+        ]
 
     groups: list[dict[str, Any]] = []
     for pool, pool_clusters in clusters.items():
@@ -424,9 +449,26 @@ def compaction_plan(
         for i in range(0, len(tail), size):
             groups.append(_group(pool, tail[i:i + size], "assorted"))
 
+    # After the new-note groups: an unfolded note is missing from the listing,
+    # a retained one is only taking space.
+    for article, names, article_type in backfill:
+        pool = group_pool(article_type)
+        groups.append({
+            "seed": article,
+            "kind": "backfill",
+            "size": len(names),
+            "article": article,
+            "names": names,
+            "pool": pool,
+            # Rewrite the article under its existing type; the retirement test
+            # already passed for these notes under that type.
+            "article_type": article_type or POOL_ARTICLE_TYPE[pool],
+        })
+
     payload: dict[str, Any] = {
         "status": "ok",
         "backlog": len(pending),
+        "retained": sum(len(n) for _, n, _ in backfill),
         "threshold": threshold(),
         "group_size": size,
         "wave": plan_wave_size(),
@@ -436,7 +478,11 @@ def compaction_plan(
                "The article it writes must carry the group's `article_type` in its "
                "frontmatter: a behavior group (user/feedback notes) compiles to "
                "`feedback` so the article is listed in the same first-claim tier as the "
-               "notes it retires, everything else to `project`.",
+               "notes it retires, everything else to `project`. A `backfill` group is an "
+               "existing article (`article`, also its seed) whose folded sources are "
+               "still on disk: fold back anything the article dropped, rewrite it under "
+               "the same name, then delete the sources. Every group ends with each "
+               "verified source removed via memory_delete.",
     }
     if seed is None:
         payload["groups"] = groups
@@ -448,8 +494,8 @@ def compaction_plan(
     if not match:
         payload["status"] = "done"
         payload["how"] = (
-            f"No group is seeded by `{seed}` — it has already been folded into a "
-            "compiled- article. Write nothing and report that. Do NOT pick a "
+            f"No group is seeded by `{seed}` — it has already been compiled and "
+            "its sources deleted. Write nothing and report that. Do NOT pick a "
             "different group: another agent owns it."
         )
     return payload

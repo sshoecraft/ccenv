@@ -160,7 +160,9 @@ def _list_note(memory_dir, counts: dict, *, include_folded: bool,
         if overflow or not compile_mod.nudge_suppressed(b):
             parts.append(
                 f"Compaction backlog: {b['backlog']} memories have never been "
-                f"folded into a compiled- article (threshold {b['threshold']}). "
+                f"folded into a compiled- article, and {b.get('retained', 0)} "
+                "folded ones are still on disk awaiting deletion (threshold "
+                f"{b['threshold']}). "
                 "Do not stop what you are doing: unless you already dispatched "
                 "them this session, call memory_compaction_plan() and make one "
                 f"background {compile_mod.AGENT_CALL} call per group, "
@@ -226,6 +228,11 @@ def build_app():
                 "tags": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["name", "type", "description", "body"],
+        },
+        "memory_delete": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "slug of a raw note a compiled- article folds"}},
+            "required": ["name"],
         },
         "memory_stats": {"type": "object", "properties": {}},
         "memory_regen_index": {"type": "object", "properties": {}},
@@ -303,6 +310,15 @@ def build_app():
                     s.reindex()
                 return _text(f"wrote {path}")
 
+            if name == "memory_delete":
+                slug = arguments.get("name") or ""
+                with Store(d) as s:
+                    try:
+                        result = s.delete_folded(slug)
+                    except ValueError as e:
+                        return _err(str(e))
+                return _text(json.dumps(result, indent=2))
+
             if name == "memory_stats":
                 with Store(d) as s:
                     s.reindex()
@@ -378,6 +394,18 @@ def build_app():
         return dispatch("memory_write", kwargs)
 
     @app.tool(
+        name="memory_delete",
+        description=(
+            "Delete a raw note that a compiled- article has folded in — the compaction step that "
+            "removes a source once the article holding it has been verified. Links to it elsewhere "
+            "become plain `slug` text. Refuses compiled- articles and any note no article folds."
+        ),
+        schema=SCHEMAS["memory_delete"],
+    )
+    def memory_delete(**kwargs):
+        return dispatch("memory_delete", kwargs)
+
+    @app.tool(
         name="memory_stats",
         description="Counts by type, DB size, DB path, and memory_list cost (bounded vs unbounded tokens, folded count).",
         schema=SCHEMAS["memory_stats"],
@@ -396,8 +424,9 @@ def build_app():
     @app.tool(
         name="memory_compaction_plan",
         description=(
-            "Partition the uncompiled memory backlog into disjoint compactor groups. "
-            "Returns {backlog, group_count, group_size, wave, groups:[{seed, kind, size, names}]}. "
+            "Partition the uncompiled memory backlog, plus every article whose folded sources are "
+            "still on disk (kind 'backfill'), into disjoint compactor groups. "
+            "Returns {backlog, retained, group_count, group_size, wave, groups:[{seed, kind, size, names}]}. "
             "Groups are addressed by `seed` slug, never by index. Pass `seed` to fetch one group; "
             "status 'done' means that group is already compiled — write nothing, and do not take another."
         ),

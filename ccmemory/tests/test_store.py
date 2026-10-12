@@ -413,3 +413,51 @@ def test_reindex_skips_appledouble_sidecars(memory_dir):
         rows = [r["name"] for r in s.db.execute("SELECT name FROM mem ORDER BY name")]
     assert total == 1
     assert rows == ["real"]
+
+
+def test_reindex_refreshes_a_row_whose_path_changed(memory_dir):
+    # A store shared over NFS is mounted at different paths on different
+    # hosts. Rows first indexed on macOS kept /System/Volumes/Data/... on
+    # Linux because the content never changed, and memory_get failed on them.
+    write_memory(memory_dir, "note", body="unchanged")
+    with Store(memory_dir) as s:
+        s.reindex()
+        s.db.execute("UPDATE mem SET path = ? WHERE name = ?",
+                     ("/System/Volumes/Data/elsewhere/note.md", "note"))
+        s.reindex()
+        assert s.get("note") is not None
+        row = s.db.execute("SELECT path FROM mem WHERE name = 'note'").fetchone()
+    assert row["path"] == str(memory_dir / "note.md")
+
+
+def test_delete_folded_removes_note_and_unlinks_citations(memory_dir):
+    write_memory(memory_dir, "source", body="the fact")
+    write_memory(memory_dir, "other", body="see [[source]] and [[source|alias]]")
+    write_memory(memory_dir, "compiled-topic", body="the fact [[source]]")
+    with Store(memory_dir) as s:
+        result = s.delete_folded("source")
+        names = {r["name"] for r in s.db.execute("SELECT name FROM mem")}
+        edges = s.db.execute(
+            "SELECT COUNT(*) FROM mem_edges WHERE dst_name = 'source'").fetchone()[0]
+    assert not (memory_dir / "source.md").exists()
+    assert names == {"other", "compiled-topic"}
+    assert edges == 0
+    assert sorted(result["relinked"]) == ["compiled-topic.md", "other.md"]
+    article = (memory_dir / "compiled-topic.md").read_text()
+    assert "`source`" in article and "[[source]]" not in article
+    assert "[[" not in (memory_dir / "other.md").read_text()
+
+
+def test_delete_folded_refuses_what_no_article_represents(memory_dir):
+    import pytest
+    write_memory(memory_dir, "uncited")
+    write_memory(memory_dir, "corrected", type="feedback")
+    # A behavior note cited only by a project article is not folded: that
+    # article cannot stand in for it in the first listing tier.
+    write_memory(memory_dir, "compiled-wrong-tier", type="project", body="[[corrected]]")
+    with Store(memory_dir) as s:
+        for name in ("uncited", "corrected", "compiled-wrong-tier"):
+            with pytest.raises(ValueError, match="refused"):
+                s.delete_folded(name)
+    for name in ("uncited", "corrected", "compiled-wrong-tier"):
+        assert (memory_dir / f"{name}.md").exists()

@@ -312,7 +312,13 @@ class Store:
         Returns (changed, removed, total_indexed).
         """
         seen: set[str] = set()
-        existing = {row["name"]: row["content_hash"] for row in self.db.execute("SELECT name, content_hash FROM mem")}
+        # Path is compared as well as content. A row keeps the absolute path it
+        # was first indexed with, and a store shared over NFS between hosts is
+        # mounted at different paths on each: rows written on macOS pointed at
+        # /System/Volumes/Data/src/... and stayed that way on Linux because the
+        # content never changed, so memory_get failed on 43 of 51 notes.
+        existing = {row["name"]: (row["content_hash"], row["path"])
+                    for row in self.db.execute("SELECT name, content_hash, path FROM mem")}
 
         # All filesystem I/O and parsing happens before the write lock is
         # taken, so BEGIN IMMEDIATE below holds it only for the DB mutations
@@ -324,7 +330,7 @@ class Store:
             if mem is None:
                 continue
             seen.add(mem.name)
-            if not force and existing.get(mem.name) == mem.content_hash:
+            if not force and existing.get(mem.name) == (mem.content_hash, str(mem.path)):
                 continue
             to_upsert.append(mem)
 
@@ -425,13 +431,12 @@ class Store:
     def folded_names(self) -> set[str]:
         """Raw slugs already represented by a ``compiled-`` article.
 
-        Compaction is additive by design (see compile.py): a compile pass
-        writes a ``compiled-<topic>`` article that wikilinks its inputs and
-        leaves the raw files alone. That means the raw notes it folded in are
-        already represented in a denser form — but nothing ever stopped
-        listing them, so every compile pass made ``list_all`` BIGGER. The
-        wikilinks recorded in ``mem_edges`` are the retirement record we
-        already have; this reads it.
+        A compile pass writes a ``compiled-<topic>`` article that wikilinks its
+        inputs, then deletes each input it has verified (``delete_folded``).
+        Until it does, the raw notes it folded in are already represented by
+        the article — listing them as well made every compile pass make
+        ``list_all`` BIGGER. The wikilinks recorded in ``mem_edges`` are the
+        retirement record; this reads it.
 
         ``ALWAYS_LIST_TYPES`` and untyped memories retire only into an article
         that is ITSELF always-listed. They carry behavior, conventions and
@@ -484,6 +489,91 @@ class Store:
             """
         ).fetchall()
         return {r["dst_name"] for r in rows}
+
+    def folded_by(self) -> dict[str, list[str]]:
+        """Each ``compiled-`` article mapped to the raw notes it folds.
+
+        Same retirement test as ``folded_names``, kept per article, because a
+        backfill group is one article plus the sources it still has on disk.
+        A note folded by more than one article is assigned to the first by
+        name, so the groups built from this stay disjoint.
+        """
+        rows = self.db.execute(
+            """
+            SELECT e.src_name, e.dst_name, c.type AS article_type, d.type AS note_type
+            FROM mem_edges e
+            JOIN mem c ON c.name = e.src_name
+            JOIN mem d ON d.name = e.dst_name
+            WHERE c.name LIKE 'compiled-%'
+              AND d.name NOT LIKE 'compiled-%'
+            ORDER BY e.src_name, e.dst_name
+            """
+        ).fetchall()
+        out: dict[str, list[str]] = {}
+        claimed: set[str] = set()
+        for r in rows:
+            if self._is_always_listed(r["note_type"]) and not self._is_always_listed(
+                    r["article_type"]):
+                continue
+            if r["dst_name"] in claimed:
+                continue
+            claimed.add(r["dst_name"])
+            out.setdefault(r["src_name"], []).append(r["dst_name"])
+        return out
+
+    def file_for(self, name: str) -> Path | None:
+        """The file on disk holding memory ``name``, or None.
+
+        The indexed path first; if that is gone, the file in this store whose
+        frontmatter names it.
+        """
+        row = self.db.execute("SELECT path FROM mem WHERE name = ?", (name,)).fetchone()
+        if row and Path(row["path"]).exists():
+            return Path(row["path"])
+        for md in self._iter_md_files():
+            mem = _parse_file(md)
+            if mem is not None and mem.name == name:
+                return md
+        return None
+
+    def delete_folded(self, name: str) -> dict:
+        """Delete a raw note that a ``compiled-`` article has folded.
+
+        Compaction replaces its sources: once an article holds everything a
+        note said, the note is a second copy, and keeping it is how a store
+        grows with every compile pass. The guard is the same retirement test
+        the listing uses — only a note ``folded_names`` reports can go, so a
+        behavior note cited by a ``project`` article, which that article cannot
+        represent in the first listing tier, is refused.
+
+        Every ``[[name]]`` link elsewhere in the store becomes plain
+        `` `name` `` text: the citation stays as provenance, and nothing is
+        left linking to a note that no longer exists.
+        """
+        if name.startswith(COMPILED_PREFIX):
+            raise ValueError(f"refused: {name} is a compiled- article, not a source note")
+        self.reindex()
+        if name not in self.folded_names():
+            raise ValueError(
+                f"refused: {name} is not folded into a compiled- article that can "
+                "represent it. Cite it in an article of the right type first.")
+        path = self.file_for(name)
+        if path is None:
+            raise ValueError(f"not found: {name}")
+
+        link = re.compile(r"\[\[" + re.escape(name) + r"(?:\|[^\]]*)?\]\]")
+        relinked = []
+        for md in self._iter_md_files():
+            if md == path:
+                continue
+            text = md.read_text(encoding="utf-8", errors="replace")
+            new = link.sub(f"`{name}`", text)
+            if new != text:
+                md.write_text(new, encoding="utf-8")
+                relinked.append(md.name)
+        path.unlink()
+        self.reindex()
+        return {"deleted": str(path), "relinked": relinked}
 
     def _row_type(self, name: str) -> str:
         row = self.db.execute("SELECT type FROM mem WHERE name = ?", (name,)).fetchone()

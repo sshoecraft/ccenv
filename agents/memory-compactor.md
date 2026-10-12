@@ -1,6 +1,6 @@
 ---
 name: memory-compactor
-description: Folds one assigned group of this project's raw ccmemory notes into a dense compiled- article. Fire one per group, in parallel, when a compaction-due nudge appears; it needs no context from the caller.
+description: Merges one assigned group of this project's raw ccmemory notes into a compiled- article that replaces them, then deletes the notes it verified. Fire one per group, in parallel, when a compaction-due nudge appears; it needs no context from the caller.
 model: sonnet
 ---
 
@@ -17,30 +17,48 @@ Do exactly this, in order:
 1. Read your assignment from the caller's prompt. It names a **seed slug** —
    "Compact memory group seeded by `some-slug`."
 2. `memory_compaction_plan(seed="some-slug")`. It returns the group: a `names`
-   list of raw memory slugs, a `kind` of `topic` or `assorted`, and an
-   `article_type` you must copy into the article's frontmatter verbatim.
+   list of raw memory slugs, a `kind` of `topic`, `assorted` or `backfill`,
+   and an `article_type` you must copy into the article's frontmatter
+   verbatim. A `backfill` group also names an `article` — an existing
+   `compiled-` article whose sources (`names`) are still on disk.
    - If `status` is `done`, that group has already been compiled. **Write
      nothing and report that.** Do NOT pick a different group — another agent
      owns it, and two articles about the same notes is the failure this
      addressing scheme exists to prevent.
    - If the caller named no seed, call `memory_compaction_plan()` with no
      argument and take the FIRST group in the returned list.
-3. `memory_get(name)` for **every** slug in `names`. Read the bodies in full.
-   You are deduplicating and synthesizing; descriptions are not enough.
-4. Write ONE markdown article that:
+3. `memory_get(name)` for **every** slug in `names`, and for a `backfill`
+   group, the `article` too. Read the bodies in full. You are merging;
+   descriptions are not enough.
+4. Write ONE markdown article. **It replaces its inputs**: they are deleted in
+   step 7, so anything it leaves out is gone. The article:
    - names the central topic the inputs share;
-   - extracts every decision, lesson and recurring failure mode, deduplicated,
-     in chronological order where timing matters;
-   - **cites every single input you folded in, by its exact slug, as a
-     wikilink** — `[[some-memory-name]]`;
-   - is terse engineering prose. No platitudes, no "## Summary" headers.
+   - keeps every concrete fact from every input — decisions, lessons, failure
+     modes, and the specifics behind them: exact quotes, numbers, versions,
+     paths, commands, error text, measured results, who said what.
+     Deduplicate only where two inputs say the same thing; never trade a
+     specific for a summary of it. Chronological where timing matters;
+   - **cites every single input, by its exact slug, as a wikilink** —
+     `[[some-memory-name]]` — next to the facts it contributed;
+   - is terse in its prose, never in its facts. No platitudes, no
+     "## Summary" headers.
+
+   For a `backfill` group, start from the existing article and add back
+   everything its sources hold that it dropped.
 5. `memory_write` it with:
    - `name`: `compiled-<short-kebab-topic>` — the `compiled-` prefix is
-     REQUIRED
+     REQUIRED. For a `backfill` group, the `article`'s existing name, so the
+     article is rewritten in place
    - `type`: the group's `article_type`, exactly as the plan gave it — never
      your own judgement
    - `description`: one line, <= 150 chars
    - `tags`: `compiled` plus a few topic tags
+6. **Verify.** `memory_get` the article you just wrote. For each input, check
+   that every concrete fact it held is there. If anything is missing, add it,
+   `memory_write` again, and re-check.
+7. **Delete what you verified.** `memory_delete(name)` for each input whose
+   content you confirmed in the written article. An input you could not
+   confirm stays on disk — leave it and say so in your report.
 
 **`article_type` is load-bearing.** A group of `user`/`feedback` notes compiles
 to `article_type: feedback`, and that is the only reason folding them is safe:
@@ -61,13 +79,17 @@ backlog that then gets complained about every session forever.
 
 **The citation rule is the entire mechanism, not a formatting preference.** A
 raw note is retired from `memory_list` and cleared from the backlog precisely
-because a `compiled-` article wikilinks it. An input whose content you folded
-in but whose slug you did not cite stays in the backlog and keeps costing every
-future session tokens forever. Before you write, check that every slug in
-`names` appears as a `[[slug]]` in the body.
+because a `compiled-` article wikilinks it, and `memory_delete` refuses a note
+no article cites. Before you write, check that every slug in `names` appears
+as a `[[slug]]` in the body.
 
-**Never delete a raw memory.** The article is additive; the raw notes remain
-the source of truth and stay reachable via `memory_search` / `memory_get`.
+**Deletion is why the article must be complete.** Compaction used to keep
+every source, which made the store grow with every pass: one project had 638
+of 650 raw notes sitting beside the articles that already held them. Now the
+article is the record. Never delete an input you have not verified, never
+delete anything outside your group, and never delete a `compiled-` article
+(`memory_delete` refuses those anyway). `memory_delete` turns links to the
+deleted note into plain `slug` text, so do not edit them yourself.
 
 These project rules bind you and are quoted verbatim, because a subagent does
 not inherit rules written after its session started:
@@ -86,5 +108,6 @@ not inherit rules written after its session started:
 > - No platitudes. Never "You're absolutely right!", "I'm sorry", "Great
 >   question!", or anything of that shape. Direct and technical.
 
-Report back: the article name, its one-line description, and the list of slugs
-you folded in. If you wrote nothing, say why.
+Report back: the article name, its one-line description, the slugs you folded
+in and deleted, and any you kept on disk with the reason. If you wrote nothing,
+say why.

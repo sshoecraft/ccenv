@@ -2,6 +2,30 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-10-12 — v0.39.0
+
+**ccmemory v0.22.0: compaction deletes what it compacted.**
+
+Compaction only ever added files. Each pass wrote a `compiled-` article and
+left every note it folded on disk, so the store grew with every pass. On mxfs,
+638 of 650 raw notes were already folded into one of 101 articles and were
+all still there, so most of its knowledge was stored twice. The notes were
+kept because an article was a dense summary, not trusted to replace its
+sources.
+
+An article is now a lossless merge that replaces its sources. The compactor
+keeps every concrete fact (quotes, numbers, paths, commands, measured
+results), re-reads the written article against each source, and deletes each
+source it has verified with the new `memory_delete` tool. A source that does
+not verify stays. Existing articles are handled by a backfill: the compaction
+plan hands out each article that still has sources on disk, and its compactor
+folds back anything the summary dropped before deleting.
+
+`memory_get` also failed on every note whose index row was written on another
+host. The index stored absolute paths and never refreshed a row whose content
+had not changed, so on this box 43 of 51 rows still pointed at the macOS
+`/System/Volumes/Data/...` path.
+
 ## 2026-10-11 — v0.38.2
 
 **Base rules: the versioning rule let each defect count as its own problem.**

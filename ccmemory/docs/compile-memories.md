@@ -4,8 +4,10 @@
 
 Raw per-session ccmemory notes (one fact per `.md` file) pile up over time.
 Compaction folds a batch of related raw notes into ONE dense, deduplicated,
-cross-referenced `compiled-<topic>` article so the index stays useful. The raw
-notes stay as the source of truth — the compiled article is additive.
+cross-referenced `compiled-<topic>` article, then deletes the notes it folded.
+The article is a lossless merge, not a summary: it replaces its sources, so it
+keeps every concrete fact they held. Each source is deleted only after the
+compactor re-reads the article and finds that source's content there.
 
 ## Architecture
 
@@ -106,12 +108,37 @@ invocation, or any wait in the caller.
 
 ## Why count the backlog, not the total
 
-Compiled articles are additive — they never delete the raw notes. A naive
-`total > N` check would fire the nudge forever once crossed, even right after
-compacting. Counting raw memories that no compiled article **cites** makes the
-nudge self-resetting: the wikilinks a compile pass writes are the retirement
-record, so compiling drops the backlog toward zero until new notes accumulate,
-and it never goes quiet about notes that were genuinely skipped.
+A naive `total > N` check counts articles and every note a pass has not yet
+deleted, so it does not reflect what is left to do. Counting raw memories that
+no compiled article **cites** makes the nudge self-resetting: the wikilinks a
+compile pass writes are the retirement record, so compiling drops the backlog
+toward zero until new notes accumulate, and it never goes quiet about notes
+that were genuinely skipped. Folded notes still on disk are counted separately
+as `retained`, and the nudge fires on the sum, so a store that is fully folded
+but never cleaned up still gets its backfill.
+
+## Why the sources are deleted
+
+Compaction used to be additive: the raw notes stayed "as the source of truth"
+and the article was an extra, denser entry. That made every pass grow the
+store. On mxfs, 638 of 650 raw notes sat beside the 101 articles that already
+held them. If an article is faithful, its sources are a second copy; if it is
+not, the article is what needs fixing. So the article is written to replace
+its sources, and verification happens before deletion, per source.
+
+`memory_delete` is the only deletion path. It refuses `compiled-` articles and
+any note `folded_names()` does not report, so a behavior note cited by a
+`project` article (which cannot represent it in the first listing tier) cannot
+be deleted on that article's strength. Links to a deleted note become plain
+`` `slug` `` text so the citation survives as provenance.
+
+Existing articles were written as summaries, so they were never checked
+against their sources. `compaction_plan` hands each one out as a `backfill`
+group: its compactor re-reads the article and its sources, folds back
+whatever the summary dropped, rewrites the article under the same name, and
+then deletes. Where the project has git, the history keeps every deleted note.
+Where it has none, deletion is permanent, which is why verification comes
+first.
 
 ## History
 

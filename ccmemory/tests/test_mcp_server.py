@@ -254,3 +254,16 @@ def test_compaction_plan_tool_says_done_for_a_compiled_seed(memory_dir):
     plan = call_json("memory_compaction_plan", seed="already-gone")
     assert plan["status"] == "done"
     assert plan["groups"] == []
+
+
+def test_memory_delete_removes_a_folded_note_and_refuses_the_rest(memory_dir):
+    write_memory(memory_dir, "folded")
+    write_memory(memory_dir, "uncited")
+    write_memory(memory_dir, "compiled-topic", body="[[folded]]")
+    result = call_json("memory_delete", name="folded")
+    assert result["deleted"].endswith("folded.md")
+    assert not (memory_dir / "folded.md").exists()
+    assert call("memory_delete", name="uncited").startswith("refused")
+    assert call("memory_delete", name="compiled-topic").startswith("refused")
+    assert (memory_dir / "uncited.md").exists()
+    assert (memory_dir / "compiled-topic.md").exists()

@@ -69,12 +69,16 @@ reports `backlog`, `threshold`, and `candidate_names`. `ccmemory compile --plan`
 
 4. **Synthesize** ONE article following these exact rules:
 
-   > You are compiling raw per-session memory files into a single dense knowledge
-   > article. Read the inputs. Produce ONE markdown article that:
+   > You are merging raw memory files into a single knowledge article that REPLACES
+   > them: once it is verified, the inputs are deleted, so anything the article leaves
+   > out is lost. Read the inputs. Produce ONE markdown article that:
    >
    > 1. Identifies the central topic the inputs share.
-   > 2. Extracts every decision, lesson, and recurring failure mode — deduplicated
-   >    and chronologically ordered when timing matters.
+   > 2. Keeps every concrete fact from every input — decisions, lessons, failure modes,
+   >    and the specifics behind them: exact quotes, numbers, versions, paths, commands,
+   >    error text, measured results, and who said what. Deduplicate only where two
+   >    inputs say the same thing; never trade a specific for a summary of it. Order
+   >    chronologically when timing matters.
    > 3. Cross-references the source memories using their literal slugs as wikilinks
    >    (e.g. `[[pythonuserbase-in-zshenv]]`). MANDATORY — cite EVERY input you
    >    folded in, with its exact slug. These wikilinks are the retirement record:
@@ -82,7 +86,8 @@ reports `backlog`, `threshold`, and `candidate_names`. `ccmemory compile --plan`
    >    it, and `count_backlog` counts a note as compiled precisely when it is
    >    cited. An input you fold in but do not cite stays in the backlog and keeps
    >    costing every session tokens forever.
-   > 4. Is terse. Engineering prose, no platitudes, no headers like "## Summary".
+   > 4. Is terse in its prose, never in its facts. Engineering prose, no platitudes, no
+   >    headers like "## Summary".
 
 5. **Write it** with `memory_write`:
    - `name`: `compiled-<short-kebab-topic>` (the `compiled-` prefix is REQUIRED — it marks
@@ -99,14 +104,19 @@ reports `backlog`, `threshold`, and `candidate_names`. `ccmemory compile --plan`
    `memory_write` writes `compiled-<topic>.md` at the memory-dir root and reindexes, so the
    article is searchable immediately and the Stop hook regenerates `MEMORY.md`.
 
-6. **Do NOT delete the raw memories.** The compiled article is additive — the raw notes stay
-   as the source of truth, fully searchable via `memory_search` / `memory_get`. What changes
-   is that a cited note is no longer listed by `memory_list` (the article represents it), so
-   compaction is what actually reduces per-session listing cost. Citing is the whole
-   mechanism: an uncited note is neither retired from the listing nor cleared from the
-   backlog, no matter how thoroughly you folded its content in.
+6. **Verify, then delete the sources.** The article replaces its inputs. Re-read the
+   article you wrote (`memory_get`) and, for each input, check that every concrete fact it
+   held is in the article: quotes, numbers, versions, paths, commands, measured results. If
+   one is missing, add it and rewrite the article before going on. Then
+   `memory_delete(name)` each verified input. An input you cannot verify stays — do not
+   delete it. Citing is still required: `memory_delete` refuses a note no article folds.
 
-7. **Report** to the user: which raw memories you folded in, the new article name, and a
-   one-line description. If the backlog is still over `threshold`, keep going — inline
+   A `kind: backfill` group is an existing article (`article`) whose sources are still on
+   disk. Read the article and every source, fold back whatever the article dropped, rewrite
+   it with `memory_write` under the same `name` and `type`, then verify and delete exactly
+   as above.
+
+7. **Report** to the user: which raw memories you folded in and deleted, any you kept and
+   why, the article name, and a one-line description. If the backlog is still over `threshold`, keep going — inline
    compaction that stops after one group leaves the rest to the next session, and that is
    exactly how a backlog reaches the hundreds.

@@ -2,6 +2,37 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.22.0
+
+**Compaction deletes the sources it folded.**
+
+Compaction used to be additive. A `compiled-` article cited its inputs and the
+raw notes stayed on disk "as the source of truth", so every pass made the store
+bigger. On mxfs, 638 of 650 raw notes were folded into an article and still
+present.
+
+- `memory_delete(name)` removes a raw note that a `compiled-` article folds:
+  the file, its index row and its edges. Links to it elsewhere become plain
+  `` `slug` `` provenance text, so nothing links to a missing note. It refuses
+  `compiled-` articles and any note not folded by an article that can
+  represent it in the listing.
+- `COMPILER_PROMPT`, the `memory-compactor` agent and the `compile-memories`
+  skill now ask for a lossless merge rather than a summary: every concrete fact
+  is kept, deduplicated only where two sources say the same thing. The
+  compactor verifies the written article against each source before deleting
+  it.
+- `compaction_plan` also emits `kind: backfill` groups, one per existing
+  article that still has folded sources on disk, seeded by the article's own
+  slug. Its compactor folds back what the summary dropped, then deletes.
+- `count_backlog` reports `retained` (folded notes still on disk), and the
+  nudge fires on `backlog + retained`, so the backfill gets dispatched.
+
+**`memory_get` resolved stale absolute paths.** `reindex` skipped any file
+whose content hash was unchanged, so an index row kept whatever absolute path
+it was first written with. A store shared over NFS between macOS and Linux kept
+`/System/Volumes/Data/...` rows that do not exist on Linux, and `memory_get`
+failed on them. `reindex` now also refreshes a row whose path changed.
+
 ## v0.21.0
 
 **Compaction is automatic again.**

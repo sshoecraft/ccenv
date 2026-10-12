@@ -246,7 +246,11 @@ def test_plan_skips_cited_notes(memory_dir):
     write_memory(memory_dir, "corrected", type="feedback")
     write_memory(memory_dir, "compiled-prior", body="[[folded]]")
     plan = compile_mod.compaction_plan(memory_dir)
-    assert sorted(plan_names(plan)) == ["corrected", "pending", "pref"]
+    new = [n for g in plan["groups"] if g["kind"] != "backfill" for n in g["names"]]
+    assert sorted(new) == ["corrected", "pending", "pref"]
+    # The folded note is not compiled again; it is handed out for deletion.
+    assert [(g["seed"], g["names"]) for g in plan["groups"]
+            if g["kind"] == "backfill"] == [("compiled-prior", ["folded"])]
 
 
 def test_plan_never_mixes_the_two_pools(memory_dir):
@@ -341,10 +345,14 @@ def test_plan_reports_done_for_an_already_compiled_seed(memory_dir):
 
 
 def test_plan_on_an_empty_backlog(memory_dir):
+    from ccmemory.store import Store
     write_memory(memory_dir, "folded")
     write_memory(memory_dir, "compiled-prior", body="[[folded]]")
+    with Store(memory_dir) as s:
+        s.delete_folded("folded")
     plan = compile_mod.compaction_plan(memory_dir)
     assert plan["backlog"] == 0
+    assert plan["retained"] == 0
     assert plan["groups"] == []
     assert plan["group_count"] == 0
 
@@ -360,3 +368,60 @@ def test_plan_size_and_wave_env_overrides(monkeypatch):
     assert compile_mod.plan_wave_size() == 2
     monkeypatch.setenv("CCMEMORY_COMPILE_GROUP_SIZE", "garbage")
     assert compile_mod.plan_group_size() == compile_mod.DEFAULT_GROUP_SIZE
+
+
+def test_retained_counts_folded_notes_still_on_disk(memory_dir):
+    write_memory(memory_dir, "a")
+    write_memory(memory_dir, "b")
+    write_memory(memory_dir, "c")
+    write_memory(memory_dir, "compiled-topic", body="[[a]] [[b]]")
+    b = compile_mod.count_backlog(memory_dir)
+    assert b["backlog"] == 1
+    assert b["retained"] == 2
+
+
+def test_retained_notes_trigger_the_nudge(memory_dir, monkeypatch):
+    # A store whose notes are all folded but still on disk has nothing left to
+    # compile and everything left to delete; the backfill has to be asked for.
+    monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
+    monkeypatch.setenv("CCMEMORY_COMPILE_COOLDOWN", "0")
+    for n in "abc":
+        write_memory(memory_dir, n)
+    write_memory(memory_dir, "compiled-topic", body="[[a]] [[b]] [[c]]")
+    b = compile_mod.count_backlog(memory_dir)
+    assert b["backlog"] == 0
+    assert not compile_mod.nudge_suppressed(b)
+
+
+def test_plan_emits_one_backfill_group_per_article_with_sources(memory_dir):
+    write_memory(memory_dir, "a")
+    write_memory(memory_dir, "b")
+    write_memory(memory_dir, "shared")
+    write_memory(memory_dir, "pending")
+    write_memory(memory_dir, "compiled-one", body="[[a]] [[shared]]")
+    write_memory(memory_dir, "compiled-two", body="[[b]] [[shared]]")
+    plan = compile_mod.compaction_plan(memory_dir)
+    backfill = [g for g in plan["groups"] if g["kind"] == "backfill"]
+    assert [(g["seed"], g["names"]) for g in backfill] == [
+        ("compiled-one", ["a", "shared"]),
+        ("compiled-two", ["b"]),
+    ]
+    assert all(g["article"] == g["seed"] for g in backfill)
+    assert plan["retained"] == 3
+    # New-note groups come first; backfill only takes space.
+    kinds = [g["kind"] for g in plan["groups"]]
+    assert kinds.index("backfill") > max(
+        i for i, k in enumerate(kinds) if k != "backfill")
+    one = compile_mod.compaction_plan(memory_dir, seed="compiled-two")
+    assert one["status"] == "ok" and one["groups"][0]["names"] == ["b"]
+
+
+def test_backfill_group_disappears_once_its_sources_are_deleted(memory_dir):
+    from ccmemory.store import Store
+    write_memory(memory_dir, "a")
+    write_memory(memory_dir, "compiled-topic", body="[[a]]")
+    with Store(memory_dir) as s:
+        s.delete_folded("a")
+    plan = compile_mod.compaction_plan(memory_dir, seed="compiled-topic")
+    assert plan["status"] == "done"
+    assert compile_mod.count_backlog(memory_dir)["retained"] == 0

@@ -78,9 +78,21 @@ both times.
 
 A `compiled-<topic>` article wikilinks the raw notes it absorbed. Those
 wikilinks are stored in `mem_edges`, and `Store.folded_names()` reads them to
-omit cited notes from the listing — the article now represents them. **Folding
-never deletes anything**; folded notes stay fully reachable via
-`memory_search` / `memory_get` / `memory_list(include_folded=true)`.
+omit cited notes from the listing — the article now represents them.
+
+**The article replaces its sources.** It is a lossless merge: every concrete
+fact the inputs held, deduplicated only where two say the same thing. The
+compactor re-reads the written article against each source and deletes each
+one it verifies with `memory_delete` (`Store.delete_folded`), which refuses
+anything `folded_names()` does not report and turns links to the deleted note
+into plain `` `slug` `` text. A source that does not verify stays on disk and
+stays folded. Compaction that kept every source made the store grow with each
+pass: mxfs reached 650 raw notes, 638 of them already held by an article.
+
+`compaction_plan` emits a `kind: backfill` group for every article that still
+has folded sources on disk, seeded by the article's own slug and never split,
+so two agents never rewrite one article. `count_backlog` reports these as
+`retained`, and the nudge fires on `backlog + retained`.
 
 `compile.COMPILABLE_TYPES` is **every** type. A type a compile pass cannot
 ingest is a type nothing can retire, so it accumulates until it overflows

@@ -199,9 +199,10 @@ field of its own response — read that field, don't skip it:
   articles, then raw `project`/`reference` notes. An underspending tier
   donates its remainder to the ones below it.
 - Memories already folded into a `compiled-<topic>` article are omitted —
-  the article represents them. They are NOT deleted and remain fully
-  reachable via `memory_search` / `memory_get`, or with
-  `memory_list(include_folded=true)`.
+  the article represents them. Until the compactor verifies the article and
+  deletes them, they remain reachable via `memory_search` / `memory_get`, or
+  with `memory_list(include_folded=true)`; after that, the article is the
+  record.
 - `shown` / `total` / `folded` / `withheld` come back as explicit counts.
   A listing that shows 90 of 1,848 is not "everything this project knows",
   and you must not treat it as such.
@@ -344,7 +345,8 @@ def _compaction_nudge(memory_dir: Path) -> str:
         return (
             f"\n\n---\n📦 Memory compaction available: {b['backlog']} of "
             f"{b['total_raw']} raw memories have never been folded into a "
-            f"`compiled-` article (threshold {b['threshold']}).\n\n"
+            f"`compiled-` article, and {b.get('retained', 0)} folded ones are "
+            f"still on disk awaiting deletion (threshold {b['threshold']}).\n\n"
             f"**Do not stop what you are doing.** With your first tool calls, "
             f"dispatch one background agent per group, then carry straight on "
             f"with the user's request. Do not wait on the agents and do not "
@@ -357,9 +359,9 @@ def _compaction_nudge(memory_dir: Path) -> str:
             f"Dispatch once per session; the `memory_list` note repeats this "
             f"backlog and is not a second request. Each agent runs on sonnet, "
             f"fetches its own group via `memory_compaction_plan`, and the memory "
-            f"bodies it reads never enter your context. Compacting shrinks every "
-            f"future `memory_list`: citing a note in a compiled article retires "
-            f"it from the listing while leaving it searchable."
+            f"bodies it reads never enter your context. Compacting shrinks the "
+            f"store: each article replaces the notes it folds, and the agent "
+            f"deletes them once it has verified the article holds them."
         )
     except Exception:
         return ""
