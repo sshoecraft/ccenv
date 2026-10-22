@@ -128,7 +128,8 @@ def test_note_carries_the_background_dispatch(memory_dir, monkeypatch):
     note = payload["note"]
     assert "Compaction backlog: 5" in note
     assert 'Agent(subagent_type="memory-compactor"' in note
-    assert "memory_compaction_plan()" in note
+    # One dispatch of claiming agents: nothing for the session to relaunch.
+    assert "nothing to relaunch" in note
     assert "Do not wait on the agents" in note
     assert "already dispatched them this session" in note
     assert "NOT a task" not in note
@@ -174,8 +175,11 @@ def test_feedback_overflow_with_backlog_is_handled_without_the_user(memory_dir, 
 
 
 def test_feedback_overflow_with_nothing_to_compact_tells_the_user(memory_dir, monkeypatch):
-    # Every behavior entry is already a compiled article, so compaction cannot
-    # make room. Raising the budget is the only fix, and only the user can.
+    # Every behavior entry is already a compiled article and no two fit in one
+    # merge, so compaction cannot make room. Raising the budget is the only
+    # fix, and only the user can. Cooldown off, so it is not what blocks.
+    monkeypatch.setenv("CCMEMORY_COMPILE_COOLDOWN", "0")
+    monkeypatch.setenv("CCMEMORY_ARTICLE_MAX_BYTES", "1")
     overflow_feedback(memory_dir, monkeypatch, prefix="compiled-fb")
     payload = call_json("memory_list")
     note = payload["note"]
@@ -185,6 +189,40 @@ def test_feedback_overflow_with_nothing_to_compact_tells_the_user(memory_dir, mo
     assert "CCMEMORY_LIST_TOKEN_BUDGET (currently 500)" in note
     assert "do not report it to the user" not in note
     assert "memory-compactor" not in note
+
+
+def test_feedback_overflow_of_mergeable_articles_is_handled_without_the_user(
+        memory_dir, monkeypatch):
+    # The mxfs case: every behavior note compiled, 120 feedback articles over
+    # the tier, and the note told the user to raise the budget. Merging the
+    # articles makes room, and that is the session's dispatch, not the user's.
+    monkeypatch.setenv("CCMEMORY_COMPILE_COOLDOWN", "0")
+    overflow_feedback(memory_dir, monkeypatch, prefix="compiled-fb")
+    raw = call("memory_list")
+    # The longest note the server writes still fits the envelope reserve.
+    assert -(-len(raw) // 4) <= 500
+    payload = json.loads(raw)
+    note = payload["note"]
+    assert payload["load_bearing_withheld"] > 0
+    assert "first-tier articles are due to merge" in note
+    assert "do not report it to the user" in note
+    assert 'Agent(subagent_type="memory-compactor"' in note
+    assert "WARNING" not in note
+    assert "Tell the user" not in note
+
+
+def test_memory_delete_takes_an_article_only_with_its_merge_hash(memory_dir):
+    write_memory(memory_dir, "compiled-absorbed", type="feedback", body="lesson")
+    write_memory(memory_dir, "compiled-kept", type="feedback", body="lesson [[compiled-absorbed]]")
+    from ccmemory.store import Store
+    with Store(memory_dir) as s:
+        s.reindex()
+        h = s.db.execute("SELECT content_hash FROM mem WHERE name = 'compiled-absorbed'"
+                         ).fetchone()[0]
+    assert call("memory_delete", name="compiled-absorbed").startswith("refused")
+    result = call_json("memory_delete", name="compiled-absorbed", expect_hash=h)
+    assert result["deleted"].endswith("compiled-absorbed.md")
+    assert not (memory_dir / "compiled-absorbed.md").exists()
 
 
 def test_feedback_overflow_respects_the_cooldown(memory_dir, monkeypatch):
@@ -267,3 +305,19 @@ def test_memory_delete_removes_a_folded_note_and_refuses_the_rest(memory_dir):
     assert call("memory_delete", name="compiled-topic").startswith("refused")
     assert (memory_dir / "uncited.md").exists()
     assert (memory_dir / "compiled-topic.md").exists()
+
+
+def test_memory_write_refuses_a_compiled_article_over_the_ceiling(memory_dir, monkeypatch):
+    # The ceiling used to bound only what a merge was handed; two merges came
+    # out over it, and backfill and note groups had no bound at all. Enforced
+    # where the article is written, no path can produce one.
+    monkeypatch.setenv("CCMEMORY_ARTICLE_MAX_BYTES", "100")
+    refused = call("memory_write", name="compiled-big", type="feedback",
+                   description="d", body="x" * 101)
+    assert refused.startswith("refused") and "split it" in refused
+    assert not (memory_dir / "compiled-big.md").exists()
+    call("memory_write", name="compiled-fits", type="feedback", description="d", body="x" * 100)
+    assert (memory_dir / "compiled-fits.md").exists()
+    # Raw notes are not articles; the ceiling is not theirs.
+    call("memory_write", name="raw-note", type="feedback", description="d", body="x" * 500)
+    assert (memory_dir / "raw-note.md").exists()

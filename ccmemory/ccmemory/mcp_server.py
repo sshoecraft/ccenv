@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 
-from .store import Store
+from .store import (COMPILED_PREFIX, Store, DEFAULT_LIST_TOKEN_BUDGET,
+                    LIST_ENVELOPE_TOKENS, list_entry_budget, list_token_budget)
 from . import index_gen
 from . import paths
 
@@ -41,32 +41,6 @@ def _resolve_dir() -> Path:
     # on every machine — no per-project manual step. Idempotent.
     paths.ensure_gitignore(d)
     return d
-
-
-#: Token ceiling for one memory_list payload. The session protocol makes
-#: memory_list the mandatory first call of EVERY session, so its cost is paid
-#: before the user's first message and, under ccloop, again on every relay. An
-#: unbounded listing measured ~171k tokens (86% of a 200k window) on a
-#: 1,695-memory store. Small stores never reach this and are unaffected.
-DEFAULT_LIST_TOKEN_BUDGET = 16384
-
-
-#: Tokens held back from the entry budget for the payload envelope — the
-#: counts object and the `note`, which runs to ~760 chars on a store with
-#: folded/withheld/COMPACTION-DUE clauses all firing. Budgeting only the
-#: entries left this unmodelled and every listing overshot by ~210 tokens.
-LIST_ENVELOPE_TOKENS = 300
-
-
-def list_token_budget() -> int:
-    """Per-call memory_list token ceiling; 0 disables bounding entirely."""
-    raw = os.environ.get("CCMEMORY_LIST_TOKEN_BUDGET")
-    if raw:
-        try:
-            return max(0, int(raw))
-        except ValueError:
-            pass
-    return DEFAULT_LIST_TOKEN_BUDGET
 
 
 def _list_note(memory_dir, counts: dict, *, include_folded: bool,
@@ -109,13 +83,14 @@ def _list_note(memory_dir, counts: dict, *, include_folded: bool,
         compile_mod = b = None
 
     # An overflowing first tier is the session's to fix, not the user's: the
-    # user's only lever is an env var, and the real fix — compacting the
-    # behavior notes into always-listed articles — is a dispatch the session
-    # can make itself. Only when no behavior note is left to compact does the
-    # budget itself have to grow, and that is the one case worth telling the
-    # user about.
+    # user's only lever is an env var, and the real fixes — compacting the
+    # behavior notes into always-listed articles, and merging those articles —
+    # are dispatches the session can make itself. Only when neither is left
+    # does the budget itself have to grow, and that is the one case worth
+    # telling the user about.
     lb = counts.get("load_bearing_withheld")
     behavior = b["behavior_backlog"] if b else None
+    merge = b.get("merge_backlog", 0) if b else 0
     if lb:
         lead = (
             f"{lb} user/feedback memories did not fit "
@@ -124,21 +99,24 @@ def _list_note(memory_dir, counts: dict, *, include_folded: bool,
             + ". They record behavior and corrections and have no topic to "
             "search for, so memory_search cannot recover them."
         )
-        if behavior:
+        if behavior or merge:
             recover = "" if type_filter else (
                 " Recover them now with memory_list(type=\"feedback\") and "
                 "memory_list(type=\"user\").")
+            work = " and ".join(filter(None, (
+                f"{behavior} user/feedback notes are still uncompiled" if behavior else "",
+                f"{merge} first-tier articles are due to merge" if merge else "")))
             parts.append(
-                f"{lead}{recover} {behavior} user/feedback notes are still "
-                "uncompiled, and compacting them is what makes room: "
-                "memory_compaction_plan() lists their groups first, so they go "
-                "in the first wave of the compactor dispatch. This resolves "
-                "itself — do not report it to the user."
+                f"{lead}{recover} {work}, and that compaction is what makes "
+                "room: memory_compaction_plan() lists the first-tier groups "
+                "first, so they go in the first wave of the compactor dispatch. "
+                "This resolves itself — do not report it to the user."
             )
         elif behavior == 0:
             parts.append(
-                f"WARNING: {lead} Every user/feedback note is already compiled, "
-                "so compaction cannot make room. Tell the user: "
+                f"WARNING: {lead} Every user/feedback note is already compiled "
+                "and no first-tier article can be merged, so compaction cannot "
+                "make room. Tell the user: "
                 f"CCMEMORY_LIST_TOKEN_BUDGET (currently {list_token_budget()}) "
                 "is too small for this project's behavior memories, and raising "
                 "it is the fix."
@@ -156,19 +134,21 @@ def _list_note(memory_dir, counts: dict, *, include_folded: bool,
         # threshold paces routine compaction, and a withheld correction is not
         # routine. The cooldown still applies — a compile pass that just ran
         # may still have agents in flight on these notes.
-        overflow = bool(lb and behavior) and not compile_mod.in_cooldown(b)
+        overflow = bool(lb and (behavior or merge)) and not compile_mod.in_cooldown(b)
         if overflow or not compile_mod.nudge_suppressed(b):
+            merging = (f", and {merge} first-tier articles are due to merge into "
+                       "their topic-mates") if merge else ""
             parts.append(
                 f"Compaction backlog: {b['backlog']} memories have never been "
-                f"folded into a compiled- article, and {b.get('retained', 0)} "
-                "folded ones are still on disk awaiting deletion (threshold "
-                f"{b['threshold']}). "
+                f"folded into a compiled- article{',' if merge else ', and'} "
+                f"{b.get('retained', 0)} folded ones are still on disk awaiting "
+                f"deletion{merging} (threshold {b['threshold']}). "
                 "Do not stop what you are doing: unless you already dispatched "
-                "them this session, call memory_compaction_plan() and make one "
-                f"background {compile_mod.AGENT_CALL} call per group, "
-                f"{compile_mod.plan_wave_size()} at a time, then carry straight "
-                "on with the user's request. Do not wait on the agents and do "
-                "not compact inline."
+                f"them this session, make {compile_mod.plan_wave_size()} background "
+                f"{compile_mod.AGENT_CALL} calls, once — each agent claims groups "
+                "from the stored plan until none are left, so there is nothing "
+                "to relaunch — then carry straight on with the user's request. "
+                "Do not wait on the agents and do not compact inline."
             )
 
     return " ".join(parts)
@@ -231,7 +211,10 @@ def build_app():
         },
         "memory_delete": {
             "type": "object",
-            "properties": {"name": {"type": "string", "description": "slug of a raw note a compiled- article folds"}},
+            "properties": {
+                "name": {"type": "string", "description": "slug of a raw note a compiled- article folds, or of an article a merge absorbed"},
+                "expect_hash": {"type": "string", "description": "required for a compiled- article: its hash from the merge group's `hashes`"},
+            },
             "required": ["name"],
         },
         "memory_stats": {"type": "object", "properties": {}},
@@ -240,6 +223,7 @@ def build_app():
             "type": "object",
             "properties": {
                 "seed": {"type": "string", "description": "return only the group seeded by this slug"},
+                "take": {"type": "boolean", "description": "a compactor asking for work: claim and return the next unclaimed group", "default": False},
             },
         },
     }
@@ -263,8 +247,7 @@ def build_app():
                 type_filter = arguments.get("type") or None
                 include_folded = bool(arguments.get("include_folded") or False)
                 limit = int(arguments.get("limit") or 0)
-                budget = list_token_budget()
-                entry_budget = max(1, budget - LIST_ENVELOPE_TOKENS) if budget else 0
+                entry_budget = list_entry_budget()
                 with Store(d) as s:
                     s.reindex()
                     results, counts = s.list_all(
@@ -296,6 +279,17 @@ def build_app():
                 desc = arguments["description"]
                 body = arguments["body"]
                 tags = arguments.get("tags") or []
+                if slug.startswith(COMPILED_PREFIX):
+                    from . import compile as compile_mod
+                    size = len(body.strip().encode("utf-8"))
+                    ceiling = compile_mod.article_max_bytes()
+                    if size > ceiling:
+                        return _err(
+                            f"refused: compiled- article {slug} is {size} bytes, over the "
+                            f"{ceiling}-byte ceiling (CCMEMORY_ARTICLE_MAX_BYTES). memory_get "
+                            "returns a whole article, so split it by subtopic into compiled- "
+                            "articles each under the ceiling, of the same type, each citing "
+                            "as [[slug]] every input whose facts it holds. Nothing was written.")
                 cap = index_gen.DEFAULT_DESC_CAP
                 if len(desc) > cap:
                     desc = desc[: cap - 1].rstrip() + "…"
@@ -314,7 +308,8 @@ def build_app():
                 slug = arguments.get("name") or ""
                 with Store(d) as s:
                     try:
-                        result = s.delete_folded(slug)
+                        result = s.delete_folded(
+                            slug, expect_hash=arguments.get("expect_hash") or None)
                     except ValueError as e:
                         return _err(str(e))
                 return _text(json.dumps(result, indent=2))
@@ -335,8 +330,7 @@ def build_app():
                     st["list_tokens_unbounded"] = (
                         sum(s._entry_tokens(e) for e in full) + LIST_ENVELOPE_TOKENS)
                     budget = list_token_budget()
-                    entry_budget = max(1, budget - LIST_ENVELOPE_TOKENS) if budget else 0
-                    bounded, counts = s.list_all(token_budget=entry_budget)
+                    bounded, counts = s.list_all(token_budget=list_entry_budget())
                     # Must be the cost of the payload memory_list actually
                     # ships, envelope included — this field exists to be
                     # trusted as a budget check, and reporting entries-only
@@ -353,7 +347,8 @@ def build_app():
 
             if name == "memory_compaction_plan":
                 from . import compile as compile_mod
-                plan = compile_mod.compaction_plan(d, seed=arguments.get("seed") or None)
+                plan = compile_mod.compaction_plan(d, seed=arguments.get("seed") or None,
+                                                   take=bool(arguments.get("take")))
                 return _text(json.dumps(plan, indent=2, default=str))
 
             return _err(f"unknown tool: {name}")
@@ -387,7 +382,11 @@ def build_app():
 
     @app.tool(
         name="memory_write",
-        description="Create or overwrite a memory file. Description is capped at 150 chars.",
+        description=(
+            "Create or overwrite a memory file. Description is capped at 150 chars. A compiled- "
+            "article over the size ceiling (CCMEMORY_ARTICLE_MAX_BYTES, default 24 KiB) is refused: "
+            "split it into several compiled- articles."
+        ),
         schema=SCHEMAS["memory_write"],
     )
     def memory_write(**kwargs):
@@ -398,7 +397,9 @@ def build_app():
         description=(
             "Delete a raw note that a compiled- article has folded in — the compaction step that "
             "removes a source once the article holding it has been verified. Links to it elsewhere "
-            "become plain `slug` text. Refuses compiled- articles and any note no article folds."
+            "become plain `slug` text. Refuses any note no article folds. A compiled- article goes "
+            "only as the absorbed half of a merge group: another article must cite it and "
+            "`expect_hash` must match the hash the plan gave, or it is refused."
         ),
         schema=SCHEMAS["memory_delete"],
     )
@@ -425,10 +426,13 @@ def build_app():
         name="memory_compaction_plan",
         description=(
             "Partition the uncompiled memory backlog, plus every article whose folded sources are "
-            "still on disk (kind 'backfill'), into disjoint compactor groups. "
-            "Returns {backlog, retained, group_count, group_size, wave, groups:[{seed, kind, size, names}]}. "
-            "Groups are addressed by `seed` slug, never by index. Pass `seed` to fetch one group; "
-            "status 'done' means that group is already compiled — write nothing, and do not take another."
+            "still on disk (kind 'backfill') and, when the first listing tier is over its budget "
+            "share, first-tier articles to merge (kind 'merge'), into disjoint compactor groups. "
+            "The plan is stored and reused for the whole run, so groups do not shift while it is worked. "
+            "Returns {backlog, retained, merge, group_count, group_size, wave, agent_groups, "
+            "groups:[{seed, kind, size, names}]}. A compactor passes `take: true` to claim and get "
+            "the next unclaimed group; status 'done' means none is left. Pass `seed` to fetch one "
+            "group; status 'done' means that group is already compiled — write nothing."
         ),
         schema=SCHEMAS["memory_compaction_plan"],
     )

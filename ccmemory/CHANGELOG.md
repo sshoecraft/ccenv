@@ -2,6 +2,94 @@
 
 Per the global rule: patch = fix, minor = feature, major = breaking.
 
+## v0.23.1
+
+**Fixes from the first live article-merge run, on mxfs.**
+
+The run's plan had 28 groups, but only 10 merges and 1 note group were
+completed. The session dispatched 13 compactors: 9 from its first plan and 4
+from a second it computed at 13:40. After that it returned to the user's work
+and launched nothing more. Two of the 13 agents were told their seed was
+`done` before doing any work: every merge changes the store, so the
+recomputed plan no longer contained their groups. One plan-2 group named an
+article a plan-1 agent had absorbed 0.5 s earlier. All 19 deletes succeeded
+and none were refused.
+
+- **The plan is stored for the run.** `compaction_plan` writes the partition
+  to `compaction-plan.json` and serves it until every group is done or it is
+  an hour old (`CCMEMORY_COMPILE_PLAN_TTL`). Each call drops what has
+  finished. Notes written mid-run wait for the next plan. `build_groups` is
+  the partitioning, split out of `compaction_plan`.
+- **Compactors claim their own groups.** `memory_compaction_plan(take=true)`
+  returns the next unclaimed group and claims it with an `O_EXCL` file under
+  `compaction-claims/<plan id>/`. A claim older than
+  `CCMEMORY_COMPILE_CLAIM_LEASE` (30 min) is taken over. The nudge and the
+  `memory_list` note now ask for `wave` agents, dispatched once. Each agent
+  works groups until `done` or `agent_groups` (6), so nothing depends on the
+  session relaunching. `AGENT_CALL` is now "Compact memory groups from the
+  plan." The nudge no longer lists seeds, and `NUDGE_SEED_CAP` is gone.
+- **The size ceiling is enforced on every compiled article, where it is
+  written.** `memory_write` refuses a `compiled-` article over
+  `CCMEMORY_ARTICLE_MAX_BYTES` (24 KiB) and says to split it by subtopic. The
+  knob was `CCMEMORY_MERGE_MAX_BYTES` and bounded only a merge's inputs. Two
+  merges came out at 25,833 and 26,729 bytes, and backfill and note groups had
+  no bound at all.
+- **Oversized articles are split.** `build_groups` emits a `kind: split`
+  group for each existing article over the ceiling, unless a backfill owns it.
+  The article keeps part under its name, the rest goes to new articles with
+  their citations, and nothing is deleted.
+- Merge inputs are packed to `article_max_bytes() / MERGE_GROWTH` (1.10).
+  Merged articles came out 2% to 9.3% over their inputs, and the margin keeps
+  a merge clear of the write-time refusal.
+- The plan file and claims directory are added to the store's `.gitignore`.
+
+## v0.23.0
+
+**Compiled feedback articles can be merged, so the first listing tier has a
+way to shrink.**
+
+Feedback articles live in the first listing tier, and compaction never
+touched an article once written, so that tier had no drain once every
+behavior note was compiled. mxfs reached 120 feedback articles, 8,339 tokens
+against a 4,925-token share, and `_list_note` told the user to raise the
+budget.
+
+- `compile.merge_groups` and `compile.behavior_excess`: while the first tier
+  costs more than `LIST_TIER_SHARES[0]` of the entry budget,
+  `compaction_plan` emits `kind: merge` groups. Each has the `article` that
+  stays (also the seed), the `names` it absorbs, and their `hashes`. Members
+  are BM25 topic-mates packed under `CCMEMORY_MERGE_MAX_BYTES` (default
+  24 KiB). `assorted` merges are used only if topical ones cannot clear the
+  excess, and the plan stops once the excess is covered. Articles that own a
+  backfill group, or that were written inside the cooldown, are excluded.
+  Merge groups are listed right after the behavior-note groups.
+- `Store.check_merged`, via `delete_folded(name, expect_hash=)` and
+  `memory_delete`'s new `expect_hash`: a `compiled-` article can be deleted
+  only if another article of a representing type cites it and its content
+  hash still matches the one in the plan.
+- `count_backlog` reports `merge_backlog`. It counts toward the nudge
+  threshold, and it routes a first-tier overflow to the compactor dispatch
+  rather than to the user.
+- `DEFAULT_LIST_TOKEN_BUDGET`, `LIST_ENVELOPE_TOKENS`, `list_token_budget()`
+  and a new `list_entry_budget()` moved from `mcp_server` to `store`, so
+  `compile` can size merges by the budget the listing spends. `mcp_server`
+  re-exports them.
+
+## v0.22.1
+
+**`memory_list` withholding feedback on a fully compacted store.**
+
+`LIST_TIER_SHARES` caps are cumulative, so unspent budget only ever flowed
+downward. Tier 1 was therefore held to 25% of the budget even when tiers 2
+and 3 needed far less than their 75%. On mxfs (120 feedback articles, 27
+project articles, one raw note) that withheld 49 feedback articles. The whole
+store costs 10,107 tokens and the entry budget is 19,700.
+
+- `list_all` now runs a second pass after the tiered one. It spends what is
+  still unspent on the withheld entries in tier order, newest-first inside
+  each tier, up to the full budget. The shares now only protect the tiers
+  below from starvation; they no longer strand budget nobody uses.
+
 ## v0.22.0
 
 **Compaction deletes the sources it folded.**

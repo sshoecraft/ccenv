@@ -19,5 +19,5 @@ export PYTHONUSERBASE="$HOME/.local"
 
 Do NOT add it as `env` in `~/.claude/settings.json` — that's redundant (zshenv already covers every Claude subprocess), non-portable (hardcoded abs path), and install.sh doesn't write it so it won't exist on other machines. install.sh's "REQUIRED: shell environment setup" warning checks the live env var (not the rc file), and now correctly points at `~/.zshenv`.
 
-Related: [[src-tree-appledouble-sidecars]]</body>
+Related: `src-tree-appledouble-sidecars`</body>
 </invoke>

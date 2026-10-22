@@ -196,8 +196,8 @@ field of its own response — read that field, don't skip it:
 - The token budget (`CCMEMORY_LIST_TOKEN_BUDGET`, default 16384) is spent in
   tiers, newest-first inside each: `user`/`feedback` first (behavior and
   corrections — nothing else surfaces these), then `compiled-<topic>`
-  articles, then raw `project`/`reference` notes. An underspending tier
-  donates its remainder to the ones below it.
+  articles, then raw `project`/`reference` notes. Budget one tier leaves
+  unspent goes to the others.
 - Memories already folded into a `compiled-<topic>` article are omitted —
   the article represents them. Until the compactor verifies the article and
   deletes them, they remain reachable via `memory_search` / `memory_get`, or
@@ -337,28 +337,27 @@ def _compaction_nudge(memory_dir: Path) -> str:
         groups = plan["groups"]
         if not groups:
             return ""
-        shown = groups[:compile_mod.NUDGE_SEED_CAP]
-        seeds = ", ".join(f"`{g['seed']}`" for g in shown)
-        if len(shown) < len(groups):
-            seeds += (f" — and {len(groups) - len(shown)} more; call "
-                      f"`memory_compaction_plan()` for the full list")
+        agents = min(plan["wave"], len(groups))
+        merge = b.get("merge_backlog", 0)
+        merging = (f", and {merge} first-tier articles are due to merge into "
+                   f"their topic-mates") if merge else ""
         return (
             f"\n\n---\n📦 Memory compaction available: {b['backlog']} of "
             f"{b['total_raw']} raw memories have never been folded into a "
-            f"`compiled-` article, and {b.get('retained', 0)} folded ones are "
-            f"still on disk awaiting deletion (threshold {b['threshold']}).\n\n"
+            f"`compiled-` article{',' if merge else ', and'} "
+            f"{b.get('retained', 0)} folded ones are still on disk awaiting "
+            f"deletion{merging} (threshold {b['threshold']}).\n\n"
             f"**Do not stop what you are doing.** With your first tool calls, "
-            f"dispatch one background agent per group, then carry straight on "
-            f"with the user's request. Do not wait on the agents and do not "
-            f"report on them unless one fails. The backlog is already "
-            f"partitioned into {plan['group_count']} disjoint groups, which share "
-            f"no notes and are safe to run concurrently — {plan['wave']} at a "
-            f"time, launching the next batch as they finish:\n\n"
+            f"dispatch {agents} background agents with this exact call, then "
+            f"carry straight on with the user's request. Do not wait on the "
+            f"agents and do not report on them unless one fails. The backlog is "
+            f"already partitioned into {plan['group_count']} disjoint groups in "
+            f"one stored plan, and each agent claims groups from it until none "
+            f"are left, so there is nothing to relaunch:\n\n"
             f"    {compile_mod.AGENT_CALL}\n\n"
-            f"Group seeds: {seeds}\n\n"
             f"Dispatch once per session; the `memory_list` note repeats this "
             f"backlog and is not a second request. Each agent runs on sonnet, "
-            f"fetches its own group via `memory_compaction_plan`, and the memory "
+            f"takes its groups via `memory_compaction_plan`, and the memory "
             f"bodies it reads never enter your context. Compacting shrinks the "
             f"store: each article replaces the notes it folds, and the agent "
             f"deletes them once it has verified the article holds them."

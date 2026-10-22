@@ -47,6 +47,10 @@ index.db-shm
 # macOS AppleDouble sidecars + Finder droppings (see paths.py for why).
 ._*
 .DS_Store
+
+# compaction run state: the stored plan and its per-group claims (compile.py).
+compaction-plan.json*
+compaction-claims/
 """
 
 # Patterns we guarantee are present even in a pre-existing .gitignore (e.g. one
@@ -61,6 +65,8 @@ GITIGNORE_REQUIRED = (
     ".memory_index.db",
     "._*",
     ".DS_Store",
+    "compaction-plan.json*",
+    "compaction-claims/",
 )
 
 

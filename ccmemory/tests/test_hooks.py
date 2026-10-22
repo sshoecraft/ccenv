@@ -400,39 +400,28 @@ def test_compaction_nudge_quiet_under_threshold(memory_dir, monkeypatch):
     assert hooks._compaction_nudge(memory_dir) == ""
 
 
-def test_compaction_nudge_asks_for_one_agent_per_group(memory_dir, monkeypatch):
-    """One agent per group, not one agent.
+def test_compaction_nudge_asks_for_one_dispatch_of_claiming_agents(memory_dir, monkeypatch):
+    """Several agents, dispatched once, that claim groups themselves.
 
-    Asking for a single compactor capped the drain at one group per session —
-    roughly a dozen notes — while ordinary use keeps writing new ones, so a
-    store that fell behind never caught up. A backlog of 227 had to be split
-    into 18 groups by hand before it could be fanned out.
+    Asking for a single compactor capped the drain at one group per session,
+    while ordinary use keeps writing new notes. Asking for one agent per group,
+    relaunched as each finished, depended on the session remembering to
+    relaunch: mxfs's dispatched 13 of 28 groups and then went back to its work.
     """
     from ccmemory import hooks
     monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
-    monkeypatch.setenv("CCMEMORY_COMPILE_GROUP_SIZE", "3")
-    for i in range(12):
+    monkeypatch.setenv("CCMEMORY_COMPILE_GROUP_SIZE", "1")
+    monkeypatch.setenv("CCMEMORY_COMPILE_WAVE", "4")
+    for i in range(30):
         write_memory(memory_dir, f"note{i}", body=f"unrelated body {i}")
 
     msg = hooks._compaction_nudge(memory_dir)
     plan = compile_mod.compaction_plan(memory_dir)
-    assert plan["group_count"] > 1
-    assert f"{plan['group_count']} disjoint groups" in msg
-    assert "one background agent per group" in msg
-    # Every seed the caller needs to dispatch is named.
-    for g in plan["groups"]:
-        assert f"`{g['seed']}`" in msg
-
-
-def test_compaction_nudge_defers_to_the_plan_tool_past_the_seed_cap(memory_dir, monkeypatch):
-    """The nudge is paid at every SessionStart, so it must not grow without
-    bound with the backlog."""
-    from ccmemory import hooks
-    monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
-    monkeypatch.setenv("CCMEMORY_COMPILE_GROUP_SIZE", "1")
-    for i in range(compile_mod.NUDGE_SEED_CAP + 5):
-        write_memory(memory_dir, f"note{i}", body=f"unrelated body {i}")
-
-    msg = hooks._compaction_nudge(memory_dir)
-    assert "memory_compaction_plan()` for the full list" in msg
-    assert msg.count("`note") <= compile_mod.NUDGE_SEED_CAP + 1
+    assert plan["group_count"] == 30
+    assert "30 disjoint groups" in msg
+    assert "dispatch 4 background agents" in msg
+    assert "nothing to relaunch" in msg
+    assert compile_mod.AGENT_CALL in msg
+    # Paid at every SessionStart: it names no seeds, so it does not grow with
+    # the backlog.
+    assert "`note" not in msg

@@ -27,12 +27,14 @@ the ``compile-memories`` skill embeds the same text. Keep them in sync.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any
 
-from .store import COMPILED_PREFIX, Store
+from .store import COMPILED_PREFIX, Store, list_entry_budget
 
 #: Types a compile pass will ingest, and therefore the only types compaction
 #: can ever retire from a listing. Every type is in it: a type left out is a
@@ -92,8 +94,43 @@ DEFAULT_WAVE = 6
 #: under the backlog — the failure COMPILABLE_TYPES documents above.
 MIN_CLUSTER = 3
 
-#: Seeds the nudge names inline before deferring to the plan tool for the rest.
-NUDGE_SEED_CAP = 24
+#: Where one compaction run's plan is kept, in the memory dir. Every compactor
+#: in the run works from it, so the groups cannot shift under them. Recomputed
+#: plans did: each merge changes the store and with it the BM25 scores the
+#: clustering runs on. On mxfs's first merge run, two compactors were told
+#: their seed was `done` before doing anything, and one group listed an
+#: article another group had absorbed half a second earlier.
+PLAN_FILE = "compaction-plan.json"
+
+#: One claim file per group, under a directory per stored plan. Created with
+#: O_EXCL, so exactly one compactor gets each group.
+CLAIMS_DIR = "compaction-claims"
+
+#: Seconds a stored plan is used before it is recomputed regardless.
+DEFAULT_PLAN_TTL = 3600
+
+#: Seconds before a claim whose compactor never finished can be taken over.
+DEFAULT_CLAIM_LEASE = 1800
+
+#: Groups one compactor works before it stops: what fits in one agent's
+#: context. A merge group runs 17-27 KB of articles in and about as much out.
+DEFAULT_AGENT_GROUPS = 6
+
+#: Ceiling on the body bytes of any ``compiled-`` article, enforced where one is
+#: written: memory_write refuses a bigger one and says to split it. memory_get
+#: returns a whole article, so its size is what every fetch costs. 24 KiB is
+#: the largest article mxfs's compactors had produced before merging existed
+#: (24,151 bytes). The ceiling used to bound only what a merge was handed, and
+#: two merges came out at 25,833 and 26,729 bytes; backfill and note groups
+#: had no bound at all.
+DEFAULT_ARTICLE_MAX_BYTES = 24 * 1024
+
+#: How much larger a merged article comes out than its inputs together:
+#: citations, a wider opening line, structure. The inputs are packed to the
+#: ceiling divided by this. Packing the inputs to the ceiling itself let the
+#: output exceed it. On mxfs's first merges outputs ran 2% to 9.3% over their
+#: inputs, the largest 24,464 -> 26,729 bytes, past a 24,576 ceiling.
+MERGE_GROWTH = 1.10
 
 #: How good a BM25 match has to be, as a fraction of the seed note's match
 #: against its own text, to count as a topic-mate rather than an incidental
@@ -105,10 +142,14 @@ NUDGE_SEED_CAP = 24
 CLUSTER_FLOOR = 0.15
 
 
-#: The dispatch every nudge site asks for. One agent per group, addressed by
-#: seed slug — see ``compaction_plan`` for why seeds and not indices.
+#: The dispatch every nudge site asks for, made ``wave`` times and once. Each
+#: agent claims groups from the stored plan itself until none are left. It
+#: used to be one agent per group, relaunched by the session as each finished.
+#: The session stops doing that once it is busy with the user's work: mxfs's
+#: dispatched 13 of 28 groups, then went back to 4Kn and never launched
+#: another.
 AGENT_CALL = ('Agent(subagent_type="memory-compactor", '
-              'prompt="Compact memory group seeded by `<seed>`.")')
+              'prompt="Compact memory groups from the plan.")')
 
 
 COMPILER_PROMPT = """\
@@ -169,6 +210,26 @@ def plan_wave_size() -> int:
     return env_int("CCMEMORY_COMPILE_WAVE", DEFAULT_WAVE)
 
 
+def plan_ttl() -> int:
+    """Seconds a stored plan stays in use, via CCMEMORY_COMPILE_PLAN_TTL."""
+    return env_int("CCMEMORY_COMPILE_PLAN_TTL", DEFAULT_PLAN_TTL)
+
+
+def claim_lease() -> int:
+    """Seconds an unfinished claim holds its group, via CCMEMORY_COMPILE_CLAIM_LEASE."""
+    return env_int("CCMEMORY_COMPILE_CLAIM_LEASE", DEFAULT_CLAIM_LEASE)
+
+
+def agent_groups() -> int:
+    """Groups one compactor works before stopping, via CCMEMORY_COMPILE_AGENT_GROUPS."""
+    return env_int("CCMEMORY_COMPILE_AGENT_GROUPS", DEFAULT_AGENT_GROUPS)
+
+
+def article_max_bytes() -> int:
+    """Body bytes a compiled- article may hold, via CCMEMORY_ARTICLE_MAX_BYTES."""
+    return env_int("CCMEMORY_ARTICLE_MAX_BYTES", DEFAULT_ARTICLE_MAX_BYTES)
+
+
 def _is_compiled(p: Path) -> bool:
     return p.name.startswith(COMPILED_PREFIX)
 
@@ -213,6 +274,7 @@ def count_backlog(memory_dir: Path) -> dict[str, Any]:
         raw = {r["name"]: r["type"] for r in s.db.execute(
             f"SELECT name, type FROM mem WHERE type IN ({placeholders}) "
             "AND name NOT LIKE 'compiled-%'", COMPILABLE_TYPES)}
+        merge = sum(len(g["names"]) for g in merge_groups(s, plan_group_size()))
     pending = set(raw) - cited
     return {
         "backlog": len(pending),
@@ -221,10 +283,14 @@ def count_backlog(memory_dir: Path) -> dict[str, Any]:
         # for the compactor exactly as the backlog is.
         "retained": len(set(raw) & cited),
         # Uncompiled user/feedback notes. When the first listing tier
-        # overflows, these are the only notes whose compaction makes room in
-        # it; zero means compaction cannot help and the budget is too small.
+        # overflows, compacting these makes room in it.
         "behavior_backlog": sum(
             1 for n in pending if group_pool(raw[n]) == BEHAVIOR_POOL),
+        # First-tier articles the merge groups would absorb. The other way to
+        # make room there, and the only one left once every behavior note is
+        # compiled. Zero here and in behavior_backlog means compaction cannot
+        # help and the budget is too small.
+        "merge_backlog": merge,
         "total_raw": len(raw),
         "has_compiled": newest is not None,
         "threshold": threshold(),
@@ -259,8 +325,11 @@ def nudge_suppressed(b: dict[str, Any]) -> bool:
     Retained notes count toward the threshold with the backlog: a store whose
     notes are all folded but still on disk has nothing left to compile and
     everything left to delete, and without this it never asks for the backfill.
+    Articles due to merge count for the same reason: a fully compacted store
+    has nothing else left to ask for.
     """
-    return b["backlog"] + b.get("retained", 0) < b["threshold"] or in_cooldown(b)
+    work = b["backlog"] + b.get("retained", 0) + b.get("merge_backlog", 0)
+    return work < b["threshold"] or in_cooldown(b)
 
 
 def _build_input(memories: list[dict]) -> str:
@@ -386,32 +455,124 @@ def _group(pool: str, names: list[str], kind: str) -> dict[str, Any]:
     }
 
 
-def compaction_plan(
-    memory_dir: Path,
-    *,
-    size: int | None = None,
-    seed: str | None = None,
-) -> dict[str, Any]:
+def behavior_excess(s: Store) -> int:
+    """Tokens by which the first listing tier exceeds its share of the budget.
+
+    ``list_all`` lets that tier spend budget the lower tiers leave unused, so
+    an excess is not yet a withheld entry. It is budget the lower tiers are
+    owed, and the moment they grow into it, feedback entries are withheld. Zero
+    or less means the tier fits its share.
+    """
+    budget = list_entry_budget()
+    if not budget:
+        return 0
+    folded = s.folded_names()
+    cost = sum(
+        Store._entry_tokens(dict(r))
+        for r in s.db.execute("SELECT name, type, description FROM mem")
+        if Store._is_always_listed(r["type"]) and r["name"] not in folded)
+    return cost - int(budget * Store.LIST_TIER_SHARES[0])
+
+
+def pack(names: list[str], sizes: dict[str, int], limit: int, size: int) -> list[list[str]]:
+    """Split ``names`` in order into runs of at most ``size`` and ``limit`` bytes."""
+    runs: list[list[str]] = []
+    total = 0
+    for n in names:
+        if runs and len(runs[-1]) < size and total + sizes[n] <= limit:
+            runs[-1].append(n)
+            total += sizes[n]
+        else:
+            runs.append([n])
+            total = sizes[n]
+    return runs
+
+
+def merge_groups(s: Store, size: int) -> list[dict[str, Any]]:
+    """Merge groups over first-tier articles, enough to clear ``behavior_excess``.
+
+    Compaction folds notes into articles and never touched an article again,
+    so the first tier only ever grew. Once every behavior note was compiled the
+    tier had no drain at all: mxfs reached 120 feedback articles, 8,339 tokens
+    against a 4,925-token share, and the note blamed the budget.
+
+    A merge group is one existing article (``article``, also the seed) that
+    stays and is rewritten in place, plus the articles it absorbs (``names``).
+    Each absorbed article is deleted with the content hash in ``hashes``.
+    Members are topic-mates where the clusterer finds them, packed under
+    ``article_max_bytes() / MERGE_GROWTH`` so the merged article stays under the
+    ceiling itself. Leftovers that cluster with nothing are packed into
+    ``assorted`` merges, but only when the topical ones cannot clear the excess
+    on their own.
+
+    Excluded: articles a backfill group owns (two agents on one article
+    overwrite each other), and articles written inside the cooldown window,
+    which a compactor may still be rewriting.
+    """
+    excess = behavior_excess(s)
+    if excess <= 0:
+        return []
+    owned = set(s.folded_by())
+    cutoff = time.time() - cooldown_seconds()
+    rows = {
+        r["name"]: r for r in s.db.execute(
+            "SELECT name, type, description, mtime, content_hash, "
+            "length(CAST(body AS BLOB)) AS bytes FROM mem "
+            "WHERE name LIKE 'compiled-%' ORDER BY mtime DESC")
+        if Store._is_always_listed(r["type"]) and r["name"] not in owned
+        and r["mtime"] < cutoff
+    }
+    sizes = {n: r["bytes"] for n, r in rows.items()}
+    limit = int(article_max_bytes() / MERGE_GROWTH)
+
+    topical: list[list[str]] = []
+    loose: list[str] = []
+    for c in _cluster(s, [dict(r) for r in rows.values()], size):
+        for run in pack(c, sizes, limit, size):
+            if len(run) > 1:
+                topical.append(run)
+            else:
+                loose.extend(run)
+    candidates = [(run, False) for run in topical] + [
+        (run, True) for run in pack(loose, sizes, limit, size)]
+
+    groups: list[dict[str, Any]] = []
+    for run, assorted in candidates:
+        if excess <= 0:
+            break
+        if len(run) < 2:
+            continue
+        seed, absorbed = run[0], run[1:]
+        groups.append({
+            "seed": seed,
+            "kind": "merge",
+            "assorted": assorted,
+            "article": seed,
+            "size": len(absorbed),
+            "names": absorbed,
+            "hashes": {n: rows[n]["content_hash"] for n in absorbed},
+            "pool": BEHAVIOR_POOL,
+            "article_type": rows[seed]["type"] or POOL_ARTICLE_TYPE[BEHAVIOR_POOL],
+        })
+        excess -= sum(Store._entry_tokens(dict(rows[n])) for n in absorbed)
+    return groups
+
+
+def build_groups(s: Store, size: int) -> list[dict[str, Any]]:
     """Partition the whole uncompiled backlog into disjoint groups — no LLM.
 
-    One group is one compactor run. Without this, every compactor picked its
-    own cluster out of ``memory_list()``, which meant (a) only one could run at
-    a time, because two started together would converge on the same obvious
-    cluster and write two articles about it, and (b) draining a backlog needed
-    one session per group. A 227-note backlog against a per-run yield of ~9
-    notes is 25 sessions of nudging, while ordinary use adds notes the whole
-    time — it never converges, and the partitioning ends up being done by hand.
-
-    Groups are addressed by ``seed``, the slug of the note the group was built
-    around, and NOT by index. The plan is recomputed from whatever is still
-    uncompiled, so indices shift as concurrent compactors retire notes;
-    a seed does not. A seed that no longer appears means that group is already
-    compiled, which is exactly what its agent needs to be told.
+    One group is one compactor's unit of work. Without this, every compactor
+    picked its own cluster out of ``memory_list()``, which meant (a) only one
+    could run at a time, because two started together would converge on the
+    same obvious cluster and write two articles about it, and (b) draining a
+    backlog needed one session per group. A 227-note backlog against a per-run
+    yield of ~9 notes is 25 sessions of nudging, while ordinary use adds notes
+    the whole time — it never converges, and the partitioning ends up being
+    done by hand.
 
     Clustering is greedy over the existing BM25 index: take the newest
     unclaimed note as a seed, pull its best-matching unclaimed topic-mates up
-    to ``size``, repeat. Deterministic, so every caller computing the plan over
-    the same backlog gets the same partition.
+    to ``size``, repeat.
 
     Coverage is total. Clusters below ``MIN_CLUSTER`` are pooled into
     ``assorted`` groups instead of being dropped: an article lumping loosely
@@ -419,24 +580,22 @@ def compaction_plan(
     of every plan can never be cited, never retires from the listing, and
     raises the floor of a backlog that the nudge then complains about forever.
     """
-    size = size or plan_group_size()
-    with Store(memory_dir) as s:
-        s.reindex()
-        pending = pending_notes(s)
-        # Cluster each pool on its own. A group's notes decide the article's
-        # metadata.type, so a group spanning both pools would have to pick one
-        # and mis-file the other half.
-        clusters = {
-            pool: _cluster(s, [n for n in pending if group_pool(n["type"]) == pool], size)
-            for pool in (BEHAVIOR_POOL, KNOWLEDGE_POOL)
-        }
-        # Articles that still have folded sources on disk. Each is one backfill
-        # group, never split: two agents rewriting the same article would
-        # overwrite each other.
-        backfill = [
-            (article, names, s._row_type(article))
-            for article, names in sorted(s.folded_by().items())
-        ]
+    pending = pending_notes(s)
+    # Cluster each pool on its own. A group's notes decide the article's
+    # metadata.type, so a group spanning both pools would have to pick one
+    # and mis-file the other half.
+    clusters = {
+        pool: _cluster(s, [n for n in pending if group_pool(n["type"]) == pool], size)
+        for pool in (BEHAVIOR_POOL, KNOWLEDGE_POOL)
+    }
+    # Articles that still have folded sources on disk. Each is one backfill
+    # group, never split: two agents rewriting the same article would
+    # overwrite each other.
+    backfill = [
+        (article, names, s._row_type(article))
+        for article, names in sorted(s.folded_by().items())
+    ]
+    merges = merge_groups(s, size)
 
     groups: list[dict[str, Any]] = []
     for pool, pool_clusters in clusters.items():
@@ -448,6 +607,10 @@ def compaction_plan(
                 tail.extend(c)
         for i in range(0, len(tail), size):
             groups.append(_group(pool, tail[i:i + size], "assorted"))
+        # Merges right behind the behavior notes: both make room in the first
+        # listing tier, the one place a withheld entry cannot be searched for.
+        if pool == BEHAVIOR_POOL:
+            groups.extend(merges)
 
     # After the new-note groups: an unfolded note is missing from the listing,
     # a retained one is only taking space.
@@ -465,25 +628,201 @@ def compaction_plan(
             "article_type": article_type or POOL_ARTICLE_TYPE[pool],
         })
 
+    # Last: an article over the ceiling costs on every fetch but loses nothing.
+    # memory_write now refuses to make one, so these predate the ceiling. One
+    # owned by a backfill is left to it, since the backfill rewrite has to
+    # split it anyway.
+    owned = {a for a, _, _ in backfill}
+    for article, (article_type, size_bytes) in sorted(oversized(s).items()):
+        if article in owned:
+            continue
+        pool = group_pool(article_type)
+        groups.append({
+            "seed": article,
+            "kind": "split",
+            "size": 0,
+            "article": article,
+            "names": [],
+            "bytes": size_bytes,
+            "pool": pool,
+            "article_type": article_type or POOL_ARTICLE_TYPE[pool],
+        })
+    return groups
+
+
+def oversized(s: Store) -> dict[str, tuple[str | None, int]]:
+    """``compiled-`` articles over ``article_max_bytes()``: name → (type, bytes)."""
+    limit = article_max_bytes()
+    return {
+        r["name"]: (r["type"], r["bytes"]) for r in s.db.execute(
+            "SELECT name, type, length(CAST(body AS BLOB)) AS bytes FROM mem "
+            "WHERE name LIKE 'compiled-%'")
+        if r["bytes"] > limit
+    }
+
+
+def outstanding(g: dict[str, Any], present: set[str], folded: set[str],
+                big: set[str]) -> dict[str, Any] | None:
+    """What is still to do in stored group ``g``, or None once it is done.
+
+    A note in a topic or assorted group is done once an article folds it. A
+    backfill source or an absorbed article is done once it is deleted. A merge
+    whose surviving article is gone has nothing left to merge into. A split is
+    done once its article is under the ceiling.
+    """
+    if g["kind"] == "split":
+        return g if g["article"] in big else None
+    if g["kind"] in ("backfill", "merge") and g["article"] not in present:
+        return None
+    if g["kind"] in ("backfill", "merge"):
+        left = [n for n in g["names"] if n in present]
+    else:
+        left = [n for n in g["names"] if n in present and n not in folded]
+    if not left:
+        return None
+    out = {**g, "names": left, "size": len(left)}
+    if "hashes" in g:
+        out["hashes"] = {n: g["hashes"][n] for n in left}
+    return out
+
+
+def load_plan(memory_dir: Path) -> dict[str, Any] | None:
+    """The stored plan, or None when there is none or it has expired."""
+    try:
+        plan = json.loads((memory_dir / PLAN_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(plan, dict) or time.time() - plan.get("created", 0) > plan_ttl():
+        return None
+    return plan
+
+
+def save_plan(memory_dir: Path, groups: list[dict[str, Any]]) -> dict[str, Any]:
+    """Store ``groups`` as the run's plan and drop the claims of earlier plans."""
+    plan = {"id": f"{time.time_ns():x}", "created": time.time(), "groups": groups}
+    path = memory_dir / PLAN_FILE
+    staged = memory_dir / f"{PLAN_FILE}.{os.getpid()}"
+    staged.write_text(json.dumps(plan), encoding="utf-8")
+    os.replace(staged, path)
+    claims = memory_dir / CLAIMS_DIR
+    if claims.is_dir():
+        for old in claims.iterdir():
+            if old.name != plan["id"]:
+                shutil.rmtree(old, ignore_errors=True)
+    return plan
+
+
+def claim(memory_dir: Path, plan_id: str, seed: str) -> bool:
+    """Take group ``seed`` of plan ``plan_id``; False if another compactor holds it.
+
+    O_EXCL makes the create atomic, so two compactors asking at once never both
+    win. A claim older than ``claim_lease()`` belonged to a compactor that never
+    finished: it is renamed aside first, which only one taker can do, then
+    created fresh.
+    """
+    held = memory_dir / CLAIMS_DIR / plan_id / seed
+    held.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(2):
+        try:
+            os.close(os.open(held, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return True
+        except FileExistsError:
+            pass
+        if attempt or time.time() - held.stat().st_mtime < claim_lease():
+            return False
+        stale = held.with_name(f"{seed}.stale.{os.getpid()}")
+        try:
+            os.rename(held, stale)
+        except FileNotFoundError:
+            return False
+        stale.unlink(missing_ok=True)
+    return False
+
+
+def compaction_plan(
+    memory_dir: Path,
+    *,
+    size: int | None = None,
+    seed: str | None = None,
+    take: bool = False,
+) -> dict[str, Any]:
+    """The run's plan: stored groups still outstanding, or a fresh partition.
+
+    Computed once per run by ``build_groups`` and stored (``PLAN_FILE``), then
+    served from storage until every group in it is done or it expires. A
+    recomputed plan shifts as the run changes the store, which is how agents
+    were told their seed was done before starting and how two groups ended up
+    naming one article.
+
+    ``take=True`` is how a compactor gets work: it returns the first
+    outstanding group no other compactor has claimed, and claims it. So the
+    session dispatches ``wave`` agents once, and they drain the plan between
+    them; nothing waits on the session to launch more.
+
+    ``seed`` returns that one group, for a caller addressing a group directly.
+    A seed with nothing outstanding means that group is already compiled.
+    """
+    size = size or plan_group_size()
+    with Store(memory_dir) as s:
+        s.reindex()
+        present = {r["name"] for r in s.db.execute("SELECT name FROM mem")}
+        folded = s.folded_names()
+        big = set(oversized(s))
+        plan = load_plan(memory_dir)
+        groups = []
+        for g in (plan or {}).get("groups", []):
+            left = outstanding(g, present, folded, big)
+            if left is not None:
+                groups.append(left)
+        if not groups:
+            groups = build_groups(s, size)
+            plan = save_plan(memory_dir, groups) if groups else None
+        backlog = len(pending_notes(s))
+
     payload: dict[str, Any] = {
         "status": "ok",
-        "backlog": len(pending),
-        "retained": sum(len(n) for _, n, _ in backfill),
+        "backlog": backlog,
+        "retained": sum(g["size"] for g in groups if g["kind"] == "backfill"),
+        "merge": sum(g["size"] for g in groups if g["kind"] == "merge"),
         "threshold": threshold(),
         "group_size": size,
         "wave": plan_wave_size(),
+        "agent_groups": agent_groups(),
         "group_count": len(groups),
-        "how": "One background memory-compactor per group, `wave` at a time. Each agent "
-               "is given its group's seed slug and compiles that group and nothing else. "
+        "how": "Dispatch `wave` background memory-compactor agents, once, each with "
+               f"{AGENT_CALL}. Each agent calls memory_compaction_plan(take=true), which "
+               "hands it one unclaimed group and claims it, compiles that group, and "
+               "takes the next, until status is `done` or it has compiled "
+               "`agent_groups` groups. "
                "The article it writes must carry the group's `article_type` in its "
                "frontmatter: a behavior group (user/feedback notes) compiles to "
                "`feedback` so the article is listed in the same first-claim tier as the "
                "notes it retires, everything else to `project`. A `backfill` group is an "
                "existing article (`article`, also its seed) whose folded sources are "
                "still on disk: fold back anything the article dropped, rewrite it under "
-               "the same name, then delete the sources. Every group ends with each "
-               "verified source removed via memory_delete.",
+               "the same name, then delete the sources. A `merge` group is an existing "
+               "first-tier article (`article`, also its seed) and the articles it absorbs "
+               "(`names`): fold every absorbed article into it, rewrite it under the same "
+               "name and type, then delete each absorbed article with "
+               "memory_delete(name, expect_hash=hashes[name]). A `split` group is an "
+               "existing article (`article`) over the size ceiling: rewrite it under its "
+               "name holding part of its content, and write the rest to new compiled- "
+               "articles of the same type, each under the ceiling, each keeping the "
+               "[[slug]] citations of the facts it holds; it deletes nothing. Every "
+               "other group ends with each verified source removed via memory_delete.",
     }
+    if take:
+        payload["groups"] = []
+        for g in groups:
+            if claim(memory_dir, plan["id"], g["seed"]):
+                payload["groups"] = [g]
+                return payload
+        payload["status"] = "done"
+        payload["how"] = (
+            "Every group in the plan is compiled or claimed by another compactor. "
+            "Take nothing more: report what you compiled and stop."
+        )
+        return payload
     if seed is None:
         payload["groups"] = groups
         return payload

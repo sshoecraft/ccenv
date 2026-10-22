@@ -60,19 +60,25 @@ remainder is spent on entries across three tiers with **cumulative** caps
 Cumulative caps mean an underspending tier donates its remainder downward, so
 a store with no articles still spends the full budget on raw notes.
 
+**A share is a ceiling, not an allowance.** It stops a tier from starving the
+tiers below it, and once those tiers have had their turn it has nothing left to
+protect. `list_all` makes a second pass that hands whatever is still unspent
+back to the withheld entries, tier 1 first, up to the full budget. Without it,
+a fully compacted store is held to 25% for its feedback articles no matter how
+little the rest needs. On mxfs that withheld 49 of 120 feedback articles while
+the whole store listed for 10,107 tokens of a 19,700-token budget.
+
 **Every tier is trimmable, including the first.** When tier 1 overflows,
 `counts["load_bearing_withheld"]` reports it and the note escalates: unlike a
 withheld project note, a withheld behavioral correction has no topic to search
 for, so the session cannot recover it and does not know to try.
 
 **A `type_filter` suspends the tier split and spends the whole budget on the
-one type.** The shares are cumulative and donate downward only, so a filtered
-listing would otherwise be capped at its tier's share with the rest of the
-budget stranded above it in tiers that cannot be populated. That made
-`memory_list(type="feedback")` — the escape hatch the `load_bearing_withheld`
-warning prescribes — return exactly the truncated set the unfiltered call had
-already returned: on a 331-memory store, 34 of 56 feedback memories withheld
-both times.
+one type.** The shares ration a mixed listing, and a filtered one has nothing
+to ration. `memory_list(type="feedback")` is the escape hatch the
+`load_bearing_withheld` warning prescribes. Held to tier 1's share, it returned
+exactly the truncated set the unfiltered call had already returned: on a
+331-memory store, 34 of 56 feedback memories withheld both times.
 
 ## Compaction (folding)
 
@@ -119,9 +125,9 @@ runs a model: the MCP server has none, and no separate `claude -p` process is
 needed, because the session that reads the backlog is already a model. The
 backlog surfaces as text in two places — the SessionStart nudge
 (`hooks._compaction_nudge`) and the backlog clause in the `memory_list` note —
-and both ask for the same thing: one background `memory-compactor` agent per
-plan group, a wave at a time, and then carry on with the user's request
-without waiting. The agents are Agent-tool subagents of the live session, so
+and both ask for the same thing: `wave` background `memory-compactor` agents,
+dispatched once, each claiming groups from the stored plan until none are left,
+and then carry on with the user's request without waiting. The agents are Agent-tool subagents of the live session, so
 they draw on the session's own usage and never block it. The two sites are
 worded as one request so a session that sees both dispatches once. The
 `compile-memories` skill does the same work inline, for when the agent is
@@ -174,12 +180,17 @@ that reports the store's health instead of degrading politely.
   as the memory itself. Folding is a swap, and a swap for something the budget
   can drop is a loss.
 - Any budget must be able to trim every tier, or it is not a budget.
+- Budget the lower tiers leave unspent goes back to the withheld entries. The
+  shares protect lower tiers; they do not reserve budget nobody uses.
 - A filtered listing gets the whole budget; the tier shares exist to ration a
   mixed listing and have nothing to ration in a filtered one.
 - A first-tier overflow is reported to the user only when no behavior note is
-  left to compact. While one is, compaction is the fix and the session
-  dispatches it; an env var is the user's only lever and the wrong one to
-  point at first.
+  left to compact and no first-tier article is left to merge. While either
+  is, compaction is the fix and the session dispatches it; an env var is the
+  user's only lever and the wrong one to point at first.
+- Compiled articles need a drain too. A first tier of nothing but feedback
+  articles grows with every pass; `compile.merge_groups` merges them while
+  the tier costs more than its share (see `ccmemory/docs/compile-memories.md`).
 - A nudge site may ask only for background dispatch, never for inline
   compaction. An inline ask loses to whatever the user is waiting on, which is
   why interactive projects sat at zero compiled articles until the

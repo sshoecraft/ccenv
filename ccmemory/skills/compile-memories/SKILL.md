@@ -20,12 +20,12 @@ the current session using the ccmemory MCP tools, so it is ordinary session usag
 ## This is the fallback path
 
 The normal path is the `memory-compactor` subagent, dispatched in the
-background so the user is never left waiting on maintenance — one agent per
-group in the compaction plan, `wave` of them at a time:
+background so the user is never left waiting on maintenance — `wave` agents,
+dispatched once, each claiming groups from the stored compaction plan until
+none are left:
 
-    plan = memory_compaction_plan()        # disjoint groups, addressed by seed slug
-    for each group, wave at a time:
-        Agent(subagent_type="memory-compactor", prompt="Compact memory group seeded by `<seed>`.")
+    wave times, once:
+        Agent(subagent_type="memory-compactor", prompt="Compact memory groups from the plan.")
 
 Use this skill instead only when that agent is unavailable, or when the user
 explicitly asks to compact in the current session. Doing the work inline costs
@@ -33,11 +33,11 @@ the session a stop-the-world read of every memory body in the batch — which is
 precisely why, before the agent existed, 29 of 30 project memory dirs on this
 machine had never been compacted at all.
 
-Fire one agent per group, not one agent. One agent folds in roughly a dozen
-notes and stops; a backlog in the hundreds then needs dozens of sessions while
-ordinary use keeps adding notes, and it never converges. The plan exists so the
-whole backlog can be drained in a single session without two agents landing on
-the same notes.
+Fire `wave` agents, not one. One agent works at most `agent_groups` groups and
+stops; a backlog in the hundreds then needs dozens of sessions while ordinary
+use keeps adding notes, and it never converges. The stored plan and its claims
+exist so the whole backlog can be drained from one dispatch without two agents
+landing on the same notes.
 
 ## When to run it
 
@@ -58,8 +58,9 @@ reports `backlog`, `threshold`, and `candidate_names`. `ccmemory compile --plan`
    onto a topic. Do not hand-pick clusters out of `memory_list()`: that is what made two
    concurrent compactors converge on the same notes.
 
-2. **Take one group per pass.** Work the groups in order, one article per group, until the
-   backlog is under `threshold`. Compile an `assorted` group too — say in its opening line
+2. **Take one group per pass.** Claim each with `memory_compaction_plan(take=true)`, one
+   article per group, until it returns `done` or the backlog is under `threshold`. Claiming
+   keeps you off groups a background compactor already holds. Compile an `assorted` group too — say in its opening line
    that it is a mixed batch. If the user named a topic, `memory_compaction_plan(seed=...)`
    fetches just that group.
 
@@ -115,6 +116,23 @@ reports `backlog`, `threshold`, and `candidate_names`. `ccmemory compile --plan`
    disk. Read the article and every source, fold back whatever the article dropped, rewrite
    it with `memory_write` under the same `name` and `type`, then verify and delete exactly
    as above.
+
+   A `kind: merge` group is an existing first-tier article (`article`) and the other
+   `compiled-` articles it absorbs (`names`). The plan emits these only when the first
+   listing tier costs more than its share of the budget. Read every one in full, fold each
+   absorbed article into `article`, and rewrite it with `memory_write` under the same `name`
+   and `type`, with a description covering all of them. Then verify, and delete each
+   absorbed article with `memory_delete(name, expect_hash=hashes[name])`. If that is refused
+   because the article changed after the merge read it, someone else has rewritten it since:
+   leave it on disk.
+
+   A `kind: split` group is one existing article over the size ceiling
+   (`CCMEMORY_ARTICLE_MAX_BYTES`, default 24 KiB). Divide it by subtopic: one part keeps its
+   name, the rest become new `compiled-` articles of the same type, and every `[[slug]]`
+   citation goes with the facts it backs. Nothing is deleted.
+
+   `memory_write` refuses any `compiled-` article over the ceiling. When it does, split that
+   article the same way before going on.
 
 7. **Report** to the user: which raw memories you folded in and deleted, any you kept and
    why, the article name, and a one-line description. If the backlog is still over `threshold`, keep going — inline

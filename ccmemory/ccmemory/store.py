@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 import sqlite3
 import time
@@ -179,6 +180,39 @@ def _parse_frontmatter_fallback(front: str) -> dict:
 #: Defined here rather than in compile.py because compile.py imports Store —
 #: the listing needs the prefix to tier articles and cannot import back.
 COMPILED_PREFIX = "compiled-"
+
+#: Token ceiling for one memory_list payload. The session protocol makes
+#: memory_list the mandatory first call of EVERY session, so its cost is paid
+#: before the user's first message and, under ccloop, again on every relay. An
+#: unbounded listing measured ~171k tokens (86% of a 200k window) on a
+#: 1,695-memory store. Small stores never reach this and are unaffected.
+#: Defined here rather than in mcp_server because compile.py sizes the article
+#: merges by the same budget the listing spends.
+DEFAULT_LIST_TOKEN_BUDGET = 16384
+
+
+#: Tokens held back from the entry budget for the payload envelope — the
+#: counts object and the `note`, which runs to ~760 chars on a store with
+#: folded/withheld/COMPACTION-DUE clauses all firing. Budgeting only the
+#: entries left this unmodelled and every listing overshot by ~210 tokens.
+LIST_ENVELOPE_TOKENS = 300
+
+
+def list_token_budget() -> int:
+    """Per-call memory_list token ceiling; 0 disables bounding entirely."""
+    raw = os.environ.get("CCMEMORY_LIST_TOKEN_BUDGET")
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return DEFAULT_LIST_TOKEN_BUDGET
+
+
+def list_entry_budget() -> int:
+    """What ``list_all`` may spend on entries once the envelope is held back."""
+    budget = list_token_budget()
+    return max(1, budget - LIST_ENVELOPE_TOKENS) if budget else 0
 
 #: Filename of the derived SQLite index inside a .ccmemory/ store. No leading
 #: dot — the store dir is already hidden, so dot-hiding the file was redundant
@@ -536,7 +570,7 @@ class Store:
                 return md
         return None
 
-    def delete_folded(self, name: str) -> dict:
+    def delete_folded(self, name: str, expect_hash: str | None = None) -> dict:
         """Delete a raw note that a ``compiled-`` article has folded.
 
         Compaction replaces its sources: once an article holds everything a
@@ -546,14 +580,17 @@ class Store:
         behavior note cited by a ``project`` article, which that article cannot
         represent in the first listing tier, is refused.
 
+        A ``compiled-`` article goes only as the absorbed half of a merge (see
+        ``check_merged``).
+
         Every ``[[name]]`` link elsewhere in the store becomes plain
         `` `name` `` text: the citation stays as provenance, and nothing is
         left linking to a note that no longer exists.
         """
-        if name.startswith(COMPILED_PREFIX):
-            raise ValueError(f"refused: {name} is a compiled- article, not a source note")
         self.reindex()
-        if name not in self.folded_names():
+        if name.startswith(COMPILED_PREFIX):
+            self.check_merged(name, expect_hash)
+        elif name not in self.folded_names():
             raise ValueError(
                 f"refused: {name} is not folded into a compiled- article that can "
                 "represent it. Cite it in an article of the right type first.")
@@ -574,6 +611,45 @@ class Store:
         path.unlink()
         self.reindex()
         return {"deleted": str(path), "relinked": relinked}
+
+    def check_merged(self, name: str, expect_hash: str | None) -> None:
+        """Raise unless article ``name`` may go as the absorbed half of a merge.
+
+        Two conditions. Another ``compiled-`` article that can represent it in
+        the listing cites it — the same retirement test a raw note passes, one
+        level up. And its content still hashes to ``expect_hash``, the hash the
+        merge plan handed the compactor that read it.
+
+        The hash is what makes concurrent merges safe. Articles are rewritten in
+        place, by backfills and by the merges that keep them. Without it, a
+        merge that read an article could delete it after another compactor had
+        grown it, and everything that compactor folded in would be gone.
+        Refusing costs a duplicate; deleting costs data.
+        """
+        row = self.db.execute(
+            "SELECT type, content_hash FROM mem WHERE name = ?", (name,)).fetchone()
+        if row is None:
+            raise ValueError(f"not found: {name}")
+        if not expect_hash:
+            raise ValueError(
+                f"refused: {name} is a compiled- article. One goes only as part of a "
+                "merge group, with the expect_hash the plan gave for it.")
+        if row["content_hash"] != expect_hash:
+            raise ValueError(
+                f"refused: {name} changed after the merge read it. Another compactor "
+                "rewrote it, so it holds content this merge never saw. Leave it.")
+        mergers = self.db.execute(
+            """
+            SELECT c.type FROM mem_edges e JOIN mem c ON c.name = e.src_name
+            WHERE e.dst_name = ? AND c.name LIKE 'compiled-%' AND c.name != ?
+            """,
+            (name, name),
+        ).fetchall()
+        if not any(self._is_always_listed(m["type"]) or not self._is_always_listed(row["type"])
+                   for m in mergers):
+            raise ValueError(
+                f"refused: no compiled- article that can represent {name} cites it. "
+                "Merge it into one of the right type first.")
 
     def _row_type(self, name: str) -> str:
         row = self.db.execute("SELECT type FROM mem WHERE name = ?", (name,)).fetchone()
@@ -607,8 +683,10 @@ class Store:
 
     #: Cumulative share of the listing budget available after each tier fills.
     #: Cumulative, so a tier that underspends donates the remainder downward
-    #: instead of stranding it. Order is "what can a session not recover any
-    #: other way":
+    #: instead of stranding it. A share is a ceiling that keeps a tier from
+    #: starving the ones below it, not an allowance: whatever all three leave
+    #: unspent goes back up to the withheld entries (see ``list_all``). Order
+    #: is "what can a session not recover any other way":
     #:   1. user/feedback (and untyped) — behavior, preferences, corrections
     #:   2. ``compiled-`` articles — the dense representative of everything
     #:      folded. Ranking these purely by mtime put 2 of mxfs's 132 articles
@@ -667,8 +745,10 @@ class Store:
 
         The budget is spent across three tiers with CUMULATIVE caps
         (``LIST_TIER_SHARES``), newest-first inside each tier. Cumulative caps
-        mean an underspending tier donates its remainder to the tiers below it,
-        so no share is ever stranded.
+        mean an underspending tier donates its remainder to the tiers below it.
+        Whatever is still unspent after the last tier goes back to the withheld
+        entries in tier order, so no share is ever stranded in either
+        direction.
 
         Every tier is trimmable, including the first. Before 0.19.0 the
         always-listed types were charged against ``spent`` but never trimmed,
@@ -724,18 +804,12 @@ class Store:
 
         shown: list[dict] = []
         spent = 0
-        for tier, share in zip(tiers, self.LIST_TIER_SHARES):
-            # A filtered listing is homogeneous, so the tier split has nothing
-            # left to ration and the whole budget belongs to the one tier that
-            # can be non-empty. Without this it could not: the shares are
-            # cumulative and donate DOWNWARD only, so an empty tier 2 and 3
-            # strand 75% of the budget above a feedback-only listing. That is
-            # the exact call the load_bearing_withheld warning tells the caller
-            # to make, and it returned the same truncated set as the unfiltered
-            # listing it was supposed to repair — 34 of 56 feedback memories
-            # still withheld on a 331-memory store.
-            cap = int(token_budget * (1.0 if type_filter else share)) if token_budget else 0
-            for e in tier:
+
+        def fill(entries: list[dict], cap: int) -> int:
+            """Take entries in order until one does not fit; return how many."""
+            nonlocal spent
+            taken = 0
+            for e in entries:
                 if limit and len(shown) >= limit:
                     break
                 if token_budget:
@@ -744,6 +818,29 @@ class Store:
                         break
                     spent += cost
                 shown.append(e)
+                taken += 1
+            return taken
+
+        remaining = []
+        for tier, share in zip(tiers, self.LIST_TIER_SHARES):
+            # A filtered listing is homogeneous, so the tier split has nothing
+            # left to ration and the whole budget belongs to the one type asked
+            # for. That is the exact call the load_bearing_withheld warning
+            # tells the caller to make; held to tier 1's share, it returned the
+            # same truncated set as the unfiltered listing it was supposed to
+            # repair — 34 of 56 feedback memories withheld on a 331-memory store.
+            cap = int(token_budget * (1.0 if type_filter else share)) if token_budget else 0
+            remaining.append(tier[fill(tier, cap):])
+
+        # The shares cap each tier so it cannot starve the ones below it, but
+        # once those tiers have had their turn there is nothing left to protect.
+        # Unspent budget goes back to the withheld entries, tier 1 first.
+        # Without this pass a store with small lower tiers strands the
+        # difference: mxfs withheld 49 of its 120 feedback articles while the
+        # entire store listed for 10,107 tokens of a 19,700-token budget.
+        if token_budget:
+            for rest in remaining:
+                fill(rest, token_budget)
 
         # How much of tier 1 did not fit. Reported separately because it is the
         # one loss the caller cannot compensate for with memory_search: a

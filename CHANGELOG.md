@@ -2,6 +2,77 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-10-22 — v0.40.1
+
+**ccmemory v0.23.1: fixes from the first live article-merge run, on mxfs.**
+
+Only 10 of the run's 27 planned merges ran. The session launched compactors
+in waves and stopped after 13 once it went back to the user's work. Every
+merge also reshuffled the recomputed plan: two agents were told `done`
+before doing anything, and two groups listed the same article.
+
+- The compaction plan is stored for the whole run, and compactors claim
+  groups from it themselves. The session dispatches 6 agents once, and they
+  drain the plan with nothing left for it to relaunch. On a copy of mxfs's
+  store, 6 agents took the remaining 18 merge groups, 3 each, with every group
+  handed out once.
+- The 24 KiB size ceiling now applies to every compiled article, and
+  `memory_write` enforces it. An article over the ceiling is refused, and the
+  writer is told to split it. Before this, only a merge's inputs were bounded:
+  two merges landed at 25.8 and 26.7 KB, and other compaction had no bound.
+  The knob is renamed `CCMEMORY_ARTICLE_MAX_BYTES`. Articles already over the
+  ceiling are handed out as `split` groups. mxfs's two oversized articles are
+  split by its next compaction run.
+- `memory-compactor` claims and works groups in a loop. `compile-memories`
+  claims too, so it never lands on a group a background agent holds.
+- New `scripts/relink_dangling_memory_links.py` turns links to memories that
+  no longer exist into plain `slug` provenance, the way `memory_delete` does.
+  The audit after the run found 63 such links in 6 mxfs articles, written
+  about ten days before the merges. It also found 2 descriptions over the
+  150-character cap. All of these were repaired in mxfs's store.
+
+## 2026-10-22 — v0.40.0
+
+**ccmemory v0.23.0: compiled feedback articles can be merged, so the first
+listing tier has a way to shrink.**
+
+Compaction turned feedback notes into feedback articles and never touched an
+article again. Those articles stay in the first listing tier, so once every
+note was compiled that tier only grew. mxfs reached 120 feedback articles,
+8,339 tokens against a 4,925-token share. The `memory_list` note then said
+compaction could not help and told the user to raise the budget.
+
+- While the first tier costs more than its share of the budget, the
+  compaction plan emits `merge` groups. Each keeps one article, folds
+  topic-mates into it, and stops once the excess is covered. A group's
+  combined size is capped at 24 KiB. On mxfs at the default budget that is 33
+  groups absorbing 64 articles.
+- `memory_delete` takes a compiled article only as the absorbed half of a
+  merge: another article must cite it, and its content hash must still match
+  what the merge read. Otherwise a merge racing another compactor could delete
+  an article that compactor had just grown.
+- The note tells the user to raise the budget only when nothing is left to
+  compile and nothing is left to merge.
+- The `memory-compactor` agent and the `compile-memories` skill handle the
+  new group kind.
+
+## 2026-10-22 — v0.39.1
+
+**ccmemory v0.22.1: `memory_list` withholding feedback on a fully compacted
+store.**
+
+mxfs has no raw notes left to compact: 120 `compiled-` feedback articles,
+27 project articles and one raw feedback note. The whole store lists for
+10,107 tokens, against a 20,000 budget (19,700 after the envelope). The
+listing still withheld 49 feedback articles. The `memory_list` note then told
+the session to have the user raise `CCMEMORY_LIST_TOKEN_BUDGET`.
+
+The first tier's 25% share worked as a hard ceiling. Unspent budget only ever
+flowed down to lower tiers, so the 75% the other tiers did not need was
+stranded. Once every tier has had its share, `list_all` now gives what is
+left back to the withheld entries, tier 1 first. mxfs lists all 148 entries
+with the budget unchanged.
+
 ## 2026-10-12 — v0.39.0
 
 **ccmemory v0.22.0: compaction deletes what it compacted.**

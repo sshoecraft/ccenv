@@ -344,6 +344,32 @@ def test_unused_tier_share_spills_downward(memory_dir):
         f"tier 3 stranded the empty tiers' shares: spent {spent} of {budget}"
 
 
+def test_unspent_budget_returns_to_withheld_tiers(memory_dir):
+    # The mxfs shape after full compaction: nothing raw left, a large tier 1 of
+    # feedback articles and a small tier 2. The shares only donated downward,
+    # so tier 1 stayed capped at 25% while the rest of the budget went unused:
+    # 49 feedback articles withheld from a store that listed for 10,107 tokens
+    # of a 19,700-token budget.
+    now = time.time()
+    for i in range(120):
+        write_memory(memory_dir, f"compiled-fb{i:03d}", type="feedback",
+                     description="d" * 140, mtime=now - i * 86400)
+    for i in range(27):
+        write_memory(memory_dir, f"compiled-p{i:02d}", type="project",
+                     description="d" * 140, mtime=now - i * 86400)
+    budget = 10000
+    with Store(memory_dir) as s:
+        s.reindex()
+        unbounded, _ = s.list_all()
+        whole = sum(s._entry_tokens(e) for e in unbounded)
+        results, counts = s.list_all(token_budget=budget)
+        spent = sum(s._entry_tokens(e) for e in results)
+    assert budget * 0.25 < whole <= budget, "fixture must overflow tier 1's share only"
+    assert counts["withheld"] == 0 and counts["load_bearing_withheld"] == 0, \
+        f"withheld {counts['withheld']} with {budget - spent} tokens unspent"
+    assert spent <= budget
+
+
 def test_entry_tokens_tracks_real_wire_size(memory_dir):
     # ENTRY_ENVELOPE_CHARS must model what mcp_server actually serializes. The
     # old constant (30) modelled name+description only and under-counted by
@@ -461,3 +487,60 @@ def test_delete_folded_refuses_what_no_article_represents(memory_dir):
                 s.delete_folded(name)
     for name in ("uncited", "corrected", "compiled-wrong-tier"):
         assert (memory_dir / f"{name}.md").exists()
+
+
+def content_hash(s: Store, name: str) -> str:
+    return s.db.execute("SELECT content_hash FROM mem WHERE name = ?", (name,)).fetchone()[0]
+
+
+def test_article_goes_only_as_the_absorbed_half_of_a_merge(memory_dir):
+    import pytest
+    write_memory(memory_dir, "compiled-absorbed", type="feedback", body="the lesson")
+    write_memory(memory_dir, "compiled-alone", type="feedback", body="unrelated")
+    write_memory(memory_dir, "compiled-kept", type="feedback",
+                 body="the lesson [[compiled-absorbed]]")
+    with Store(memory_dir) as s:
+        s.reindex()
+        h = content_hash(s, "compiled-absorbed")
+        with pytest.raises(ValueError, match="expect_hash"):
+            s.delete_folded("compiled-absorbed")
+        with pytest.raises(ValueError, match="changed after the merge read it"):
+            s.delete_folded("compiled-absorbed", expect_hash="0" * 64)
+        # Cited by nothing: no article holds what it says.
+        with pytest.raises(ValueError, match="refused"):
+            s.delete_folded("compiled-alone", expect_hash=content_hash(s, "compiled-alone"))
+        result = s.delete_folded("compiled-absorbed", expect_hash=h)
+    assert result["relinked"] == ["compiled-kept.md"]
+    assert not (memory_dir / "compiled-absorbed.md").exists()
+    assert "`compiled-absorbed`" in (memory_dir / "compiled-kept.md").read_text()
+    assert (memory_dir / "compiled-alone.md").exists()
+
+
+def test_article_rewritten_after_the_merge_read_it_is_kept(memory_dir):
+    # Two compactors: one merges compiled-b into compiled-a, while another has
+    # just grown compiled-b in place. Deleting compiled-b on the stale read
+    # would destroy everything the second compactor folded into it.
+    import pytest
+    write_memory(memory_dir, "compiled-b", type="feedback", body="original")
+    with Store(memory_dir) as s:
+        s.reindex()
+        read = content_hash(s, "compiled-b")
+    write_memory(memory_dir, "compiled-b", type="feedback", body="original plus a backfill")
+    write_memory(memory_dir, "compiled-a", type="feedback", body="original [[compiled-b]]")
+    with Store(memory_dir) as s:
+        with pytest.raises(ValueError, match="changed after the merge read it"):
+            s.delete_folded("compiled-b", expect_hash=read)
+    assert (memory_dir / "compiled-b.md").exists()
+
+
+def test_behavior_article_does_not_merge_into_a_project_article(memory_dir):
+    # Same retirement rule as a raw note, one level up: a project article can
+    # be trimmed from the listing, so it cannot stand in for a feedback one.
+    import pytest
+    write_memory(memory_dir, "compiled-fb", type="feedback", body="a correction")
+    write_memory(memory_dir, "compiled-pj", type="project", body="[[compiled-fb]]")
+    with Store(memory_dir) as s:
+        s.reindex()
+        with pytest.raises(ValueError, match="refused"):
+            s.delete_folded("compiled-fb", expect_hash=content_hash(s, "compiled-fb"))
+    assert (memory_dir / "compiled-fb.md").exists()

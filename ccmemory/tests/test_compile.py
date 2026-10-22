@@ -425,3 +425,285 @@ def test_backfill_group_disappears_once_its_sources_are_deleted(memory_dir):
     plan = compile_mod.compaction_plan(memory_dir, seed="compiled-topic")
     assert plan["status"] == "done"
     assert compile_mod.count_backlog(memory_dir)["retained"] == 0
+
+
+# --- merges: the drain for compiled first-tier articles -----------------------
+
+#: Same corpus shape as test_plan_groups_notes_by_subject, for the same reason:
+#: BM25 needs enough documents per subject to tell subjects apart.
+SUBJECTS = {
+    "xfs": "xfs allocator agno bitmap extent inode",
+    "unit": "systemd socket activation dependency ordering",
+    "quota": "quota weekly bucket metered credit billing",
+    "hooks": "pretooluse hook settings dispatch matcher",
+}
+
+
+def feedback_articles(memory_dir, *, age_days=30.0, pad=0):
+    """40 compiled feedback articles, ten per subject, none of them recent."""
+    now = time.time()
+    for subject, vocab in SUBJECTS.items():
+        for i in range(10):
+            text = f"{vocab} detail{subject}{i}"
+            write_memory(memory_dir, f"compiled-{subject}-{i}", type="feedback",
+                         description=text, body=text + " " + "p" * pad,
+                         mtime=now - age_days * 86400 - i)
+
+
+def merge_state(memory_dir):
+    from ccmemory.store import Store
+    with Store(memory_dir) as s:
+        s.reindex()
+        return compile_mod.behavior_excess(s), compile_mod.merge_groups(
+            s, compile_mod.plan_group_size())
+
+
+def test_no_merges_while_the_first_tier_fits_its_share(memory_dir, monkeypatch):
+    monkeypatch.delenv("CCMEMORY_LIST_TOKEN_BUDGET", raising=False)
+    feedback_articles(memory_dir)
+    excess, groups = merge_state(memory_dir)
+    assert excess <= 0
+    assert groups == []
+    assert compile_mod.count_backlog(memory_dir)["merge_backlog"] == 0
+
+
+def test_merges_clear_the_excess_and_stop(memory_dir, monkeypatch):
+    # Merging is lossy in one respect: one description now indexes what several
+    # did. So the plan merges what clears the excess and nothing beyond it.
+    from ccmemory.store import Store
+    monkeypatch.setenv("CCMEMORY_LIST_TOKEN_BUDGET", "2300")
+    feedback_articles(memory_dir)
+    excess, groups = merge_state(memory_dir)
+    assert excess > 0
+    assert groups, "an over-share first tier must yield merges"
+    with Store(memory_dir) as s:
+        rows = {r["name"]: dict(r) for r in s.db.execute(
+            "SELECT name, type, description, content_hash FROM mem")}
+    savings = [sum(Store._entry_tokens(rows[n]) for n in g["names"]) for g in groups]
+    assert sum(savings) >= excess
+    assert sum(savings) - savings[-1] < excess, "one group past the excess is one too many"
+    for g in groups:
+        assert g["kind"] == "merge" and g["article"] == g["seed"]
+        assert g["article_type"] == "feedback"
+        assert g["seed"] not in g["names"]
+        assert len({n.split("-")[1] for n in [g["seed"], *g["names"]]}) == 1, \
+            f"merge mixes subjects: {g['seed']} <- {g['names']}"
+        assert g["hashes"] == {n: rows[n]["content_hash"] for n in g["names"]}
+    merged = [n for g in groups for n in [g["seed"], *g["names"]]]
+    assert len(merged) == len(set(merged)), "merge groups must be disjoint"
+
+
+def test_merge_groups_respect_the_byte_ceiling(memory_dir, monkeypatch):
+    from ccmemory.store import Store
+    monkeypatch.setenv("CCMEMORY_LIST_TOKEN_BUDGET", "1000")
+    monkeypatch.setenv("CCMEMORY_ARTICLE_MAX_BYTES", "1000")
+    feedback_articles(memory_dir, pad=400)
+    _, groups = merge_state(memory_dir)
+    assert groups
+    with Store(memory_dir) as s:
+        size = {r[0]: r[1] for r in s.db.execute(
+            "SELECT name, length(CAST(body AS BLOB)) FROM mem")}
+    for g in groups:
+        # The ceiling bounds the merged article, which comes out larger than
+        # its inputs, so the inputs get the ceiling less the growth margin.
+        inputs = sum(size[n] for n in [g["seed"], *g["names"]])
+        assert inputs * compile_mod.MERGE_GROWTH <= 1000
+
+
+def test_recent_and_backfill_owned_articles_are_never_merged(memory_dir, monkeypatch):
+    # A recent article may still be mid-rewrite by a compactor; an article with
+    # sources on disk belongs to a backfill group. Either way a second agent on
+    # it would overwrite the first.
+    monkeypatch.setenv("CCMEMORY_LIST_TOKEN_BUDGET", "1000")
+    monkeypatch.setenv("CCMEMORY_COMPILE_COOLDOWN", "900")
+    feedback_articles(memory_dir, age_days=0)
+    _, groups = merge_state(memory_dir)
+    assert groups == []
+
+    # Old enough to merge: the xfs articles, and one more xfs article that
+    # still has a source on disk. Everything else stays recent.
+    old = time.time() - 30 * 86400
+    for i in range(10):
+        text = f"{SUBJECTS['xfs']} detailxfs{i}"
+        write_memory(memory_dir, f"compiled-xfs-{i}", type="feedback",
+                     description=text, body=text + " aged", mtime=old - i)
+    write_memory(memory_dir, "source", type="feedback")
+    write_memory(memory_dir, "compiled-xfs-owner", type="feedback",
+                 description=SUBJECTS["xfs"], body=SUBJECTS["xfs"] + " [[source]]",
+                 mtime=old)
+    _, groups = merge_state(memory_dir)
+    merged = {n for g in groups for n in [g["seed"], *g["names"]]}
+    assert "compiled-xfs-owner" not in merged
+    assert merged and all(n.startswith("compiled-xfs-") for n in merged)
+
+
+def test_merge_backlog_counts_toward_the_nudge(memory_dir, monkeypatch):
+    # A fully compacted store has no backlog and nothing retained; the merges
+    # are the only work left, and without counting them the nudge never asks.
+    monkeypatch.setenv("CCMEMORY_LIST_TOKEN_BUDGET", "1000")
+    monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
+    feedback_articles(memory_dir)
+    b = compile_mod.count_backlog(memory_dir)
+    assert b["backlog"] == 0 and b["retained"] == 0
+    assert b["merge_backlog"] >= 3
+    assert not compile_mod.nudge_suppressed(b)
+
+
+def test_plan_puts_merges_right_behind_behavior_notes(memory_dir, monkeypatch):
+    monkeypatch.setenv("CCMEMORY_LIST_TOKEN_BUDGET", "1000")
+    feedback_articles(memory_dir)
+    write_memory(memory_dir, "correction", type="feedback")
+    write_memory(memory_dir, "note", type="project")
+    plan = compile_mod.compaction_plan(memory_dir)
+    pools = [(g["kind"], g["pool"]) for g in plan["groups"]]
+    merge_at = [i for i, (k, _) in enumerate(pools) if k == "merge"]
+    behavior_at = [i for i, (k, p) in enumerate(pools)
+                   if k != "merge" and p == compile_mod.BEHAVIOR_POOL]
+    knowledge_at = [i for i, (_, p) in enumerate(pools) if p == compile_mod.KNOWLEDGE_POOL]
+    assert merge_at and behavior_at and knowledge_at
+    assert max(behavior_at) < min(merge_at) and max(merge_at) < min(knowledge_at)
+    assert plan["merge"] == sum(len(g["names"]) for g in plan["groups"] if g["kind"] == "merge")
+
+
+def test_a_completed_merge_shrinks_the_first_tier(memory_dir, monkeypatch):
+    # What a compactor does with a merge group, end to end: rewrite the seed
+    # citing every absorbed article, then delete each with the plan's hash.
+    from ccmemory.store import Store
+    monkeypatch.setenv("CCMEMORY_LIST_TOKEN_BUDGET", "2300")
+    monkeypatch.setenv("CCMEMORY_COMPILE_COOLDOWN", "0")
+    feedback_articles(memory_dir)
+    before, groups = merge_state(memory_dir)
+    g = groups[0]
+    seed = memory_dir / f"{g['seed']}.md"
+    seed.write_text(seed.read_text() + " ".join(f"[[{n}]]" for n in g["names"]) + "\n")
+    with Store(memory_dir) as s:
+        for n in g["names"]:
+            s.delete_folded(n, expect_hash=g["hashes"][n])
+    after, _ = merge_state(memory_dir)
+    assert after < before
+    assert all(not (memory_dir / f"{n}.md").exists() for n in g["names"])
+
+
+# --- the stored plan and claims: one partition per run ------------------------
+
+
+def finish_group(memory_dir, g, article):
+    """What a compactor leaves behind for a topic group: an article citing every
+    note, and the notes deleted."""
+    from ccmemory.store import Store
+    write_memory(memory_dir, article, body=" ".join(f"[[{n}]]" for n in g["names"]))
+    with Store(memory_dir) as s:
+        for n in g["names"]:
+            s.delete_folded(n)
+
+
+def test_plan_is_stored_and_does_not_shift_while_it_is_worked(memory_dir):
+    # A recomputed plan moves as the run changes the store. Served from
+    # storage, the groups left are exactly the groups that were there.
+    for subject, vocab in SUBJECTS.items():
+        for i in range(10):
+            text = f"{vocab} detail{subject}{i}"
+            write_memory(memory_dir, f"{subject}-case{i}", description=text, body=text)
+    first = compile_mod.compaction_plan(memory_dir)
+    assert (memory_dir / compile_mod.PLAN_FILE).exists()
+    done, rest = first["groups"][0], first["groups"][1:]
+    finish_group(memory_dir, done, "compiled-first")
+    write_memory(memory_dir, "late-arrival", body="written after the plan")
+    second = compile_mod.compaction_plan(memory_dir)
+    assert [(g["seed"], g["names"]) for g in second["groups"]] == [
+        (g["seed"], g["names"]) for g in rest]
+    # A note written mid-run waits for the next plan instead of reshuffling
+    # this one.
+    assert "late-arrival" not in plan_names(second)
+    one = compile_mod.compaction_plan(memory_dir, seed=done["seed"])
+    assert one["status"] == "done"
+
+
+def test_plan_is_rebuilt_once_every_group_is_done(memory_dir):
+    for i in range(3):
+        write_memory(memory_dir, f"note{i}")
+    plan = compile_mod.compaction_plan(memory_dir)
+    for i, g in enumerate(plan["groups"]):
+        finish_group(memory_dir, g, f"compiled-batch{i}")
+    write_memory(memory_dir, "next-note")
+    again = compile_mod.compaction_plan(memory_dir)
+    assert plan_names(again) == ["next-note"]
+
+
+def test_expired_plan_is_rebuilt(memory_dir, monkeypatch):
+    import json
+    write_memory(memory_dir, "note0")
+    compile_mod.compaction_plan(memory_dir)
+    stored = json.loads((memory_dir / compile_mod.PLAN_FILE).read_text())
+    stored["created"] -= compile_mod.plan_ttl() + 1
+    (memory_dir / compile_mod.PLAN_FILE).write_text(json.dumps(stored))
+    write_memory(memory_dir, "note1")
+    assert sorted(plan_names(compile_mod.compaction_plan(memory_dir))) == ["note0", "note1"]
+
+
+def test_take_hands_each_group_to_exactly_one_compactor(memory_dir, monkeypatch):
+    # The session dispatches a few agents once; they drain the plan between
+    # them. A group taken twice is two articles about the same notes.
+    monkeypatch.setenv("CCMEMORY_COMPILE_GROUP_SIZE", "1")
+    for i in range(5):
+        write_memory(memory_dir, f"note-{i}", description=f"distinct{i}", body=f"distinct{i}")
+    seeds = []
+    while True:
+        took = compile_mod.compaction_plan(memory_dir, take=True)
+        if took["status"] == "done":
+            break
+        assert len(took["groups"]) == 1
+        seeds.append(took["groups"][0]["seed"])
+    assert sorted(seeds) == [f"note-{i}" for i in range(5)]
+
+
+def test_claim_is_exclusive_under_concurrency(memory_dir):
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(16) as pool:
+        won = list(pool.map(lambda _: compile_mod.claim(memory_dir, "plan1", "seed"), range(16)))
+    assert won.count(True) == 1
+
+
+def test_stale_claim_is_taken_over_once(memory_dir):
+    # A compactor that died holding a claim must not strand its group.
+    assert compile_mod.claim(memory_dir, "plan1", "seed")
+    held = memory_dir / compile_mod.CLAIMS_DIR / "plan1" / "seed"
+    old = time.time() - compile_mod.claim_lease() - 1
+    os.utime(held, (old, old))
+    assert compile_mod.claim(memory_dir, "plan1", "seed")
+    assert not compile_mod.claim(memory_dir, "plan1", "seed")
+
+
+def test_a_new_plan_drops_the_old_plans_claims(memory_dir):
+    write_memory(memory_dir, "note0")
+    took = compile_mod.compaction_plan(memory_dir, take=True)
+    old_id = compile_mod.load_plan(memory_dir)["id"]
+    finish_group(memory_dir, took["groups"][0], "compiled-only")
+    write_memory(memory_dir, "note1")
+    compile_mod.compaction_plan(memory_dir)
+    assert not (memory_dir / compile_mod.CLAIMS_DIR / old_id).exists()
+
+
+def test_plan_splits_an_article_over_the_ceiling_until_it_fits(memory_dir, monkeypatch):
+    # Articles written before the ceiling was enforced stay oversized until
+    # something splits them; the plan hands each one out once.
+    monkeypatch.setenv("CCMEMORY_ARTICLE_MAX_BYTES", "100")
+    write_memory(memory_dir, "compiled-big", type="feedback", body="x" * 200)
+    write_memory(memory_dir, "compiled-small", type="feedback", body="x" * 50)
+    plan = compile_mod.compaction_plan(memory_dir)
+    splits = [g for g in plan["groups"] if g["kind"] == "split"]
+    assert [(g["seed"], g["article"], g["names"], g["article_type"]) for g in splits] == [
+        ("compiled-big", "compiled-big", [], "feedback")]
+    write_memory(memory_dir, "compiled-big", type="feedback", body="x" * 90)
+    write_memory(memory_dir, "compiled-big-part-two", type="feedback", body="x" * 90)
+    assert compile_mod.compaction_plan(memory_dir, seed="compiled-big")["status"] == "done"
+
+
+def test_oversized_article_with_sources_is_left_to_its_backfill(memory_dir, monkeypatch):
+    # Two agents on one article overwrite each other. The backfill rewrite is
+    # refused over the ceiling and splits it anyway.
+    monkeypatch.setenv("CCMEMORY_ARTICLE_MAX_BYTES", "100")
+    write_memory(memory_dir, "source", type="feedback")
+    write_memory(memory_dir, "compiled-big", type="feedback", body="x" * 200 + " [[source]]")
+    kinds = [(g["kind"], g["seed"]) for g in compile_mod.compaction_plan(memory_dir)["groups"]]
+    assert kinds == [("backfill", "compiled-big")]

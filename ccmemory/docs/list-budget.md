@@ -73,7 +73,14 @@ file Read, so nothing else surfaces them.
 
 First claim is not exemption. The tier is trimmable like any other (that is
 what makes the budget a budget), and `counts["load_bearing_withheld"]` reports
-what did not fit. Two things keep that number at zero in practice:
+what did not fit. Three things keep that number at zero in practice:
+
+- **Unspent budget goes back up.** The cumulative shares donate only downward,
+  so on their own they cap tier 1 at 25% however little tiers 2 and 3 need.
+  After the tiered pass, `list_all` hands what is left to the withheld entries,
+  tier 1 first. A fully compacted mxfs (120 feedback articles, 27 project
+  articles) withheld 49 feedback articles without this pass, while the whole
+  store listed for 10,107 tokens of a 19,700-token budget.
 
 - **A filtered listing gets the whole budget.** `memory_list(type="feedback")`
   skips the tier split entirely — the shares ration a mixed listing and have
@@ -97,7 +104,8 @@ states what was withheld and how to reach it.
 A non-zero `load_bearing_withheld` is the session's problem, not the user's.
 The user's only lever is an env var. The session can fix it directly by
 compacting behavior notes into always-listed articles, which is a background
-dispatch. So `_list_note` routes on `count_backlog`'s `behavior_backlog`:
+dispatch. So `_list_note` routes on `count_backlog`'s `behavior_backlog` and
+`merge_backlog`:
 
 - **Uncompiled behavior notes remain.** The note tells the session to recover
   the entries with a type-filtered listing, to make sure the behavior groups
@@ -105,9 +113,15 @@ dispatch. So `_list_note` routes on `count_backlog`'s `behavior_backlog`:
   not to report the overflow. The dispatch is requested even under the
   threshold, because the threshold paces routine compaction and a withheld
   correction is not routine. The cooldown still applies.
-- **Nothing is left to compact.** Every behavior entry is already a compiled
-  article, so only a bigger budget makes room. That is the one case where the
-  note says to tell the user, and it names the current budget.
+- **First-tier articles are due to merge** (`merge_backlog`). Compiled
+  feedback articles live in the first tier, and without merging they only
+  accumulate. mxfs reached 120 of them with no raw note left, and this note
+  told the user to raise the budget. The session dispatches the merge groups
+  exactly as it does note groups, and does not report it.
+- **Nothing is left to compact or merge.** Every behavior entry is a compiled
+  article and no two fit in one merge, so only a bigger budget makes room.
+  That is the one case where the note says to tell the user, and it names the
+  current budget.
 
 ## Backlog counting
 
