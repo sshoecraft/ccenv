@@ -2,6 +2,55 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-11-03 — v0.41.0
+
+**ccproject: defects and criteria scripts.**
+
+- `ccproject_defects.py` and `ccproject_criteria.py` replace the per-project
+  copies of `tools/defects.py` and `tools/criteria.py` that mxfs and smartbot
+  each carry. Data lives in the project: `.ccproject/defects.json` and
+  `.ccproject/criteria.json`, found by walking up from the cwd to the nearest
+  existing `.ccproject/`. The store carries its own `.gitignore` for the lock
+  and temp files, so only the data is committed.
+- The record shapes are the ones both projects already use, and unknown fields
+  survive a load and save, so an existing `defects.json` or `criteria.json`
+  imports unchanged (`import PATH`).
+- Criteria can be a matrix over one project-declared axis (`per_class`,
+  `per_config`, …); a matrix row is green only when every cell is.
+- `--gate` on both. By default any defect blocks; `gate_exclude` and
+  `gate_require` filters on defect fields narrow that. The board gates on every
+  criterion being green.
+- Results can record the build they were measured on, and `--build B` grades
+  the board against B: a green from any other build reads STALE, because it is
+  not evidence about this one.
+- `--at` and the axis name (e.g. `--class`) are spellings of `--cell`, so
+  existing harness calls keep their shape.
+- When the project keeps a defect queue, "no blocking defects" is a line of the
+  board's verdict. `ccproject_criteria.py --gate` is then the whole release
+  check.
+- Project drivers: `.ccproject/driver.py` (`API = 1`) can supply `applies`,
+  `grade`, `on_result`, `blocks`, `options` and `commands` hooks. A project's
+  harness-specific logic (pass counts, run logs, per-configuration rules) lives
+  there and never in the generic tools.
+- The key `"project"` at every level of both files is reserved for the
+  project's own data and is never read or rewritten.
+- The installer copies both scripts straight into the user bin dir
+  (`${PYTHONUSERBASE:-~/.local}/bin`), the dir ccenv's pip installs use. They
+  are commands, not something the skill runs, so nothing of them lives in the
+  skill directory. A box that an earlier build linked them on gets the links
+  and the skill-dir copies replaced. A file of that name the installer did not
+  put there is left alone.
+
+## 2026-10-23 — v0.40.2
+
+**Versioning rule: a local commit no longer closes the open version.**
+
+- Only a commit that is pushed, an install, or the owner saying so closes it.
+  Some dev cycles commit locally as checkpoints, and each one used to close the
+  version and force a bump on the next change.
+- An install still closes it, so the installed number always names one build
+  and shows whether the latest one is what's running.
+
 ## 2026-10-22 — v0.40.1
 
 **ccmemory v0.23.1: fixes from the first live article-merge run, on mxfs.**

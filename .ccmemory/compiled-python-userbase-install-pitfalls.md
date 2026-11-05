@@ -1,16 +1,16 @@
 ---
 name: compiled-python-userbase-install-pitfalls
-description: ccenv Python --user install traps: shared PYTHONUSERBASE ABI strandings, zshenv export, banner gating, stdlib MCP shim, old setuptools build crash
+description: ccenv Python --user install traps: PYTHONUSERBASE/zshenv, ABI strandings, stdlib MCP shim, old setuptools crash, AppleDouble sidecars breaking wheels
 metadata:
   type: project
-tags: [compiled, install, pythonuserbase, python3.9, abi, mcp]
+tags: [compiled, install, pythonuserbase, python3.9, abi, mcp, appledouble]
 ---
 
 Central topic: how ccenv's `pip --user` install under a forced `PYTHONUSERBASE=$HOME/.local` behaves across platforms and Python versions, and the failures that came out of it.
 
 ## Environment: PYTHONUSERBASE must reach every Claude subprocess
-- install.sh forces `PYTHONUSERBASE=$HOME/.local` for every `pip3 install --user`, so binaries land in `~/.local/bin/` on every platform. At runtime Python only honours it if it is in the environment; the install-time export does not travel with the scripts. Otherwise `site.py` falls back to the platform default user-base (macOS Homebrew: `~/Library/Python/<ver>`), which is empty, and every ccenv binary dies with `ModuleNotFoundError` when Claude Code launches it as a hook or MCP subprocess ([[pythonuserbase-in-zshenv]], `pythonuserbase-banner-platform-gated`).
-- Export it in `~/.zshenv`, not `~/.zshrc`. Hooks, statusLine and MCP servers run in non-interactive shells that skip `.zshrc` (`.zshenv` is the file zsh sources for non-interactive shells). Do not put it in `~/.claude/settings.json` `env`: redundant, hardcoded path, not written by install.sh ([[pythonuserbase-in-zshenv]]).
+- install.sh forces `PYTHONUSERBASE=$HOME/.local` for every `pip3 install --user`, so binaries land in `~/.local/bin/` on every platform. At runtime Python only honours it if it is in the environment; the install-time export does not travel with the scripts. Otherwise `site.py` falls back to the platform default user-base (macOS Homebrew: `~/Library/Python/<ver>`), which is empty, and every ccenv binary dies with `ModuleNotFoundError` when Claude Code launches it as a hook or MCP subprocess (`pythonuserbase-in-zshenv`, `pythonuserbase-banner-platform-gated`).
+- Export it in `~/.zshenv`, not `~/.zshrc`. Hooks, statusLine and MCP servers run in non-interactive shells that skip `.zshrc` (`.zshenv` is the file zsh sources for non-interactive shells). Do not put it in `~/.claude/settings.json` `env`: redundant, hardcoded path, not written by install.sh (`pythonuserbase-in-zshenv`).
 - The "REQUIRED: shell environment setup" banner at the end of install.sh is gated on the platform default:
   ```
   PLATFORM_USER_BASE=$(env -u PYTHONUSERBASE python3 -c 'import site; print(site.USER_BASE)')
@@ -38,4 +38,11 @@ Central topic: how ccenv's `pip --user` install under a forced `PYTHONUSERBASE=$
 - Verified 2026-06-13: setuptools 52->82, pip 20.3.4->26.0.1, wheel->0.47; all packages built clean with no UNKNOWN/install_layout: ccenvmcp 0.1.0, ccmemory 0.8.0, ccusage 0.2.0, ccloop 0.3.4, ccteam 0.3.0. All three MCP servers `claude mcp list` -> Connected on 3.9.2. nats-py 2.15.0 and watchfiles 1.1.1 fetched cp39 wheels fine, confirming `mcp` was the only 3.9 blocker.
 - Benign pre-existing warnings, ignore: "Error parsing dependencies of gpg: Invalid version '1.14.0-unknown'" (broken system python3-gpg metadata); pipx 1.0.0 argcomplete/userpath resolver note (ccenv uses pip --user, not pipx) (`ccmemory-debian-build-unknown-install-layout`).
 
-Related: `no-per-component-venvs`, `ccenv-installed-vs-source-version`, [[src-tree-appledouble-sidecars]].
+## AppleDouble `._*` sidecars on /src corrupt wheels [[src-tree-appledouble-sidecars]]
+- `/src` -> `/System/Volumes/Data/src` is on a filesystem that cannot store macOS xattrs natively, so the OS materializes AppleDouble `._*` sidecar files next to anything written there. `COPYFILE_DISABLE=1` does NOT prevent it (governs only `tar`/`cp`, not FS-level creation).
+- Symptom: local `pip install` fails with `invalid wheel, multiple .dist-info directories found: ._<pkg>.dist-info, <pkg>.dist-info`. During `bdist_wheel` setuptools writes `<pkg>.dist-info/`, the FS drops `._<pkg>.dist-info` beside it, and the zip step sweeps both in.
+- Fix in install.sh `pip_install_local`: stage source to `/tmp` (native APFS, no sidecars), excluding `._*`/`build`/`dist`/`*.egg-info`/`__pycache__`, then build/install from the clean copy. All local pip installs (ccmemory/ccloop/ccteam/overlays) route through it.
+- ccmemory stores: `.ccmemory/` dirs accumulate `._*.md` sidecars that the index scan picked up as junk. ccmemory v0.6.1 `paths.ensure_gitignore()` writes `._*` into each store's `.gitignore` (out of git, cannot stop them on disk).
+- Broader cleanup NOT done (needs user + git): a global `core.excludesfile` with `._*` would keep all source-tree sidecars (`._README.md`, `._direct.js`, etc.) out of every repo at once.
+
+Related: `no-per-component-venvs`, `ccenv-installed-vs-source-version`, `pythonuserbase-in-zshenv`.

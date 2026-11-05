@@ -230,7 +230,7 @@ is recoverable.*
 - Write the new `CHANGELOG.md` entry at the bump, naming the work rather than the fix, so the
   next session can tell what the open version is for.
 - If the project has no `CHANGELOG.md`, the first bump creates it.
-- A commit, a push or an install of the open version closes it, and so does the owner saying so;
+- A commit and push or an install of the open version closes it, and so does the owner saying so;
   the next change opens a new version even for the same work.
 - A write to `.ccmemory/` is not a change to the source and never bumps the version.
 - The number moves within an open version only to raise its size — patch to minor, minor to

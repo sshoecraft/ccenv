@@ -1,0 +1,66 @@
+---
+name: compiled-ccenv-install-and-version-conventions
+description: ccenv conventions: bump bundle once before first change, install never writes source, no venvs, CLAUDE.md ownership/no history, one version source, n…
+metadata:
+  type: feedback
+tags: [compiled, ccenv, versioning, install, claude-md, git]
+---
+
+Central topic: how ccenv is versioned, installed and documented, and the git ban. All are user corrections.
+
+## Version bump timing and scope
+- **When:** only immediately before the first source change in a session. A session changing nothing bumps nothing; a write to `.ccmemory/` is not a source change. Never a second time in the session; later changes join the open version. The number moves again only to raise its size (patch -> minor -> major), never to add a step. A release seen in the session (install or push) closes that version; the next change opens a new one. Example: 0.36.0 was installed mid-session, so the later installer fix shipped as 0.36.1. `bump-top-level-bundle-version-not-just-subdir`
+- **What:** a component change under `/src/ccenv` (ccloop/, ccmemory/, ccusage/, ccteam/ ...) needs the component's `pyproject.toml`, `/src/ccenv/VERSION`, and `/src/ccenv/CHANGELOG.md` (one entry for the session's version citing the component version, e.g. "ccloop v0.5.1: ..."). The per-component bump is necessary but not sufficient: the user installs the bundle, so a component-only bump leaves the shipped thing unversioned. User corrected this repeatedly ("you keep doing this"). `bump-top-level-bundle-version-not-just-subdir`
+- **Why once, up front:** the old note said "after editing any component, do BOTH bumps in the same change", plus an old CLAUDE.md line "the version is revved as part of the change"; together they produced seven bumps in one bug-fixing session before any release. Bumping at release was rejected because Claude cannot see a release; an install outside Claude would ship changed code under an already-released number. Decided 2026-09-19. Relates to `ccenv-installed-vs-source-version`. `bump-top-level-bundle-version-not-just-subdir`
+
+## Install never writes to the source tree
+- No `install.sh` (ccenv's or any project's) may write into the source tree, e.g. a `RELEASED` marker next to `VERSION`. User: "NO NO AND NO! app user or NO user should be able 'write' to this dir!! ... remember some users git clone trader then ./install.sh". `install-never-writes-to-source-tree`
+- The user codes as `steve` and installs as the application user. `~/.config/ccenv/installed-version` is in the installer's home, invisible to a `steve` session. Others install from their own `git clone`. So Claude cannot detect a release; anything "at release" must happen before it, hence the bump-before-first-change rule. `install-never-writes-to-source-tree`
+
+## Python install layout: no per-component venvs
+- Do not recommend a venv per component (old ccloop README: `python3 -m venv ~/.venvs/ccloop && pip install .` plus PATH symlink). User: "we'd have a venv for EACH component of this repo?" -> no. `no-per-component-venvs`
+- Standard: `pip3 install --user .`; `pipx install .` is the PEP 668 fallback only for a manual single-component install. Top-level install.sh installs all five components with `pip install --user`. `no-per-component-venvs`
+- Why: 5x disk for shared deps (mcp, anyio, pydantic), five symlink chains, inconsistent layouts, no needed isolation (same user, same `claude` CLI). `no-per-component-venvs`
+- install.sh does NOT fall back to pipx (v0.4.1): all five components share ONE `--user` site so the `ccenvmcp` shim is importable across ccmemory/ccusage/ccteam; pipx per-app venvs would break that. On PEP 668 (`error: externally-managed-environment`; installer's `set -e` aborts) install.sh probes for the `EXTERNALLY-MANAGED` marker (`sysconfig.get_path("stdlib")`) and, only when present AND pip supports it, exports `PIP_BREAK_SYSTEM_PACKAGES=1` for its subshell, covering every `pip install --user`. Safe: everything goes to `~/.local`. Manual unblock: `PIP_BREAK_SYSTEM_PACKAGES=1 ./install.sh`. Never write per-component venv recipes; do not convert install.sh to pipx. See `shared-userbase-compiled-dep-abi-mismatch`, `pythonuserbase-in-zshenv`. `no-per-component-venvs`
+
+## ~/.claude/CLAUDE.md ownership (set 2026-06-13, user's explicit direction)
+- Top-level `install.sh` assembles ONLY the base (bundled `CLAUDE.md` plus user/system overlay blocks), FIRST, before any component installer (function `assemble_ccenv_base_claude_md`). `install-claude-md-component-owned`
+- Base sits in a `# [CCENV MANAGED]` ... `# [/CCENV MANAGED]` region; re-run refreshes only that region (awk strips the old block, regenerates, preserves outside), so idempotent with no backup churn. `install-claude-md-component-owned`
+- Each component installer owns and appends its own section after the region (e.g. `ccproject/install.sh` step 4 manages its `# [AWARENESS PROTOCOL]` marker from its own `global-claude-md-snippet.md`). The top-level never reaches into a component's content. `install-claude-md-component-owned`
+- `CCPROJECT_SKIP_GLOBAL_CLAUDE_MD` was removed; do not reintroduce it or any skip coupling. `install-claude-md-component-owned`
+- Why: the old design pulled `ccproject/global-claude-md-snippet.md`, ran ccproject early with a SKIP gate, and assembled the global file last (line ~472) while the consumer ran at ~293; that caused a false "Global CLAUDE.md missing awareness protocol" verify failure. User: "submodules can install/update global CLAUDE.md as they wish ... installer should not install submodule CLAUDE.md changes." New component needs: own marker-delimited idempotent self-install; never re-centralize. Same spirit as `mcp-heal-stale-command-pattern`; related `no-per-component-venvs`. `install-claude-md-component-owned`
+
+## No version history in CLAUDE.md
+- CLAUDE.md is purpose/architecture/conventions, never version history. Changelogs go in `CHANGELOG.md` beside `README.md` (`## vX.Y.Z` headers, newest first). Trigger: `ccmemory/CLAUDE.md` had a 90-line "Architecture history" section covering v0.1.0 to v0.9.0. User: "why is history being kept in CLAUDE.md in _any_ project versus CHANGELOG.md???" and directed all module-level CLAUDE.md files be cleared and removed (content duplicated in README.md; only unique content was the changelog). `no-version-history-in-claude-md`
+- Why: CLAUDE.md loads every session; history is overhead only release work needs, readable on demand. Never add "Architecture history"/"Version history"/"Changelog" sections to any CLAUDE.md. Per-module CLAUDE.md files are deprecated; top-level `/src/ccenv/CLAUDE.md` is the global-rules file installed to `~/.claude/CLAUDE.md`; subdirectory architecture/install/test info goes in that subdir's `README.md`. Before writing "this version did X, next added Y" outside CHANGELOG.md or a commit message, stop. Related `ccenv-installed-vs-source-version`. `no-version-history-in-claude-md`
+
+## One source of truth for versions
+- `__version__` was hardcoded in each `__init__.py` while `pyproject.toml` held the real number; both drifted two minor versions. `--version` printed ccloop 0.10.1 (installed dist 0.12.0), ccmemory 0.15.0 (installed 0.17.0). Caught only by running `ccloop --version` to confirm an install. A stale version reads as "the install failed". `version-must-have-one-source-of-truth`
+- Rule: never hand-maintain a version in `__init__.py`:
+```python
+from importlib.metadata import PackageNotFoundError, version as _dist_version
+try:
+    __version__ = _dist_version("<pkg>")
+except PackageNotFoundError:
+    __version__ = "0+unknown"
+```
+  `importlib.metadata` is stdlib from 3.8, fine under ccenvmcp's 3.9 floor, no dependency. Applied to ccloop, ccmemory AND ccenvmcp in v0.20.1 (ccenvmcp had not drifted; fixed anyway because the defect is the duplicated source, not the current number). `--version` now reports what is installed, not the source tree; correct direction (see `ccenv-installed-vs-source-version`). `version-must-have-one-source-of-truth`
+- Tautological test: `from ccloop import __version__; assert __version__ in capsys.readouterr().out` passes at any drift. Lesson: a test whose expected value derives from the thing under test verifies plumbing, not correctness. Replaced with a regex check that `__init__.py` does not hardcode a version, and `__version__ == importlib.metadata.version(pkg)`. `version-must-have-one-source-of-truth`
+- Generalization: same class as the ccmemory listing budget (estimator drifted from its serializer) and ccloop handoff staleness. Any value hand-maintained in a second place drifts silently; ask "how many places carry this number". `version-must-have-one-source-of-truth`
+
+## install.sh MCP registration heals stale commands (`mcp-heal-stale-command-pattern`)
+- `register_mcp()` in install.sh does more than check-and-skip: (1) `mcp_registered "$name"` checks existence; (2) if present, `mcp_current_command "$name"` parses `claude mcp get` output, gluing `Command:` and `Args:` lines into one string; (3) compares to `$*` (what would be registered now); (4) if different prints "registered with stale command — re-registering", runs `claude mcp remove` then `claude mcp add` with the new command. `ccusage/install.py:register_mcp_user()` has the same compare-and-heal in Python.
+- Essential: without it, a server registered with a stale path (bare `ccmemory` from a pre-PYTHONUSERBASE install, or `~/Library/Python/3.14/bin/ccmemory mcp` after switching to `~/.local`) stays broken forever because `mcp_registered` returned true and the old skip-if-registered logic walked away. Failure mode: install once with wrong path, entry pinned, `claude mcp list` shows `✘ Failed to connect`, re-running install.sh does nothing, user must manually `claude mcp remove ccmemory` and rerun; this dragged on an entire session before being named the root cause of ccmemory/ccteam connection failures on macOS.
+- Apply: new MCPs always go through `register_mcp()`, never an inline `claude mcp add`; a component with its own installer (like ccusage's install.py) replicates the heal pattern; do not restore "leaving as-is". Never simplify it away.
+
+## Shared PYTHONUSERBASE strands stale-ABI compiled deps (`shared-userbase-compiled-dep-abi-mismatch`)
+- `PYTHONUSERBASE=~/.local` + Homebrew's `osx_framework_user` scheme gives ONE version-agnostic `lib/python/site-packages` shared by all interpreters (3.9, 3.13, 3.14); `python3 -c 'import site;print(site.getusersitepackages())'` returns the same path under 3.13 and 3.14. Pure-Python deps survive; compiled extensions are ABI-tagged (`*.cpython-39-darwin.so` vs `*.cpython-314-darwin.so`) and load only under the matching interpreter.
+- Seen 2026-06-13: ccteam MCP `✘ Failed to connect`; launcher on 3.14, shared dir held only `watchfiles/_rust_notify.cpython-39-darwin.so` -> `ModuleNotFoundError: No module named 'watchfiles._rust_notify'`. ccmemory/ccusage fine (stdlib-only, see `ccenvmcp-stdlib-mcp-shim`); ccteam is the only component with a compiled dep. Scan: 12 stale cp39 `.so` across 7 dists (watchfiles, cffi, websockets, SQLAlchemy, uvloop, httptools, PyYAML, pydantic_core): whole shared site stranded by the 3.9->3.14 bump. Pip never refetched because the dists looked present.
+- Manual fix (one dist): `python3.14 -m pip install --user --force-reinstall --no-deps watchfiles`.
+- Automated, install.sh v0.1.5 `heal_stale_compiled_exts()` (after all components install): walks the shared user-site for `.so`/`.pyd`/`.dylib` whose ABI tag differs from the running `EXT_SUFFIX` (skips `.abi3.so` and untagged), maps each to its dist via `RECORD`, force-reinstalls the EXACT `name==version` with `--force-reinstall --no-deps`, no `--upgrade` (no surprise upgrades of packages ccenv doesn't own). Keys off on-disk `.so` so it heals already-broken boxes; writes `~/.config/ccenv/python-tag` (`sys.implementation.cache_tag`) to announce a bump next run. Docs `docs/install.md`. Re-running `./install.sh` auto-heals; hand-fixing means force-reinstalling the exact pinned version. Related `pythonuserbase-in-zshenv`, `no-per-component-venvs`, `ccenv-installed-vs-source-version`.
+
+## git ban is absolute
+- The ban covers every subcommand, including read-only (`git status`, `diff`, `log`, `reflog`). "If you find yourself about to run `git`, STOP and ask." `no-git-checkout-to-undo-own-edits`
+- Violation 1: undoing own edits with `git checkout -- <file>` / `git restore`. Use Edit/Write to restore; if prior content is not in context, ask. "Only reverting my own code" is no exception: the tree is shared and checkout could wipe uncommitted user work; "only affected my changes this time" is luck. `no-git-checkout-to-undo-own-edits`
+- Violation 2: "read-only verification". Use Read/find/wc/grep; to learn what is uncommitted, ask. `no-git-checkout-to-undo-own-edits`
+- Why: git is too blunt and side-effecting (index state, pagers, hooks, lockfiles); the bright line makes the prohibition reliable. Implicit permission exists only from the user's words ("commit and push" allows the commit pipeline; "what's the git status" allows `git status`). When in doubt, ask first, run never. `no-git-checkout-to-undo-own-edits`

@@ -669,6 +669,28 @@ strip_settings_hooks
 # ----------------------------------------------------------------------------
 if should_remove ccproject; then
     step ccproject "removing awareness skill + global CLAUDE.md section"
+    # The two commands are installed as plain copies in the user bin dir. A box installed by an
+    # earlier version has links there into the skill dir instead; those go before the skill dir,
+    # because once it is gone they dangle and a dangling link fails rm_path's existence test.
+    # Only our own copy or our own link is removed; a file the user put there by that name is
+    # left alone. Our copy is the one whose docstring opens with the tool's own name.
+    for tool in ccproject_defects.py ccproject_criteria.py; do
+        dest="$USER_BIN/$tool"
+        ours=0
+        if [ -L "$dest" ]; then
+            [ "$(readlink "$dest")" = "$SKILLS_DIR/project-awareness/scripts/$tool" ] && ours=1
+        elif [ -f "$dest" ]; then
+            grep -q "^\"\"\"$tool -- " "$dest" && ours=1
+        fi
+        if [ "$ours" = "1" ]; then
+            act "remove command: $dest"
+            if [ "$DRY_RUN" != "1" ]; then
+                rm -f "$dest" || warn "failed to remove $dest"
+            fi
+        elif [ -e "$dest" ]; then
+            info "$dest was not installed by ccproject — left alone"
+        fi
+    done
     rm_path "$SKILLS_DIR/project-awareness" "skill" \
         || info "skill dir not present"
     if [ -f "$GLOBAL_CLAUDE_MD" ] && grep -q '^# \[AWARENESS PROTOCOL\]' "$GLOBAL_CLAUDE_MD"; then
@@ -684,6 +706,7 @@ if should_remove ccproject; then
         info "no [AWARENESS PROTOCOL] section in $GLOBAL_CLAUDE_MD"
     fi
     info "per-project .claude/awareness/ docs are project content — left in place"
+    info "per-project .ccproject/ defect queues and criteria boards are project content — left in place"
 fi
 
 # ----------------------------------------------------------------------------

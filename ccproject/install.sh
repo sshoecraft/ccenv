@@ -65,6 +65,42 @@ chmod +x "$SKILL_DIR/scripts/generate_structural_map.py"
 chmod +x "$SKILL_DIR/scripts/generate_mermaid_callgraph.py"
 echo "  Installed 3 scripts to $SKILL_DIR/scripts/"
 
+# The defect queue and criteria board are commands run from inside a project, not scripts the
+# skill runs, so they are installed straight into the bin dir ccenv's pip installs use and
+# nothing of them lives in the skill dir.
+#
+# An earlier install put the real files in the skill dir and linked them from the bin dir. cp
+# onto that link would follow it and write into the skill dir, so an old link is removed before
+# copying, and the old skill-dir copies are removed after.
+#
+# A file of that name that this installer did not put there belongs to the user and is never
+# replaced. Ours is either the old link into the skill dir, or a copy whose docstring opens
+# with the tool's own name.
+USER_BIN="${PYTHONUSERBASE:-$HOME/.local}/bin"
+mkdir -p "$USER_BIN"
+tool_is_ours() {
+    local dest="$USER_BIN/$1"
+    if [ -L "$dest" ]; then
+        [ "$(readlink "$dest")" = "$SKILL_DIR/scripts/$1" ]
+    else
+        grep -q "^\"\"\"$1 -- " "$dest"
+    fi
+}
+for tool in ccproject_defects.py ccproject_criteria.py; do
+    dest="$USER_BIN/$tool"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+        if ! tool_is_ours "$tool"; then
+            echo "  WARNING: $dest exists and was not installed by ccproject — left alone"
+            continue
+        fi
+        rm -f "$dest"
+    fi
+    cp "$SCRIPT_DIR/scripts/$tool" "$dest"
+    chmod +x "$dest"
+    echo "  Installed $dest"
+done
+rm -f "$SKILL_DIR/scripts/ccproject_defects.py" "$SKILL_DIR/scripts/ccproject_criteria.py"
+
 # Step 4: Update global awareness protocol in ~/.claude/CLAUDE.md
 # ccproject owns this section; it appends/updates it idempotently and never
 # touches content outside its own [AWARENESS PROTOCOL] marker.
@@ -204,6 +240,15 @@ ERRORS=0
 [ -f "$SKILL_DIR/scripts/generate_structural_map.py" ] || { echo "  ERROR: generate_structural_map.py not found"; ERRORS=1; }
 [ -f "$SKILL_DIR/scripts/generate_mermaid_callgraph.py" ] || { echo "  ERROR: generate_mermaid_callgraph.py not found"; ERRORS=1; }
 [ -x "$SKILL_DIR/scripts/analyze_project.py" ] || { echo "  ERROR: analyze_project.py not executable"; ERRORS=1; }
+for tool in ccproject_defects.py ccproject_criteria.py; do
+    dest="$USER_BIN/$tool"
+    # A user's own file of that name was already reported and left alone above.
+    if [ -e "$dest" ] && ! tool_is_ours "$tool"; then
+        continue
+    fi
+    [ -x "$dest" ] || { echo "  ERROR: $dest not installed"; ERRORS=1; }
+    python3 "$dest" --help >/dev/null 2>&1 || { echo "  ERROR: $dest --help failed"; ERRORS=1; }
+done
 grep -q "\[AWARENESS PROTOCOL\]" "$GLOBAL_CLAUDE_MD" || { echo "  ERROR: Global CLAUDE.md missing awareness protocol"; ERRORS=1; }
 
 if [ $ERRORS -eq 0 ]; then
@@ -214,6 +259,7 @@ if [ $ERRORS -eq 0 ]; then
     echo "Installed to:"
     echo "  Skill:      $SKILL_DIR/SKILL.md"
     echo "  Scripts:    $SKILL_DIR/scripts/"
+    echo "  Commands:   $USER_BIN/"
     echo "  Global MD:  $GLOBAL_CLAUDE_MD"
     echo "  Templates:  $SKILL_DIR/templates/"
     echo ""
@@ -221,6 +267,10 @@ if [ $ERRORS -eq 0 ]; then
     echo "  analyze_project.py          — Auto-detect languages, subsystems, dependencies"
     echo "  generate_structural_map.py  — Extract signatures, types, call graph"
     echo "  generate_mermaid_callgraph.py — Visual call graph in Mermaid format"
+    echo ""
+    echo "Commands installed:"
+    echo "  ccproject_defects.py        — The project's defect queue (.ccproject/defects.json)"
+    echo "  ccproject_criteria.py       — The project's criteria board (.ccproject/criteria.json)"
     echo ""
     echo "Nothing runs automatically. The awareness docs are maintained when you"
     echo "ask for it; regenerate the structural map with:"

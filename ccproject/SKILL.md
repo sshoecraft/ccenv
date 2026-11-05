@@ -259,3 +259,34 @@ If you're working and realize the docs don't cover something important:
 3. THEN update the appropriate awareness doc with what you learned.
 4. This is how the system gets better over time — every session that touches
    a gap should fill it.
+
+## Defect Queue and Criteria Board
+
+Two commands on PATH keep a project's release state in `.ccproject/`, found by
+walking up from the cwd to the nearest existing one. They are the only writers
+of those files: never hand-edit the JSON, and run `--help` on either for every
+flag.
+
+**`ccproject_defects.py`** is the queue of what is broken (`.ccproject/defects.json`).
+- Membership is the status. A fixed or disproved defect is removed, never marked.
+- Commands:
+  - The bare command lists the queue; `-d` adds detail.
+  - `show ID` prints one defect.
+  - `add -m SUMMARY [-s SEV] [-w EVIDENCE] [-n NEXT] [--criterion ID]` opens one.
+  - `update ID` with `-W` appends evidence and `-a` appends a next step. `-w`/`-n` replace the text and need `--replace`.
+  - `remove ID --fixed|--disproved --why "what proved it"` prints the CHANGELOG line to paste.
+- `--gate` exits 1 while any defect blocks. `gate-exclude FIELD VALUE…` and `gate-require FIELD VALUE…` narrow which defects count.
+
+**`ccproject_criteria.py`** is what the project must achieve (`.ccproject/criteria.json`).
+- The board ends with one VERDICT line. When the project keeps a defect queue, "no blocking defects" is one of its lines, so `--gate` is the whole release check.
+- Recording results:
+  - `update ID -s STATUS -m "measured" [-w WINDOW] [--build B]` records a result.
+  - `--cell VALUE` (also spelled `--at` or the axis name, e.g. `--class`) writes one cell of a matrix row.
+- Grading:
+  - `--build B` grades against build B, and a green from any other build reads STALE.
+  - `--gaps` lists criteria with no detector, or whose detector script is missing.
+- `pending` / `executing` / `finalize --run-id R` track a harness run in flight.
+
+Before writing project data or logic, know these:
+- **Reserved key:** `"project"` at any level of either file is the project's own data, which the tools never touch.
+- **Drivers:** a project's own grading, applicability or gate logic goes in `.ccproject/driver.py`, never into the tools. The hooks are listed in `README.md` and the design in ccenv's `docs/ccproject.md`.
