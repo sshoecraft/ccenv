@@ -166,6 +166,26 @@ any subdirectory once the store exists. Every write is under a lock and
 replaces the file atomically. Fields neither tool knows are kept, so an existing
 `defects.json` / `criteria.json` from a project's own tools imports unchanged.
 
+**`.ccproject/config.json`.** Optional, read by both tools:
+
+```json
+{"store":    {"criteria": "data/criteria.json", "defects": "data/defects.json"},
+ "external": {"criteria": "tools/criteria.py",  "defects": "tools/defects.py"}}
+```
+
+- `store` names where a file lives instead of `.ccproject/`, relative to the
+  project root and inside it. A project whose own tooling already reads its
+  files in place moves to ccproject without moving them.
+- `external` says the project keeps that part of its release state in a tool of
+  its own. The ccproject tool for it then refuses to run in the project, `import`
+  included, and names the project's tool. Delete the line when the project
+  switches over.
+
+Each file is locked by `.<file>.lock` beside it (`data/.defects.json.lock`). A
+project tool that writes the same file should take that same lock, and then the
+two exclude each other. A `store` outside `.ccproject/` is covered by the
+project's own `.gitignore`, not the store's.
+
 ```bash
 ccproject_defects.py                          # the queue, severity order
 ccproject_defects.py -d                       # with summary and next step
@@ -178,6 +198,7 @@ ccproject_defects.py import path/to/defects.json
 
 ccproject_criteria.py                         # the board and its VERDICT line
 ccproject_criteria.py -v                      # requirement, why, detector, by phase
+ccproject_criteria.py --cell mage             # each row graded at one axis value
 ccproject_criteria.py add -i boots -r "it boots" -d tests/boot.sh -p startup
 ccproject_criteria.py update boots -s PASS -m "booted in 3s" -w "10 runs"
 ccproject_criteria.py --gate                  # exit 1 unless every criterion is green
@@ -192,7 +213,10 @@ with `ccproject_criteria.py axis class warrior mage priest`. A row added with
 name — are the same option).
 The row is PASS when every value is green, FAIL when any is FAIL, PARTIAL
 otherwise; `update ID --values a b` narrows a row to some of the values. The
-first per-value write to a plain row makes it a matrix row.
+first per-value write to a plain row makes it a matrix row. `"failing": [...]`
+on the board widens which statuses fail a row (default `["FAIL"]`), for a
+project where an INCOMPLETE run is a failure. The bare board takes
+`--cell VALUE` too: only the rows that apply at that value, each graded there.
 
 **Linking.** `ccproject_defects.py add/update --criterion ID` names a criterion
 a defect breaks; the board shows it as `blocked by D-…`.
@@ -240,12 +264,17 @@ any of these hooks. A hook that is missing, or that returns `None`, means
 |---|---|---|
 | `applies(data, row)` | for the axis values a matrix row must pass | list of values |
 | `grade(data, row, value, record, build)` | for each row (`value` None) or cell (`record` None if never written) the board grades | status |
-| `on_result(data, row, value, record, args)` | after a result is written, before the save, with the lock held | — |
+| `roll_up(data, row, statuses)` | for a matrix row, with its cells' graded statuses | the row's status |
+| `before_result(data, row, value, results, args)` | before a result is checked and written; edit `results` in place, or exit to refuse it | — |
+| `on_result(data, row, value, record, args)` | after a result is written (and for each record `finalize` settles), before the save, with the lock held | — |
 | `blocks(data, entry, args)` | for each defect the gate considers, in both tools | bool |
+| `unrated(data, entry, args)` | for each defect the gate's NOTE might count as passed unrated | bool |
+| `on_write(data, entry, args, command)` | defects `add` / `update`, before the save; may exit to refuse | whether it changed the entry |
+| `on_remove(data, entry, args)` | defects `remove`, before the save; may exit to refuse | lines to report |
 | `options(parser)` | while building the top-level parser: add flags | — |
-| `commands(subparsers)` | while building subcommands: add your own | — |
+| `commands(subparsers)` | while building subcommands: add your own, or add flags to a built-in one through `subparsers.choices[name]` | — |
 
-- **Driver subcommands:** one marks itself with `set_defaults(driver_command=fn)`. `fn(data, args)` runs with the lock held and returns the exit code.
+- **Driver subcommands:** one marks itself with `set_defaults(driver_command=fn)`. `fn(data, args)` runs with the lock held and returns the exit code. `driver_readonly=True` beside it runs it without the lock, for a report that must not stall a writer.
 - **Tool access:** the tool's module is available to the driver as `ccproject` (`ccproject.save(data)`, `ccproject.find(...)`, `ccproject.project_store()`).
 - **Refusals:**
   - a driver that redefines a built-in subcommand or flag

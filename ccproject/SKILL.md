@@ -267,6 +267,12 @@ walking up from the cwd to the nearest existing one. They are the only writers
 of those files: never hand-edit the JSON, and run `--help` on either for every
 flag.
 
+A project's `.ccproject/config.json` can change both of those:
+- **`external`:** the project keeps its release state in a tool of its own. The ccproject tool refuses and names that tool. Use the named tool, and never `import` the project's data into ccproject.
+- **`store`:** the files live elsewhere in the repository. The commands are the same.
+
+The project's own CLAUDE.md outranks this section when they disagree.
+
 **`ccproject_defects.py`** is the queue of what is broken (`.ccproject/defects.json`).
 - Membership is the status. A fixed or disproved defect is removed, never marked.
 - Commands:
@@ -282,6 +288,7 @@ flag.
 - Recording results:
   - `update ID -s STATUS -m "measured" [-w WINDOW] [--build B]` records a result.
   - `--cell VALUE` (also spelled `--at` or the axis name, e.g. `--class`) writes one cell of a matrix row.
+- On the bare board, `--cell VALUE` grades each row at that one value.
 - Grading:
   - `--build B` grades against build B, and a green from any other build reads STALE.
   - `--gaps` lists criteria with no detector, or whose detector script is missing.

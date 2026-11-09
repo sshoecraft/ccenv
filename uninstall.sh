@@ -14,7 +14,7 @@
 #
 # Components:
 #   ccproject gitsync ccmemory ccprospect ccinsight ccusage ccloop ccteam
-#   ccenvmcp
+#   ccdirector ccenvmcp
 #
 # This list is EVERYTHING ccenv has ever installed, not just what the current
 # install.sh ships. Running this script is the documented first step of an
@@ -44,6 +44,8 @@
 #   .ccmemory/                            -> NEVER touched. It is committed repo
 #                                            content and travels with the repo.
 #   .ccloop/                              -> left in place (runtime state); listed.
+#   .ccdirector/                          -> left in place (a project's work plan
+#                                            and work state); listed.
 #
 # Every file this script rewrites is copied to <file>.uninstall-bak.<timestamp>
 # first, and every directory it deletes is tarred first. Nothing is restored
@@ -68,7 +70,7 @@ REMOVE_PATH=0
 FAILURES=0
 EXTRA_PROJECTS=()
 
-ALL_COMPONENTS=(ccproject gitsync ccmemory ccprospect ccinsight ccusage ccloop ccteam ccenvmcp)
+ALL_COMPONENTS=(ccproject gitsync ccmemory ccprospect ccinsight ccusage ccloop ccteam ccdirector ccenvmcp)
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -851,6 +853,24 @@ if should_remove ccteam; then
 fi
 
 # ----------------------------------------------------------------------------
+# ccdirector — package only; it registers no MCP server and no global hooks
+# (its workers' hooks live in each worker's launch settings). Per-project
+# .ccdirector/ holds a project's work plan and work state, so it is left alone
+# and listed, like .ccloop/.
+# ----------------------------------------------------------------------------
+if should_remove ccdirector; then
+    step ccdirector "removing package"
+    pip_uninstall ccdirector
+
+    n=0
+    while IFS= read -r proj; do
+        [ -d "$proj/.ccdirector" ] && { n=$((n + 1)); info "  found work state: $proj/.ccdirector"; }
+    done < "$PROJECT_LIST"
+    [ "$n" -eq 0 ] && info "no .ccdirector/ directories found" \
+                   || info "$n .ccdirector/ director$([ "$n" = 1 ] && echo y || echo ies) left in place (delete by hand if unwanted)"
+fi
+
+# ----------------------------------------------------------------------------
 # ccenvmcp — the shared MCP shim. Removed LAST: every other component imports
 # it, so pulling it earlier would leave the others broken mid-uninstall.
 # ----------------------------------------------------------------------------
@@ -993,7 +1013,7 @@ echo "=== verifying removal ==="
 echo ""
 echo "console scripts still on PATH:"
 left=0
-for cmd in ccmemory ccprospect ccinsight ccusage-mcp ccusage-statusline ccloop ccteam ccteam-mcp; do
+for cmd in ccmemory ccprospect ccinsight ccusage-mcp ccusage-statusline ccloop ccteam ccteam-mcp ccdirector; do
     resolved=$(command -v "$cmd" 2>/dev/null)
     if [ -n "$resolved" ]; then
         info "PRESENT  $cmd -> $resolved"
@@ -1008,7 +1028,7 @@ done
 echo ""
 echo "pip distributions still installed:"
 found=0
-for d in ccenvmcp ccmemory ccprospect ccinsight ccloop ccteam ccusage-mcp; do
+for d in ccenvmcp ccmemory ccprospect ccinsight ccloop ccteam ccdirector ccusage-mcp; do
     if python3 -m pip show "$d" >/dev/null 2>&1; then
         info "PRESENT  $d"
         found=$((found + 1))

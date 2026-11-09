@@ -233,7 +233,119 @@ def test_driver_blocks_hook_option_and_command(tmp_path):
 
 def test_store_ignores_its_lock_and_temp_files(tmp_path):
     run(tmp_path, "add", "-m", "thing")
-    assert (tmp_path / ".ccproject" / ".gitignore").read_text() == ".lock\n*.tmp\n"
+    assert (tmp_path / ".ccproject" / ".gitignore").read_text() == ".lock\n.*.lock\n*.tmp\n"
+    assert (tmp_path / ".ccproject" / ".defects.json.lock").exists()
+
+
+def test_older_store_ignore_gains_the_per_file_lock_pattern(tmp_path):
+    store = tmp_path / ".ccproject"
+    store.mkdir()
+    (store / ".gitignore").write_text(".lock\n*.tmp\n")
+    run(tmp_path, "add", "-m", "thing")
+    assert (store / ".gitignore").read_text() == ".lock\n*.tmp\n.*.lock\n"
+
+
+def test_external_queue_refuses_every_command_and_import(tmp_path):
+    store = tmp_path / ".ccproject"
+    store.mkdir()
+    (store / "config.json").write_text(json.dumps({"external": {"defects": "tools/defects.py"}}))
+    (tmp_path / "old.json").write_text(json.dumps({"defects": []}))
+    for argv in ([], ["add", "-m", "x"], ["import", "old.json"], ["--help"]):
+        result = run(tmp_path, *argv, check=False)
+        assert result.returncode == 1, argv
+        assert "keeps its defect queue in tools/defects.py; use that" in result.stderr
+    assert not (store / "defects.json").exists()
+
+
+def test_store_names_a_file_elsewhere_in_the_project(tmp_path):
+    store = tmp_path / ".ccproject"
+    store.mkdir()
+    (store / "config.json").write_text(json.dumps({"store": {"defects": "data/defects.json"}}))
+    run(tmp_path / ".ccproject", "add", "-m", "kept in data")
+    data = json.loads((tmp_path / "data" / "defects.json").read_text())
+    assert [d["id"] for d in data["defects"]] == ["D-KEPT-IN-DATA"]
+    assert (tmp_path / "data" / ".defects.json.lock").exists()
+    assert not (store / "defects.json").exists()
+
+
+def test_store_outside_the_project_is_refused(tmp_path):
+    project = tmp_path / "p"
+    (project / ".ccproject").mkdir(parents=True)
+    (project / ".ccproject" / "config.json").write_text(
+        json.dumps({"store": {"defects": "../elsewhere.json"}}))
+    result = run(project, "add", "-m", "x", check=False)
+    assert result.returncode == 1 and "outside the project" in result.stderr
+
+
+HOOKS = '''
+API = 1
+import sys
+
+
+def options(parser):
+    pass
+
+
+def commands(sub):
+    sub.choices["add"].add_argument("--reach")
+    sub.choices["update"].add_argument("--reach")
+    sub.choices["remove"].add_argument("--settle", action="store_true")
+
+
+def on_write(data, entry, args, command):
+    if args.reach is None:
+        if command == "add":
+            entry["reach"] = "everywhere"
+        return False
+    if args.reach == "bad":
+        sys.exit("refused: bad reach")
+    entry["reach"] = args.reach
+    return True
+
+
+def on_remove(data, entry, args):
+    if not args.settle:
+        sys.exit("refused: removal needs --settle")
+    return ["settled " + entry["id"]]
+'''
+
+
+UNRATED = '''
+API = 1
+
+
+def unrated(data, entry, args):
+    return not entry.get("impact") and entry.get("reach") == "here"
+'''
+
+
+def test_unrated_hook_decides_what_the_note_counts(tmp_path):
+    store = tmp_path / ".ccproject"
+    store.mkdir()
+    (store / "driver.py").write_text(UNRATED)
+    (store / "defects.json").write_text(json.dumps({
+        "gate_require": {"impact": ["integrity"]},
+        "defects": [{"id": "D-HERE", "severity": "high", "summary": "s", "reach": "here"},
+                    {"id": "D-THERE", "severity": "high", "summary": "s", "reach": "there"}]}))
+    out = run(tmp_path, "--gate").stdout
+    assert "NOTE: 1 more record(s) lack a field gate_require asks for (impact)" in out
+
+
+def test_on_write_and_on_remove_hooks(tmp_path):
+    store = tmp_path / ".ccproject"
+    store.mkdir()
+    (store / "driver.py").write_text(HOOKS)
+    run(tmp_path, "add", "-m", "thing")
+    assert ledger(tmp_path)["defects"][0]["reach"] == "everywhere"
+    # an update carrying only a driver field is a change, not "nothing to update"
+    run(tmp_path, "update", "D-THING", "--reach", "two")
+    assert ledger(tmp_path)["defects"][0]["reach"] == "two"
+    assert run(tmp_path, "update", "D-THING", "--reach", "bad", check=False).returncode == 1
+    assert ledger(tmp_path)["defects"][0]["reach"] == "two"
+    refused = run(tmp_path, "remove", "D-THING", "--why", "w", check=False)
+    assert refused.returncode == 1 and len(ledger(tmp_path)["defects"]) == 1
+    done = run(tmp_path, "remove", "D-THING", "--why", "w", "--settle")
+    assert "settled D-THING" in done.stderr and ledger(tmp_path)["defects"] == []
 
 
 def test_concurrent_writers_lose_nothing(tmp_path):

@@ -10,6 +10,8 @@
 #   ccmemory    — persistent memory MCP server + hooks  (MCP name: ccmemory)
 #   ccusage     — context/rate-limit usage MCP + statusline  (MCP name: ccusage)
 #   ccloop      — relay-loop wrapper that hands work between sessions
+#   ccdirector  — a project-manager session that plans a project's work and
+#                 steers worker sessions through it (needs ccloop + ccproject)
 #
 # Retired in v0.13.0 — no longer part of this bundle:
 #   ccprospect, ccinsight, ccteam
@@ -86,7 +88,7 @@ CLAUDE_MD_OVERLAY_DIRS=(
 
 # Core subdirs in $SCRIPT_DIR — skipped during overlay scan of the script dir
 # (they're already handled explicitly above).
-CORE_SUBDIRS=(ccenvmcp ccloop ccmemory ccusage ccproject)
+CORE_SUBDIRS=(ccenvmcp ccloop ccmemory ccusage ccproject ccdirector)
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -1128,6 +1130,18 @@ if should_install ccloop; then
 fi
 
 # ----------------------------------------------------------------------------
+# Core: ccdirector — pip install. A plain console script: no MCP server, no
+# global hooks. It is listed in CORE_SUBDIRS so the overlay scan below does not
+# also pick it up as a subdir with a pyproject.toml and register it as an MCP
+# server. Every session it starts is a ccloop run, and it reads the project's
+# board and queue through the ccproject tools, so it comes after both.
+# ----------------------------------------------------------------------------
+if should_install ccdirector; then
+    step ccdirector "pip install --user"
+    pip_install_local "$SCRIPT_DIR/ccdirector"
+fi
+
+# ----------------------------------------------------------------------------
 # Overlay scan: additional MCP subdirs
 # ----------------------------------------------------------------------------
 
@@ -1220,7 +1234,7 @@ if [ -n "$USER_BIN" ]; then
     info "user-bin: $USER_BIN"
 fi
 
-for cmd in ccmemory ccusage-mcp ccusage-statusline ccloop; do
+for cmd in ccmemory ccusage-mcp ccusage-statusline ccloop ccdirector; do
     resolved=$(command -v "$cmd" 2>/dev/null)
     if [ -n "$resolved" ]; then
         info "OK       $cmd -> $resolved"

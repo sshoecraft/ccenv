@@ -20,6 +20,7 @@ The result is a continuous AI development environment where work survives contex
 | `ccmemory`  | Persistent file-backed memory with FTS5 index, autoinstalled hooks, MCP server | `ccmemory` |
 | `ccusage`   | Real-time context-window + rate-limit usage as an MCP tool and statusline | `ccusage` |
 | `ccloop`    | Relay-loop wrapper that hands work between fresh Claude Code sessions as context fills | — |
+| `ccdirector` | A project-manager session that works out a project's goal, plans the work, and steers worker sessions through it in one tree until the project's gate passes (design: `docs/ccdirector.md`) | — |
 
 Each component still lives in its own subdirectory and has its own
 `README.md`, `pyproject.toml`, and tests. Top-level `install.sh`
@@ -109,8 +110,8 @@ including the three that were removed, which is exactly why it has to run
 from the NEW checkout rather than the old one.
 
 What it will not touch: `.ccmemory/` directories (committed repo content
-that travels with your repos) and `.ccloop/` run state, which it lists
-rather than deletes. Per-project `.ccprospect/`, `.ccinsight/` and
+that travels with your repos), `.ccloop/` run state and `.ccdirector/` work
+state, which it lists rather than deletes. Per-project `.ccprospect/`, `.ccinsight/` and
 `.ccteam/` state is tarred into `~/ccenv-uninstall-<stamp>/` before
 removal, and every file it rewrites is backed up beside the original.
 

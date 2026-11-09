@@ -138,6 +138,8 @@ terminates the whole session process group and stops the loop. In
 **interactive** mode the TUI owns the keyboard (Ctrl-C/Escape go to
 Claude); to stop the loop, answer `n` at the relaunch prompt or write
 `DONE`. Either way `resume.md` is preserved so you can `--resume-run <id>`.
+Answering `n` exits 3, so a script or wrapper around ccloop can tell a run you
+stopped from one that finished (exit 0); Ctrl-C exits 130.
 
 ### Signaling completion (this matters more than it sounds)
 

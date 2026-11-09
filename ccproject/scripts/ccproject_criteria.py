@@ -7,7 +7,10 @@ it: such a row keeps one cell per axis value under `per_<axis>` and is green onl
 cell is.
 
 Data: `.ccproject/criteria.json` in the project -- the nearest directory at or above the cwd that
-already holds a `.ccproject/`, else the cwd itself (created on the first write). Format:
+already holds a `.ccproject/`, else the cwd itself (created on the first write). The project's
+`.ccproject/config.json` may name another file in the repository for it (`"store": {"criteria":
+"data/criteria.json"}`), or name the project's own tool for its criteria (`"external":
+{"criteria": "tools/criteria.py"}`), in which case this tool refuses to run there. Format:
 
     {"criteria": [{"id", "requirement", "detector", "why", "phase", "source", "budget_s",
                    "status", "measured", "window", "evidence", "reason", "run_id", "recorded",
@@ -23,11 +26,13 @@ When the project keeps a defect queue, "no blocking defects" is one line of the 
 
 A project extends the tool with `.ccproject/driver.py` (shared with ccproject_defects.py):
 `API = 1`, plus any of `applies(data, row)` -> values, `grade(data, row, value, record, build)`
--> status, `on_result(data, row, value, record, args)`, `blocks(data, entry, args)`,
-`options(parser)` and `commands(subparsers)`. A hook answering None means "the generic way".
-See README.md.
+-> status, `roll_up(data, row, statuses)` -> a matrix row's status from its cells',
+`before_result(data, row, value, results, args)`, `on_result(data, row, value,
+record, args)`, `blocks(data, entry, args)`, `options(parser)` and `commands(subparsers)`. A hook
+answering None means "the generic way". See README.md.
 
     ccproject_criteria.py                     the board and its verdict
+    ccproject_criteria.py --cell V            each row graded at one axis value
     ccproject_criteria.py --gate              exit 1 unless every criterion is green
     ccproject_criteria.py show ID             one criterion in full
     ccproject_criteria.py add -i ID -r REQ -d DETECTOR
@@ -54,6 +59,10 @@ STORE_DIRNAME = ".ccproject"
 FILENAME = "criteria.json"
 DEFECTS_FILENAME = "defects.json"
 DRIVER_FILENAME = "driver.py"
+CONFIG_FILENAME = "config.json"
+#: What the store's own .gitignore keeps out of the repo: each data file's lock, the single lock
+#: older versions took, and an interrupted save's temp file.
+IGNORED = (".lock", ".*.lock", "*.tmp")
 LOCK_WAIT_SECONDS = 30
 HISTORY_DEPTH = 10
 
@@ -68,6 +77,9 @@ driver = None
 DEFAULT_STATUSES = ("PASS", "FAIL", "PARTIAL", "NOT STARTED", "UNKNOWN", "STALE", "BLOCKED",
                     "INCOMPLETE", "SKIP", "PENDING", "NOT RUN")
 DEFAULT_GREEN = ("PASS",)
+#: The statuses that make a matrix row FAIL when any cell has one; a project whose INCOMPLETE run
+#: is a failure widens it with `failing`.
+DEFAULT_FAILING = ("FAIL",)
 
 #: A result: what one measurement wrote. Pushed into history when the next one replaces it.
 RESULT_FIELDS = ("status", "measured", "window", "evidence", "reason", "run_id", "build",
@@ -91,19 +103,88 @@ def project_store() -> Path:
     return here / STORE_DIRNAME
 
 
+config_cache = None
+
+
+def config() -> dict:
+    """`.ccproject/config.json`: where the project's files are (`store`) and which of its own
+    tools hold its release state (`external`). Empty when the project has none."""
+    global config_cache
+    if config_cache is None:
+        path = project_store() / CONFIG_FILENAME
+        config_cache = {}
+        if path.is_file():
+            try:
+                config_cache = json.loads(path.read_text())
+            except ValueError as exc:
+                sys.exit(f"criteria: {path} is not valid JSON: {exc}")
+            if not isinstance(config_cache, dict):
+                sys.exit(f"criteria: {path} is not a JSON object")
+    return config_cache
+
+
+def data_path(kind: str, default: str) -> Path:
+    """The file holding `kind` ("criteria" or "defects"): the one `store` names, relative to the
+    project root, else `.ccproject/<default>`. A named file must be inside the project, because
+    the release state travels with the repository."""
+    named = (config().get("store") or {}).get(kind)
+    if not named:
+        return project_store() / default
+    root = project_store().parent.resolve()
+    path = (root / named).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        sys.exit(f"criteria: .ccproject/{CONFIG_FILENAME} puts {kind} at {named}, outside the "
+                 f"project {root}")
+    return path
+
+
+def external(kind: str):
+    """The project's own tool for `kind`, when `.ccproject/config.json` declares one."""
+    return (config().get("external") or {}).get(kind) or None
+
+
+def refuse_external() -> None:
+    """A project that keeps its criteria in a tool of its own is not graded here. Running anyway
+    would answer from a store that tool does not write -- an answer that looks current and is
+    not -- and an `import` would start exactly such a store."""
+    own = external("criteria")
+    if own:
+        sys.exit(f"criteria: this project keeps its criteria in {own}; use that. "
+                 f"(.ccproject/{CONFIG_FILENAME} declares it, so ccproject_criteria.py does not "
+                 f"run here.)")
+
+
 def board_path() -> Path:
-    return project_store() / FILENAME
+    return data_path("criteria", FILENAME)
+
+
+def lock_path(path: Path) -> Path:
+    """Each data file's lock sits beside it as `.<name>.lock`, so a project tool that writes the
+    same file under the same lock name excludes this one's writes and is excluded by them."""
+    return path.with_name("." + path.name + ".lock")
+
+
+def ignore_store(store: Path) -> None:
+    """The data travels with the repo; the locks and an interrupted save's temp file do not."""
+    ignore = store / ".gitignore"
+    have = ignore.read_text().split("\n") if ignore.exists() else []
+    missing = [pattern for pattern in IGNORED if pattern not in have]
+    if missing:
+        text = "\n".join(line for line in have if line) + "\n" if any(have) else ""
+        ignore.write_text(text + "\n".join(missing) + "\n")
 
 
 def take_lock() -> None:
     global lock_handle
     store = project_store()
     store.mkdir(parents=True, exist_ok=True)
-    ignore = store / ".gitignore"
-    if not ignore.exists():
-        #: The data travels with the repo; the lock and an interrupted save's temp file do not.
-        ignore.write_text(".lock\n*.tmp\n")
-    lock_handle = (store / ".lock").open("w")
+    ignore_store(store)
+    target = board_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock = lock_path(target)
+    lock_handle = lock.open("w")
     deadline = time.monotonic() + LOCK_WAIT_SECONDS
     announced = False
     while True:
@@ -113,8 +194,7 @@ def take_lock() -> None:
         except OSError:
             if time.monotonic() >= deadline:
                 sys.exit("criteria: %s has been held for %ds -- far longer than a write takes, "
-                         "so the holder is wedged rather than busy." % (store / ".lock",
-                                                                        LOCK_WAIT_SECONDS))
+                         "so the holder is wedged rather than busy." % (lock, LOCK_WAIT_SECONDS))
             if not announced:
                 print("criteria: waiting for another writer to finish…", file=sys.stderr)
                 announced = True
@@ -177,8 +257,10 @@ def hook(name):
 
 def load_defects() -> dict:
     """Read-only, no lock: the defects file is replaced atomically, so a read is never torn.
-    None when the project keeps no defect queue."""
-    path = project_store() / DEFECTS_FILENAME
+    None when the project keeps no defect queue, or keeps it in a tool of its own."""
+    if external("defects"):
+        return None
+    path = data_path("defects", DEFECTS_FILENAME)
     if not path.is_file():
         return None
     try:
@@ -246,6 +328,10 @@ def green_set(data: dict) -> set:
     return {str(s).strip().upper() for s in (data.get("green") or DEFAULT_GREEN)}
 
 
+def failing_set(data: dict) -> set:
+    return {str(s).strip().upper() for s in (data.get("failing") or DEFAULT_FAILING)}
+
+
 def cell_key(data: dict):
     axis = data.get("axis")
     return f"per_{axis}" if axis else None
@@ -267,13 +353,20 @@ def values_for(data: dict, row: dict) -> list:
     return list(row.get("values") or data.get("axis_values") or [])
 
 
-def combine(data: dict, seen: list) -> str:
-    """Cell statuses -> row status: every one green -> PASS; any FAIL -> FAIL; else PARTIAL.
-    With no values to judge nothing can be complete, so it is never PASS."""
+def combine(data: dict, seen: list, row=None) -> str:
+    """Cell statuses -> row status: every one green -> PASS; any failing one (`failing`, default
+    FAIL) -> FAIL; else PARTIAL. With no values to judge nothing can be complete, so it is never
+    PASS. The driver's `roll_up(data, row, statuses)` answers first; None means this rule."""
+    custom = hook("roll_up")
+    if custom is not None and row is not None:
+        answer = custom(data, row, list(seen))
+        if answer is not None:
+            return str(answer).strip().upper()
     green = green_set(data)
     if seen and all(s in green for s in seen):
         return "PASS"
-    if "FAIL" in seen:
+    failing = failing_set(data)
+    if any(s in failing for s in seen):
         return "FAIL"
     return "PARTIAL"
 
@@ -282,7 +375,7 @@ def derive(data: dict, row: dict) -> None:
     """Store a matrix row's status from its cells, as recorded."""
     cells = row[cell_key(data)]
     row["status"] = combine(data, [status_of(cells[v]) if v in cells else "NOT RUN"
-                                   for v in values_for(data, row)])
+                                   for v in values_for(data, row)], row)
 
 
 def judged(data: dict, row: dict, value, record: dict, build) -> str:
@@ -314,7 +407,7 @@ def grade(data: dict, row: dict, build=None):
         return judged(data, row, None, row, build), {}
     cells = row[cell_key(data)]
     per = {v: judged(data, row, v, cells.get(v), build) for v in values_for(data, row)}
-    return combine(data, list(per.values())), per
+    return combine(data, list(per.values()), row), per
 
 
 def find(data: dict, wanted: str) -> dict:
@@ -363,7 +456,7 @@ def paint(status: str, data: dict, colour: bool) -> str:
         return status
     if status in green_set(data):
         tone = "green"
-    elif status in ("FAIL", "BLOCKED"):
+    elif status in failing_set(data) or status in ("FAIL", "BLOCKED"):
         tone = "red"
     else:
         tone = "yellow"
@@ -434,11 +527,37 @@ def target_of(data: dict, row: dict, cell):
     return row[cell_key(data)].setdefault(cell, {})
 
 
+def at_cell(data: dict, rows: list, cell, build) -> tuple:
+    """The rows that apply at one axis value, each graded there: (rows, [(status, {}, record)]).
+
+    A matrix row applies when `cell` is one of its values and is graded on that cell alone; a
+    plain row is not per-value, so it applies everywhere and keeps its own status."""
+    key = cell_key(data)
+    if not key:
+        sys.exit("criteria: --cell needs an axis; declare one with "
+                 "`ccproject_criteria.py axis NAME VALUE...`")
+    kept, graded = [], []
+    for row in rows:
+        if isinstance(row.get(key), dict):
+            if cell not in values_for(data, row):
+                continue
+            record = row[key].get(cell)
+            graded.append((judged(data, row, cell, record, build), {}, record or {}))
+        else:
+            graded.append((grade(data, row, build)[0], {}, row))
+        kept.append(row)
+    return kept, graded
+
+
 def cmd_board(data: dict, args) -> int:
     rows = data["criteria"]
     green = green_set(data)
-    graded = [grade(data, r, args.build) for r in rows]
-    good = sum(1 for status, per in graded if status in green)
+    cell = getattr(args, "cell", None)
+    if cell is not None:
+        rows, graded = at_cell(data, rows, cell, args.build)
+    else:
+        graded = [grade(data, r, args.build) + (r,) for r in rows]
+    good = sum(1 for status, per, shown_record in graded if status in green)
     queue = load_defects()
     #: "No open blocking defect" is one of the release criteria, so when the project keeps a
     #: defect queue the verdict counts it as a line of its own. `"defects_gate": false` in the
@@ -463,7 +582,7 @@ def cmd_board(data: dict, args) -> int:
     named = blocked_by(queue)
     width = max([len(str(r.get("id", ""))) for r in rows] + [10])
     phase = None
-    for row, (status, per) in zip(rows, graded):
+    for row, (status, per, shown_record) in zip(rows, graded):
         if args.verbose and row.get("phase") != phase:
             phase = row.get("phase")
             print(f"\n== {phase or '(no phase)'} ==")
@@ -471,10 +590,10 @@ def cmd_board(data: dict, args) -> int:
         if per:
             extra.append(tally(data, row, per))
         else:
-            if row.get("window"):
-                extra.append("[" + flat(row["window"], 40) + "]")
-            if row.get("measured"):
-                extra.append(flat(row["measured"], 60))
+            if shown_record.get("window"):
+                extra.append("[" + flat(shown_record["window"], 40) + "]")
+            if shown_record.get("measured"):
+                extra.append(flat(shown_record["measured"], 60))
         if named.get(row.get("id")):
             extra.append("blocked by " + ", ".join(named[row["id"]]))
         padding = " " * max(0, 11 - len(status))
@@ -499,6 +618,8 @@ def cmd_board(data: dict, args) -> int:
         verdict_line = f"VERDICT: every criterion green ({good})"
     else:
         verdict_line = f"VERDICT: {good} of {total} criteria green — bar not met"
+    if cell is not None:
+        verdict_line += f" — at {data.get('axis')} {cell}"
     if args.build is not None:
         verdict_line += f" — graded on build {args.build}"
     print("\n" + verdict_line)
@@ -544,10 +665,15 @@ def cmd_show(data: dict, args) -> int:
         print(f"  {data.get('axis')}:")
         for value in values_for(data, row) + [v for v in cells if v not in values_for(data, row)]:
             cell = cells.get(value)
+            #: Graded as the board grades it; the status as written is shown beside it when the
+            #: two differ, so a stale or driver-graded cell is not read as its raw record.
+            status = judged(data, row, value, cell, getattr(args, "build", None))
             if cell is None:
-                print(f"    {value}: NOT RUN")
+                print(f"    {value}: {status}")
                 continue
-            print(f"    {value}: {status_of(cell)}")
+            recorded = status_of(cell)
+            print(f"    {value}: {status}" + (f" (recorded {recorded})"
+                                              if recorded != status else ""))
             print_result({k: v for k, v in cell.items() if k != "status"}, "      ")
     for number, before in enumerate(row.get("history") or [], 1):
         print(f"  history {number}: {status_of(before)}")
@@ -608,6 +734,12 @@ def cmd_update(data: dict, args) -> int:
         save(data)
         print(f"updated {row['id']}")
         return 0
+    rewrite = hook("before_result")
+    if rewrite is not None:
+        #: The project's own rules for what a result says -- a time budget overrun that turns a
+        #: PASS into a FAIL, a status it records rather than refuses -- applied before the result
+        #: is checked or written. The hook edits `results` in place and may exit to refuse it.
+        rewrite(data, row, args.cell, results, args)
     if "status" in results:
         results["status"] = check_status(data, results["status"])
     target = target_of(data, row, args.cell)
@@ -789,7 +921,8 @@ def peek_axis():
 #: Option names already taken in a parser that carries --cell; an axis by one of these names
 #: gets no alias rather than a clash.
 RESERVED = {"cell", "at", "status", "measured", "window", "evidence", "reason", "run-id", "build",
-            "requirement", "detector", "why", "phase", "budget-s", "values", "help", "id", "ids"}
+            "requirement", "detector", "why", "phase", "budget-s", "values", "help", "id", "ids",
+            "verbose", "gaps", "gate", "json", "no-colour"}
 
 
 def add_cell(parser, axis) -> None:
@@ -816,6 +949,7 @@ def build_parser(axis=None) -> argparse.ArgumentParser:
                              "STALE")
     parser.add_argument("--json", action="store_true", help="print the criteria as JSON")
     parser.add_argument("--no-colour", action="store_true")
+    add_cell(parser, axis)
     sub = parser.add_subparsers(dest="cmd")
 
     p = sub.add_parser("show", help="one criterion in full")
@@ -913,10 +1047,14 @@ MUTATORS = ("add", "update", "remove", "move", "axis", "pending", "executing", "
 
 def main(argv=None) -> int:
     global driver
+    refuse_external()
     driver = load_driver()
     args = build_parser(peek_axis()).parse_args(argv)
     command = getattr(args, "driver_command", None)
-    if args.cmd in MUTATORS or command is not None:
+    #: A driver subcommand that only reads (`set_defaults(driver_readonly=True)`) runs without the
+    #: lock, as the board does: saves are atomic, and a long report must not stall a writer.
+    if args.cmd in MUTATORS or (command is not None and
+                                not getattr(args, "driver_readonly", False)):
         take_lock()
     if args.cmd == "import":
         return cmd_import(args)

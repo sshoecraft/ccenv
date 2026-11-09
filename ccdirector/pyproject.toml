@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ccdirector"
+version = "0.12.0"
+description = "A project-manager Claude Code session that plans a project's work and steers worker sessions through it in one tree."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Steve Shoecraft" }]
+keywords = ["claude", "claude-code", "automation", "multi-session"]
+dependencies = []
+
+[project.scripts]
+ccdirector = "ccdirector.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ccdirector = ["prompts/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

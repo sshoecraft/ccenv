@@ -378,6 +378,149 @@ def test_import_detects_axis_and_keeps_unknown_fields(tmp_path):
     assert row(project, "k")["invariant"] == "i"
 
 
+def test_external_criteria_refuses_every_command_and_import(tmp_path):
+    store = tmp_path / ".ccproject"
+    store.mkdir()
+    (store / "config.json").write_text(json.dumps({"external": {"criteria": "tools/criteria.py"}}))
+    (tmp_path / "old.json").write_text('{"criteria": []}')
+    for argv in ([], ["add", "-i", "x", "-r", "r", "-d", "d"], ["import", "old.json"]):
+        result = run(tmp_path, *argv, check=False)
+        assert result.returncode == 1, argv
+        assert "keeps its criteria in tools/criteria.py; use that" in result.stderr
+    assert not (store / "criteria.json").exists()
+
+
+def test_external_defects_leave_the_board_without_a_defect_line(tmp_path):
+    store = tmp_path / ".ccproject"
+    store.mkdir()
+    (store / "config.json").write_text(json.dumps({"external": {"defects": "tools/defects.py"}}))
+    (store / "defects.json").write_text(json.dumps({"defects": [
+        {"id": "D-X", "severity": "critical", "summary": "s"}]}))
+    run(tmp_path, "add", "-i", "c", "-r", "r", "-d", "d")
+    run(tmp_path, "update", "c", "-s", "PASS")
+    out = run(tmp_path, "--gate", "--no-colour").stdout
+    assert "no blocking defects" not in out and "every criterion green (1)" in out
+
+
+def test_store_names_files_elsewhere_and_locks_beside_them(tmp_path):
+    store = tmp_path / ".ccproject"
+    store.mkdir()
+    (store / "config.json").write_text(json.dumps(
+        {"store": {"criteria": "data/criteria.json", "defects": "data/defects.json"}}))
+    run(tmp_path, "add", "-i", "c", "-r", "r", "-d", "d")
+    run(tmp_path, "add", "-m", "Data loss", "-s", "critical", script=DEFECTS)
+    assert json.loads((tmp_path / "data" / "criteria.json").read_text())["criteria"][0]["id"] == "c"
+    assert (tmp_path / "data" / ".criteria.json.lock").exists()
+    assert not (store / "criteria.json").exists()
+    out = run(tmp_path, "--no-colour").stdout
+    assert "1 blocking: D-DATA-LOSS" in out
+
+
+def test_board_at_one_cell(tmp_path):
+    run(tmp_path, "axis", "config", "a", "b")
+    run(tmp_path, "add", "-i", "both", "-r", "r", "-d", "d", "--per-cell")
+    run(tmp_path, "add", "-i", "only-b", "-r", "r", "-d", "d", "--per-cell")
+    run(tmp_path, "update", "only-b", "--values", "b")
+    run(tmp_path, "update", "both", "-s", "PASS", "--at", "a", "-m", "fine at a")
+    run(tmp_path, "update", "both", "-s", "FAIL", "--at", "b")
+    at_a = run(tmp_path, "--at", "a", "--no-colour", "--gate")
+    assert "only-b" not in at_a.stdout and "fine at a" in at_a.stdout
+    assert "every criterion green (1) — at config a" in at_a.stdout
+    at_b = run(tmp_path, "--config", "b", "--no-colour", "--gate", check=False)
+    assert at_b.returncode == 1 and "only-b" in at_b.stdout
+    assert "0 of 2 criteria green" in at_b.stdout
+
+
+def test_failing_statuses_make_a_row_fail(tmp_path):
+    run(tmp_path, "axis", "config", "a", "b")
+    run(tmp_path, "add", "-i", "x", "-r", "r", "-d", "d", "--per-cell")
+    run(tmp_path, "update", "x", "-s", "PASS", "--at", "a")
+    run(tmp_path, "update", "x", "-s", "INCOMPLETE", "--at", "b")
+    assert row(tmp_path, "x")["status"] == "PARTIAL"
+    store = tmp_path / ".ccproject" / "criteria.json"
+    data = json.loads(store.read_text())
+    data["failing"] = ["FAIL", "INCOMPLETE"]
+    store.write_text(json.dumps(data))
+    run(tmp_path, "update", "x", "-s", "INCOMPLETE", "--at", "b")
+    assert row(tmp_path, "x")["status"] == "FAIL"
+    assert run(tmp_path, "--no-colour").stdout.startswith("FAIL")
+
+
+REWRITE = '''
+API = 1
+import sys
+
+
+def commands(sub):
+    sub.choices["update"].add_argument("-e", "--elapsed-s", type=int)
+
+
+def before_result(data, row, value, results, args):
+    if results.get("status") == "WEIRD":
+        results["status"] = "FAIL"
+        results["reason"] = "status WEIRD, recorded as FAIL"
+    if args.elapsed_s is not None and args.elapsed_s > 10 and results.get("status") == "PASS":
+        results["status"] = "FAIL"
+        results["reason"] = "over budget"
+    if results.get("build") == "none":
+        sys.exit("refused: no build")
+
+
+def grade(data, row, value, record, build):
+    return "PASS" if record is not None and record.get("status") == "PASS" else None
+'''
+
+
+def test_before_result_rewrites_and_refuses(tmp_path):
+    store = tmp_path / ".ccproject"
+    store.mkdir()
+    (store / "driver.py").write_text(REWRITE)
+    run(tmp_path, "add", "-i", "c", "-r", "r", "-d", "d")
+    run(tmp_path, "update", "c", "-s", "WEIRD")
+    assert row(tmp_path, "c")["status"] == "FAIL"
+    run(tmp_path, "update", "c", "-s", "PASS", "-e", "30")
+    assert row(tmp_path, "c")["reason"] == "over budget"
+    assert run(tmp_path, "update", "c", "-s", "PASS", "--build", "none",
+               check=False).returncode == 1
+    run(tmp_path, "update", "c", "-s", "PASS", "-e", "3")
+    assert row(tmp_path, "c")["status"] == "PASS"
+
+
+def test_show_grades_cells_like_the_board(tmp_path):
+    run(tmp_path, "axis", "config", "a")
+    run(tmp_path, "add", "-i", "x", "-r", "r", "-d", "d", "--per-cell")
+    run(tmp_path, "update", "x", "-s", "PASS", "--at", "a", "--build", "b1")
+    out = run(tmp_path, "--build", "b2", "show", "x").stdout
+    assert "a: STALE (recorded PASS)" in out
+
+
+READONLY = '''
+API = 1
+
+
+def report(data, args):
+    print("criteria:", len(data["criteria"]))
+    return 0
+
+
+def commands(sub):
+    sub.add_parser("report").set_defaults(driver_command=report, driver_readonly=True)
+'''
+
+
+def test_readonly_driver_command_runs_while_a_writer_holds_the_lock(tmp_path):
+    import fcntl
+    store = tmp_path / ".ccproject"
+    store.mkdir()
+    (store / "driver.py").write_text(READONLY)
+    run(tmp_path, "add", "-i", "c", "-r", "r", "-d", "d")
+    with (store / ".criteria.json.lock").open("w") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+        result = subprocess.run([sys.executable, str(CRITERIA), "report"], cwd=tmp_path,
+                                capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and "criteria: 1" in result.stdout
+
+
 def test_import_plain_board_is_verbatim(tmp_path):
     source = tmp_path / "old.json"
     source.write_text('{"criteria": [{"id": "x", "status": "PASS"}]}')

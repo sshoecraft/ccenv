@@ -19,7 +19,7 @@ MCP registrations, skills, managed CLAUDE.md regions, and the blocks the
 ```
 
 Components: `ccproject gitsync ccmemory ccprospect ccinsight ccusage ccloop
-ccteam ccenvmcp`.
+ccteam ccdirector ccenvmcp`.
 
 That list is everything ccenv has **ever** installed, which is deliberately
 wider than what the current `install.sh` ships — `ccprospect`, `ccinsight` and
@@ -50,6 +50,7 @@ up. Removals from `install.sh` must therefore never be mirrored here.
 | ccusage    | `ccusage-mcp` | — (owns `statusLine`)                                  | `ccusage`    | —                               | `/etc/claude-code/managed-*.json` when root-installed |
 | ccloop     | `ccloop`      | PostToolUse `guard`, Stop `keepgoing`                  | —            | —                               | `.ccloop/` run state **left in place**, listed |
 | ccteam     | `ccteam`      | SessionStart `ccteam session-start`                    | `ccteam`     | —                               | `.ccteam/` |
+| ccdirector | `ccdirector`  | — (worker hooks live in each worker's launch settings) | —            | —                               | `.ccdirector/` work state **left in place**, listed |
 | ccenvmcp   | `ccenvmcp`    | —                                                      | —            | —                               | removed LAST, and only once no dependent dist remains |
 
 Global artifacts — the `[CCENV MANAGED]` region of `~/.claude/CLAUDE.md`,

@@ -853,6 +853,11 @@ def run_session_interactive(cmd, env, session_id, halt_file, transcript_file=Non
     return proc.returncode, relayed["flag"]
 
 
+#: Exit status when the user answers no at the relaunch prompt. The run stopped
+#: without converging; exit 0 would tell a wrapper it finished.
+EXIT_USER_STOPPED = 3
+
+
 def _confirm_relaunch():
     """Ask whether to relaunch, with the terminal guaranteed to be in cooked
     mode (the TUI may have left it raw on exit, which would swallow input)."""
@@ -1207,7 +1212,7 @@ def loop(run_id, run_dir, ensure_hook=True, interactive=False, model=None, effor
             # quitting the TUI doesn't trap you in an endless relaunch.
             if interactive and not relayed and not _confirm_relaunch():
                 log(f"stopping at your request — resume preserved at {resume_file}")
-                return 0
+                return EXIT_USER_STOPPED
 
             time.sleep(1)
     except KeyboardInterrupt:

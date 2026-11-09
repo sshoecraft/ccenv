@@ -2,6 +2,220 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-11-09 — v0.50.0
+
+**ccdirector: items that cannot be finished (ccdirector 0.12.0).**
+
+- After 3 failed checks in a row an item is parked automatically. A worker was told
+  to fix what the check showed and try again with no limit, so it could grind on one
+  item indefinitely.
+- An item parked 3 times with nobody asking for help makes its next worker consult
+  an advisor about it, and `item done` is refused until the answer is back. Any
+  consult by the worker holding the item resets its count, so one made on its own
+  costs no second call. An item could otherwise go round park and revise forever.
+- Worker consults and director consults are now counted apart. A worker asking for
+  help with its item is not the director asking for a new direction, but a worker's
+  consult was resetting the director's replan count and satisfying its required
+  consult.
+
+## 2026-11-09 — v0.49.0
+
+**ccdirector: when a replan must consult (ccdirector 0.11.0).**
+
+- A consult is now required every third replan, not every one, because advisor
+  calls are expensive. Each time every item is done with the gate red, the
+  director replans; on the third it must consult first, and any consult resets
+  the count.
+- `plan submit` is refused while the director's consult has not been answered.
+  Claude Code moves a long call to the background after two minutes and hands
+  control back, so a plan could go in before the advice existed, and the hook
+  was counting that handoff as the consult. A backgrounded call now counts only
+  when its answer has reached the director, read from the session transcript.
+
+## 2026-11-09 — v0.48.0
+
+**ccdirector: when every item is done and the gate is still red (ccdirector 0.10.0).**
+
+- That moment is now a checkpoint: the director must consult an advisor and rework
+  the plan around the diagnosis, and `plan submit` refuses until a consult is
+  recorded. It used to append the next idea, and consulting was optional, so a
+  run could keep trying variants of an approach that had already failed. Where no
+  advisor is available, `plan submit --no-consult REASON` records why.
+
+- By default a run keeps trying until the gate passes. `--round-limit N` ends it
+  after N rounds with nothing gained, for a run someone wants bounded. A round is
+  every item done, the gate refused, and no new criterion green. Worker retries
+  and session relays never count, and any new green criterion resets the count.
+- At the limit `goal-done` records why, naming the rounds, the extensions and
+  what the gate still says, and ccdirector stops the workers and exits. Starting
+  again allows one more round, because a restart is the user asking for it.
+- The PROGRESS block shows `rounds without gain N`, with the limit when one is set.
+
+## 2026-11-09 — v0.47.0
+
+**ccdirector: consults and mid-item changes (ccdirector 0.9.0).**
+
+- A worker now learns about a change to its item on its next tool call. Before,
+  it saw the new text only when it asked for its next item, so a worker kept
+  following instructions the director had already withdrawn: one sat in a wait
+  the director had removed. A dropped item is reported the same way.
+- Every consult of an `ask_*` advisor, by the director or a worker, is recorded
+  (`consulted` in `events.jsonl`) and counted in the PROGRESS block, in total and
+  since the last criterion gained. Nothing recorded them, so asking for advice
+  repeatedly without result could not be seen.
+- After two consults with no new criterion green, the block adds `STUCK` and the
+  director is told to try something structurally different. It stops nothing.
+
+## 2026-11-08 — v0.46.0
+
+**ccdirector: seeing a run from the director's screen (ccdirector 0.8.0).**
+
+- `ccdirector wait` and `status` open with a PROGRESS block: items done and
+  running, criteria green and how long since one was gained, how many times the
+  gate has refused and the plan has been extended, and what each worker last
+  said it was doing. The director's screen is the only one the user watches,
+  and workers run headless, so nothing there showed whether work was moving.
+- The director repeats that block to the user as plain text after every `wait`,
+  because the screen collapses tool output.
+- `goal-done` records every gate refusal (`gate_refused` in `events.jsonl`). It
+  used to print the refusal only to the director, leaving no record of it.
+- After two refusals with no new criterion green, the block adds a `LIKELY
+  LOOPING` line. It is only a warning: nothing stops the run.
+
+## 2026-11-08 — v0.45.0
+
+**ccdirector: reusing the plan (ccdirector 0.7.0).**
+
+- `ccdirector start` uses the plan on file. A usable plan goes straight to the
+  workers and the steering run, with no planning session and no goal-finder
+  spend, because every start used to open a planning session that treated the
+  existing plan as something to get past.
+- `--replan` is the only way to write a new plan. The old one is kept as
+  `plan.json.backup` and `plan.md.backup`. A different `--goal` alone keeps the
+  plan and says so on stderr.
+- A plan that no longer validates still gets a planning session, but only to
+  repair the listed problems and keep everything else.
+- The director prompt forbids asking the user a question or waiting for a
+  decision: the director makes the call and records it in the plan's `risks`.
+  Nobody is at the terminal to answer, and a run left waiting makes no progress.
+
+## 2026-11-08 — v0.44.1
+
+**ccdirector: starting and stopping a run.**
+
+- Answering `n` at ccloop's relaunch prompt now exits ccloop 3 instead of 0
+  (ccloop 0.19.1). Exit 0 also means a run finished, so ccdirector read the
+  user's stop as a run that ended without a plan and reopened it, and the only
+  way out was Ctrl-C. Where a valid plan was on file, the same `n` was read as
+  "planning finished" and started the workers.
+- On that status or Ctrl-C, `ccdirector start` reopens nothing, starts no later
+  stage, stops any workers and exits with the same status.
+- `ccdirector plan submit` records on the plan the goal `ccdirector start` was
+  running (`written_for`). The plan's own `goal` is the director's wording, so
+  comparing it with `--goal` called nearly every plan "written for a different
+  goal", and the planning task then told the director to replace it, throwing
+  away items that were still right.
+- `ccdirector plan done` compares that record with the current goal instead of
+  comparing file times. `ccdirector start` rewrites `goal.json` every time, so
+  the file-time check refused every plan on file, even one written for exactly
+  this goal. A plan for the same goal now ends the planning run without being
+  submitted again.
+- When the goal really is different, or a plan has no record of its goal, the
+  planning task tells the director to keep the items that still serve the goal
+  under the same ids and with the same text, so their recorded progress
+  survives, and to submit the result.
+
+## 2026-11-08 — v0.44.0
+
+**ccdirector joins the bundle.**
+
+- `ccdirector/` (package `ccdirector` 0.6.0): a director session works out a
+  project's goal, plans the work as items, and steers worker sessions through
+  it in one shared tree until the project's `ccproject_criteria.py --gate`
+  passes. It was built inside ccteam (0.4.0–0.5.1 there) to use ccteam's lock
+  layer, and moved here once it no longer used any of ccteam: every session it
+  starts is a ccloop run and it reads the project's board and queue through
+  the ccproject tools, so it ships and versions with them. ccenv's installer
+  also removes ccteam as a retired component, which would have taken the
+  `ccdirector` command with it. Design: `docs/ccdirector.md`.
+- Its project state moved from `.ccteam/director/` to `.ccdirector/`, and its
+  session environment from `CCTEAM_*` to `CCDIRECTOR_*`: the uninstaller
+  purges `.ccteam/` when it removes ccteam, which would have deleted a
+  project's work plan and work state. Existing `.ccteam/director/` state is
+  moved the first time ccdirector meets the project.
+- `ccdirector start` refuses to run where ccteam is configured (an MCP server
+  named `ccteam`, a ccteam plugin, or a `ccteam` hook) and names where: ccteam's
+  plugin would run in the director's and every worker's session, replaying
+  every edit onto the shared tree and locking it a second time.
+- `install.sh` installs it after ccloop and lists it with the core subdirs, so
+  the overlay scan does not also register it as an MCP server; the verify step
+  checks the `ccdirector` command. `uninstall.sh` removes the package and lists
+  `.ccdirector/` directories without deleting them.
+
+## 2026-11-07 — v0.43.0
+
+**ccproject: projects that keep their release state their own way.**
+
+- `.ccproject/config.json` can name where a project's files are (`"store"`) and
+  which of its own tools hold its release state (`"external"`). Both are read
+  by both tools.
+- `"external"`: `ccproject_criteria.py` or `ccproject_defects.py` refuses to run
+  in such a project and names the project's own tool, `import` included. A
+  project whose release state lived in its own tools had a skill pointing
+  sessions at ccproject, and an `import` left a frozen second copy that looked
+  current and was not. Removing the line switches the project over.
+- `"store"`: the data files can live elsewhere in the repository, so a project
+  with tooling of its own that reads them in place moves to ccproject without
+  moving its files.
+- Each data file now has a lock of its own beside it, `.<file>.lock`, instead of
+  one `.ccproject/.lock`. A project tool that writes the same file under the
+  same lock name now excludes ccproject's writes; with one shared lock, the two
+  writers could each save over the other.
+- The board takes `--cell VALUE` (also `--at`, `--<axis>`): each row graded at
+  that one value, and only the rows that apply to it.
+- `"failing"` on the board names the statuses that make a matrix row FAIL
+  (default `FAIL`). A project whose INCOMPLETE run is a failure says so, and its
+  rows stop reading PARTIAL.
+- `show` grades each cell the way the board does, instead of printing the
+  status as recorded.
+- New driver hooks:
+  - criteria: `before_result` can rewrite a result before it is checked and
+    written. `roll_up` decides a matrix row's status from its cells.
+  - defects: `on_write` and `on_remove` see an add, an update and a removal
+    before the queue is saved. `unrated` decides what the gate's NOTE counts as
+    passed unrated.
+  - A driver subcommand can declare itself read-only (`driver_readonly`) and run
+    without the lock.
+
+## 2026-11-07 — v0.42.0
+
+**CLAUDE.md rules as procedures.**
+
+- Every rule in `CLAUDE.md` is rewritten as a procedure: a bold trigger naming
+  the moment it applies, worded as the action about to be taken, then numbered
+  steps of one action each. Rules written as prose principles drifted as the
+  context filled; steps with a trigger are what sessions kept following. The
+  evidence and reasons under each rule carry over word for word.
+- The preamble's "one decision per bullet" becomes "every rule is a
+  procedure". The one-action, one-test requirement moves to the step, which is
+  still the unit a hook can check.
+- The troubleshooting loop gains a noise check before each run: when the last
+  three runs on a hypothesis did not clear the noise, the hypothesis is
+  disproven and a new one is written. Without it, tuning that moved results
+  only within noise went on indefinitely.
+- The versioning rule splits its trigger. Reading the top `CHANGELOG.md` entry
+  and checking whether that version is closed happen before the first source
+  change of a session; the join-or-bump decision happens before every source
+  change.
+- The delegation rule splits into the separate moments it governs: before a
+  Bash call, while background work runs, before ending a turn to wait, before
+  the session ends, when a task exits, before delegating, and when the
+  `ccloop delegate` hook refuses.
+- Whether Read/Edit/Write/Grep/Glob can do the job is checked before a shell
+  command is added to the allowlist.
+- Reaches `~/.claude/CLAUDE.md` at the next `install.sh`, which rebuilds its
+  managed block from this file.
+
 ## 2026-11-03 — v0.41.0
 
 **ccproject: defects and criteria scripts.**

@@ -146,6 +146,15 @@ def test_interactive_no_relay_when_no_halt_sentinel(fake_claude, tmp_path, monke
     assert relayed is False
 
 
+def test_answering_no_at_the_relaunch_prompt_is_not_a_finished_run(fake_claude, tmp_path, monkeypatch):
+    """A wrapper reads this status to tell "the user stopped this" from "it finished";
+    ccdirector reopens a run that exits 0 without having done its job."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runner, "run_session_interactive", lambda *a, **k: (0, False))
+    monkeypatch.setattr(runner, "_confirm_relaunch", lambda: False)
+    assert runner.cmd_run("", "task", ensure_hook=False, interactive=True) == 3
+
+
 @pytest.mark.skipif(not Path("/proc").is_dir(), reason="PDEATHSIG relies on /proc + Linux prctl")
 def test_interactive_child_dies_if_ccloop_process_itself_is_killed(tmp_path):
     """Regression: if ccloop's own process dies abnormally (crash, `kill -9`,

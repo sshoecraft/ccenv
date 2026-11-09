@@ -33,8 +33,38 @@ A project whose queue is only a record, not a release bar, sets
   `.ccproject/` in the cwd on the first write. Walking only to an existing store
   means a command run from a subdirectory reaches the project's files instead of
   starting a second store there.
-- **Committed files:** the store carries its own `.gitignore` for the lock and
+- **Committed files:** the store carries its own `.gitignore` for the locks and
   for temp files, so only the data is committed.
+- **Files elsewhere in the repo:** `.ccproject/config.json` may name another path
+  for either file (`"store"`), relative to the project root. It must resolve
+  inside the project, which keeps the reason XDG was rejected: the state still
+  travels with the code. This exists for a project whose own tooling already
+  reads its files where they are. Moving the files would mean editing every one
+  of those readers at once. Pointing ccproject at them changes nothing for the
+  project.
+
+## A project can say ccproject is not its tool
+
+A project can keep its release state in tools of its own. If it does, the
+skill still tells every session to use ccproject, and that causes two failures:
+- **The answer is empty or stale.** A ccproject command gives an answer that
+  looks authoritative but comes from a store the project's tools never write.
+- **A stale copy appears.** A well-meant `import` creates a second store, a
+  snapshot frozen at the moment of the import. It reads as current until
+  someone notices it is not.
+
+`"external": {"criteria": "...", "defects": "..."}` in `.ccproject/config.json`
+names the project's own tool for each. The ccproject tool for that part then
+refuses to run in the project, `import` included, and says which tool to use.
+
+**Why refuse instead of forwarding.** Forwarding would make `ccproject_criteria.py`
+behave like a different program in one project, while every document describes
+it the same way. That is the shadowing the driver design forbids. A refusal
+costs the session one call, and afterwards it knows which tool is correct.
+
+When the board's defect queue is external, the board leaves out its "no
+blocking defects" line, because that queue is not ccproject's to grade. To
+switch a project over, delete the line from `config.json`.
 
 ## Shapes and compatibility
 
@@ -93,11 +123,18 @@ those projects already wrote (`per_class`, `per_config`).
 
 - **Row status:**
   - PASS when every required value is green
-  - FAIL when any value is FAIL
+  - FAIL when any value has a failing status (`"failing"` on the board, default
+    `FAIL`)
   - PARTIAL otherwise
 - **Why not PARTIAL on a failure:** smartbot's own tool marked a row PARTIAL even
   when a cell failed. A row with a failing cell has failed, and saying PARTIAL
-  hides that.
+  hides that. The same argument covers any status a project counts as a
+  failure. In mxfs, a run that died mid-test is INCOMPLETE and may have wedged
+  the node, so `failing` lets the board say FAIL there as well.
+- **One value at a time:** the board takes `--cell VALUE` and grades each row at
+  that value alone, leaving out the rows that do not apply there. A requirement
+  that holds on one configuration says nothing about another, so the question a
+  release asks is per value.
 - **Becoming a matrix row:** a row turns into a matrix row on its first per-value
   write, so a harness writing `--class mage` is never refused.
 - **Spelling:** `--cell` is also accepted as `--at` (mxfs's spelling) and as the
@@ -130,9 +167,26 @@ project's harness. Each project would carry the others' rules, and the generic
 behaviour would grow with every new project.
 
 Instead a project adds `.ccproject/driver.py`. Both tools load it, and it
-supplies hooks: `applies`, `grade`, `on_result`, `blocks`, `options` and
-`commands`. A hook that is missing, or that returns None, means the generic
-behaviour. So a driver overrides only what its project actually does differently.
+supplies hooks:
+- **Grading:** `applies`, `grade` and `roll_up`.
+- **Results:** `before_result` and `on_result`.
+- **Defects:** `blocks`, `unrated`, `on_write` and `on_remove`.
+- **Parsers:** `options` and `commands`.
+
+A hook that is missing, or that returns None, means the generic behaviour. So a
+driver overrides only what its project actually does differently.
+
+- **Hooks on writes are before the save:** `before_result` runs before the
+  result is checked, so a project can record a status the generic list does not
+  know, or turn an over-budget PASS into a FAIL, instead of having the result
+  refused. `on_result`, `on_write` and `on_remove` run with the lock held and
+  before the save. A hook that exits refuses the write and leaves the file as
+  it was. If a hook ran after the save, a refusal would come too late, and a
+  project's own records (a run ledger, retired runs) could fall behind the
+  file.
+- **Read-only driver commands:** a driver subcommand that only reports declares
+  `driver_readonly` and runs without the lock, the way the board does. A long
+  report must not hold off a harness that is recording results.
 
 - **Imported, not run as a subprocess:** grading mxfs's board means about 2,000
   row-by-configuration judgements, and a subprocess per call would make every
@@ -154,12 +208,19 @@ behaviour. So a driver overrides only what its project actually does differently
 
 ## Locking and writes
 
-Each mutating command holds an exclusive lock, `.ccproject/.lock`, from load to
+Each mutating command holds an exclusive lock on the file it writes, from load to
 save. If the lock covered only the save, two concurrent writers could each read
 the same old state, and the later save would silently undo the earlier one. Saves
 write a temp file and rename it over the old one, so a reader without the lock
 (the board reading the queue, for instance) always sees a whole file. A lock
 still held after 30 seconds is reported as wedged rather than waited on.
+
+The lock is `.<file>.lock`, in the same directory as the file. There used to be
+one lock, `.ccproject/.lock`, for both files. That lock only excluded ccproject
+writing alongside itself. A project whose own tools write the same file (mxfs's
+harness writes its board while sessions use ccproject) needs both writers to
+take the same lock, or each can save over the other. A name derived from the
+file gives the project's tool a lock it can take.
 
 ## The two tools are separate files
 

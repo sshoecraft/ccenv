@@ -6,7 +6,10 @@ takes it out with the reason it was fixed or disproved; there is no status field
 in the file IS the status.
 
 Data: `.ccproject/defects.json` in the project -- the nearest directory at or above the cwd that
-already holds a `.ccproject/`, else the cwd itself (created on the first write). Format:
+already holds a `.ccproject/`, else the cwd itself (created on the first write). The project's
+`.ccproject/config.json` may name another file in the repository for it (`"store": {"defects":
+"data/defects.json"}`), or name the project's own tool for its queue (`"external": {"defects":
+"tools/defects.py"}`), in which case this tool refuses to run there. Format:
 
     {"defects": [{"id", "severity", "opened", "updated", "summary", "evidence", "next",
                   "criteria": [criterion ids]}, ...],
@@ -18,8 +21,10 @@ by an older or project-specific tool loads unchanged. The key `"project"` -- on 
 any record -- is reserved for the project's own data: this tool never reads or rewrites it.
 
 A project extends the tool with `.ccproject/driver.py` (shared with ccproject_criteria.py):
-`API = 1`, plus any of `blocks(data, entry, args)` -> bool or None, `options(parser)`, and
-`commands(subparsers)`. See README.md.
+`API = 1`, plus any of `blocks(data, entry, args)` -> bool or None, `unrated(data, entry, args)`
+-> bool or None, `on_write(data, entry, args,
+command)` -> whether it changed the entry, `on_remove(data, entry, args)` -> lines to report,
+`options(parser)`, and `commands(subparsers)`. See README.md.
 
     ccproject_defects.py                     the queue, severity order, one line each
     ccproject_defects.py -d                  with each entry's summary and next step
@@ -88,8 +93,73 @@ def project_store() -> Path:
     return here / STORE_DIRNAME
 
 
+CONFIG_FILENAME = "config.json"
+#: What the store's own .gitignore keeps out of the repo: each data file's lock, the single lock
+#: older versions took, and an interrupted save's temp file.
+IGNORED = (".lock", ".*.lock", "*.tmp")
+
+config_cache = None
+
+
+def config() -> dict:
+    """`.ccproject/config.json`: where the project's files are (`store`) and which of its own
+    tools hold its release state (`external`). Empty when the project has none."""
+    global config_cache
+    if config_cache is None:
+        path = project_store() / CONFIG_FILENAME
+        config_cache = {}
+        if path.is_file():
+            try:
+                config_cache = json.loads(path.read_text())
+            except ValueError as exc:
+                sys.exit(f"defects: {path} is not valid JSON: {exc}")
+            if not isinstance(config_cache, dict):
+                sys.exit(f"defects: {path} is not a JSON object")
+    return config_cache
+
+
+def refuse_external() -> None:
+    """A project that keeps its queue in a tool of its own is not served here. Running anyway
+    would answer from a file that tool does not write -- an answer that looks current and is
+    not -- and an `import` would start exactly such a file."""
+    own = (config().get("external") or {}).get("defects")
+    if own:
+        sys.exit(f"defects: this project keeps its defect queue in {own}; use that. "
+                 f"(.ccproject/{CONFIG_FILENAME} declares it, so ccproject_defects.py does not "
+                 f"run here.)")
+
+
 def ledger_path() -> Path:
-    return project_store() / FILENAME
+    """The queue file: the one `store` names, relative to the project root, else
+    `.ccproject/defects.json`. A named file must be inside the project, because the release state
+    travels with the repository."""
+    named = (config().get("store") or {}).get("defects")
+    if not named:
+        return project_store() / FILENAME
+    root = project_store().parent.resolve()
+    path = (root / named).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        sys.exit(f"defects: .ccproject/{CONFIG_FILENAME} puts defects at {named}, outside the "
+                 f"project {root}")
+    return path
+
+
+def lock_path(path: Path) -> Path:
+    """Each data file's lock sits beside it as `.<name>.lock`, so a project tool that writes the
+    same file under the same lock name excludes this one's writes and is excluded by them."""
+    return path.with_name("." + path.name + ".lock")
+
+
+def ignore_store(store: Path) -> None:
+    """The data travels with the repo; the locks and an interrupted save's temp file do not."""
+    ignore = store / ".gitignore"
+    have = ignore.read_text().split("\n") if ignore.exists() else []
+    missing = [pattern for pattern in IGNORED if pattern not in have]
+    if missing:
+        text = "\n".join(line for line in have if line) + "\n" if any(have) else ""
+        ignore.write_text(text + "\n".join(missing) + "\n")
 
 
 def take_lock() -> None:
@@ -97,11 +167,11 @@ def take_lock() -> None:
     global lock_handle
     store = project_store()
     store.mkdir(parents=True, exist_ok=True)
-    ignore = store / ".gitignore"
-    if not ignore.exists():
-        #: The data travels with the repo; the lock and an interrupted save's temp file do not.
-        ignore.write_text(".lock\n*.tmp\n")
-    lock_handle = (store / ".lock").open("w")
+    ignore_store(store)
+    target = ledger_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock = lock_path(target)
+    lock_handle = lock.open("w")
     deadline = time.monotonic() + LOCK_WAIT_SECONDS
     announced = False
     while True:
@@ -111,8 +181,7 @@ def take_lock() -> None:
         except OSError:
             if time.monotonic() >= deadline:
                 sys.exit("defects: %s has been held for %ds -- far longer than a write takes, so "
-                         "the holder is wedged rather than busy." % (store / ".lock",
-                                                                     LOCK_WAIT_SECONDS))
+                         "the holder is wedged rather than busy." % (lock, LOCK_WAIT_SECONDS))
             if not announced:
                 print("defects: waiting for another writer to finish…", file=sys.stderr)
                 announced = True
@@ -221,8 +290,15 @@ def blocks(entry: dict, data: dict, args=None) -> bool:
     return True
 
 
-def unrated(entry: dict, data: dict) -> bool:
-    """Missing a field `gate_require` asks for, and so passed by the gate without a rating."""
+def unrated(entry: dict, data: dict, args=None) -> bool:
+    """Passed by the gate without a rating: the driver's `unrated(data, entry, args)` hook when it
+    answers (a project whose gate also filters by reach counts only the records that reach), else
+    missing a field `gate_require` asks for."""
+    decide = hook("unrated")
+    if decide is not None:
+        verdict = decide(data, entry, args)
+        if verdict is not None:
+            return bool(verdict)
     return any(matches(entry, field, values) is None
                for field, values in (data.get("gate_require") or {}).items())
 
@@ -313,16 +389,17 @@ def cmd_list(data: dict, args) -> int:
         candidates = [e for e in entries
                       if not any(matches(e, f, v) for f, v in
                                  (data.get("gate_exclude") or {}).items())]
-        unrated_count = sum(1 for e in candidates if unrated(e, data))
+        unrated_count = sum(1 for e in candidates if unrated(e, data, args))
         entries = [e for e in entries if blocks(e, data, args)]
     verdict = 1 if (args.gate and entries) else 0
     if args.json:
         json.dump({"defects": entries}, sys.stdout, indent=2)
         sys.stdout.write("\n")
         return verdict
-    note = ("NOTE: %d more record(s) lack a field gate_require asks for (%s), so the gate "
-            "passes them unrated; rate each from its evidence."
-            % (unrated_count, ", ".join(data.get("gate_require") or {}))) if unrated_count else ""
+    asked = ", ".join(data.get("gate_require") or {})
+    note = ("NOTE: %d more record(s) %s, so the gate passes them unrated; rate each from its "
+            "evidence." % (unrated_count, "lack a field gate_require asks for (%s)" % asked
+                           if asked else "have no rating")) if unrated_count else ""
     if not entries:
         if args.gate:
             print("nothing in the queue blocks (%d open overall)." % total)
@@ -372,10 +449,19 @@ def cmd_add(data: dict, args) -> int:
         entry["next"] = args.next
     if args.criterion:
         entry["criteria"] = list(dict.fromkeys(args.criterion))
+    written(data, entry, args, "add")
     data["defects"].append(entry)
     save(data)
     print(f"added {new_id}")
     return 0
+
+
+def written(data: dict, entry: dict, args, command: str) -> bool:
+    """Hand an added or updated entry to the driver's `on_write(data, entry, args, command)`
+    before the queue is saved, so a project can apply its own fields and checks; it may exit to
+    refuse the write. True when the hook says it changed the entry."""
+    hook_fn = hook("on_write")
+    return bool(hook_fn(data, entry, args, command)) if hook_fn is not None else False
 
 
 def append_text(entry: dict, key: str, text: str) -> None:
@@ -423,6 +509,8 @@ def cmd_update(data: dict, args) -> int:
         else:
             entry.pop("criteria", None)
         changed = True
+    if written(data, entry, args, "update"):
+        changed = True
     if not changed:
         sys.exit("defects: nothing to update -- give at least one field")
     entry["updated"] = today()
@@ -433,11 +521,17 @@ def cmd_update(data: dict, args) -> int:
 
 def cmd_remove(data: dict, args) -> int:
     entry = find(data, args.id)
+    #: Before the save, so a project that refuses the removal (it requires a disposition, say)
+    #: exits with the queue untouched, and one that settles records elsewhere does so first.
+    removing = hook("on_remove")
+    report = (removing(data, entry, args) or []) if removing is not None else []
     data["defects"].remove(entry)
     save(data)
     disposition = "fixed" if args.fixed else "disproved" if args.disproved else ""
     print(f"removed {entry.get('id')}" + (f" ({disposition})" if disposition else ""),
           file=sys.stderr)
+    for line in report:
+        print("  " + line, file=sys.stderr)
     why = " ".join(args.why.split())
     print("- **%s** — %s%s" % (" ".join(text_of(entry.get("summary", entry.get("id"))).split()),
                                f"{disposition}: " if disposition else "", why))
@@ -591,10 +685,14 @@ MUTATORS = ("add", "update", "remove", "rename", "gate-exclude", "gate-require",
 
 def main(argv=None) -> int:
     global driver
+    refuse_external()
     driver = load_driver()
     args = build_parser().parse_args(argv)
     command = getattr(args, "driver_command", None)
-    if args.cmd in MUTATORS or command is not None:
+    #: A driver subcommand that only reads (`set_defaults(driver_readonly=True)`) runs without the
+    #: lock, as the listing does.
+    if args.cmd in MUTATORS or (command is not None and
+                                not getattr(args, "driver_readonly", False)):
         take_lock()
     if args.cmd == "import":
         return cmd_import(args)
