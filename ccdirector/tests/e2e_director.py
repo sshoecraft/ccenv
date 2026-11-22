@@ -11,11 +11,16 @@ What it records (and prints):
 - every event in .ccdirector/events.jsonl, by kind;
 - the edit-lock log: which workers took calc.py's lock, and how often one had
   to wait for another;
-- each worker's exit, and calc.py as left.
+- each worker's exit, and calc.py as left;
+- whether the goals ran side by side and each stayed with its worker: when each
+  item was claimed, whether the worker that claimed it is the one that finished
+  it, and how many items were parked.
 
 Not collected by pytest (real claude calls, several minutes). Run it by hand:
 
-    python3 tests/e2e_director.py [--workers 2] [--model sonnet] [--worker-model haiku]
+    python3 tests/e2e_director.py [--workers 2] [--model sonnet] [--worker-model haiku] [--source]
+
+--source runs ccdirector from this source tree instead of the installed one.
 
 The project folder is printed and kept for inspection.
 """
@@ -23,7 +28,9 @@ from __future__ import annotations
 
 import argparse
 import collections
+import datetime
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -89,19 +96,30 @@ def main() -> int:
     parser.add_argument("--model", default="sonnet", help="director model")
     parser.add_argument("--worker-model", default="haiku")
     parser.add_argument("--timeout", type=float, default=3600)
+    parser.add_argument("--source", action="store_true",
+                        help="run ccdirector from this source tree, not the installed one")
     args = parser.parse_args()
 
     root = make_project()
     print(f"project: {root}", flush=True)
-    cmd = [shutil.which("ccdirector") or "ccdirector", "start", str(root), "--headless",
+    env = dict(os.environ)
+    if args.source:
+        here = Path(__file__).resolve().parents[1]
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(here / "src"), str(here.parent / "ccenvmcp")]
+            + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+        program = [sys.executable, "-m", "ccdirector.cli"]
+    else:
+        program = [shutil.which("ccdirector") or "ccdirector"]
+    cmd = [*program, "start", str(root), "--headless",
            "--goal", GOAL, "--workers", str(args.workers), "--model", args.model,
            "--worker-model", args.worker_model]
-    print("command: " + " ".join(cmd[:4]) + " … " + " ".join(cmd[6:]), flush=True)
+    print("command: " + " ".join(program) + f" start … --workers {args.workers}", flush=True)
     started = time.time()
     with open(root.parent / (root.name + ".ccdirector.log"), "w") as log:
         try:
             done = subprocess.run(cmd, cwd=str(root), stdout=log, stderr=subprocess.STDOUT,
-                                  timeout=args.timeout)
+                                  timeout=args.timeout, env=env)
             code = done.returncode
         except subprocess.TimeoutExpired:
             code = "timeout"
@@ -121,10 +139,12 @@ def main() -> int:
                                    collections.Counter(e["kind"] for e in events).items()))
     for e in events:
         if e["kind"] in ("item_claimed", "item_done", "item_check_failed", "item_parked",
-                         "worker_started", "worker_exited", "workers_failing", "goal_done",
+                         "worker_started", "worker_exited", "worker_stalled",
+                         "workers_failing", "workers_resumed", "goal_done",
                          "goal_stuck", "supervisor_error"):
             extra = {k: v for k, v in e.items() if k not in ("time", "kind", "output", "log")}
             print(f"  {e['time']} {e['kind']} {extra}")
+    report_ownership(events)
     calc_locks = [l for l in locks if l["path"].endswith("/calc.py")]
     print(f"\nedit-lock log: {len(locks)} entries; calc.py: "
           + ", ".join(f"{k} {v}" for k, v in collections.Counter(
@@ -138,6 +158,31 @@ def main() -> int:
     print("\ncalc.py now:\n" + (root / "calc.py").read_text())
     print(f"project kept at {root}; ccdirector output in {root}.ccdirector.log")
     return 0 if code == 0 and gate.returncode == 0 else 1
+
+
+def report_ownership(events: list[dict]) -> None:
+    """Did the goals run side by side, and did each stay with the worker that took it?"""
+    claimed, finished = {}, {}
+    for e in events:
+        if e["kind"] == "item_claimed":
+            claimed.setdefault(e["item"], []).append(
+                (e["worker"], datetime.datetime.fromisoformat(e["time"])))
+        elif e["kind"] == "item_done":
+            finished[e["item"]] = e["worker"]
+    print("\nownership:")
+    firsts = []
+    for item_id, claims in sorted(claimed.items()):
+        worker, when = claims[0]
+        firsts.append(when)
+        kept = finished.get(item_id) == worker and len(claims) == 1
+        print(f"  {item_id}: claimed by {worker} at {when:%H:%M:%S}, "
+              + (f"finished by {finished[item_id]}" if item_id in finished else "not finished")
+              + ("" if kept else f" — claimed {len(claims)}x"))
+    if firsts:
+        print(f"  first claims spread over {(max(firsts) - min(firsts)).total_seconds():.0f}s")
+    parks = sum(1 for e in events if e["kind"] == "item_parked")
+    print(f"  items parked: {parks}; items that changed hands: "
+          f"{sum(1 for c in claimed.values() if len(c) > 1)}")
 
 
 if __name__ == "__main__":

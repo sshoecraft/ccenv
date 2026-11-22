@@ -14,9 +14,9 @@
 #                 steers worker sessions through it (needs ccloop + ccproject)
 #
 # Retired in v0.13.0 — no longer part of this bundle:
-#   ccprospect, ccinsight, ccteam
+#   ccprospect, ccinsight
 #
-# uninstall.sh still knows how to remove all three, so a machine carrying an
+# uninstall.sh still knows how to remove both, so a machine carrying an
 # older install can be cleaned with the current script.
 #
 # Overlay system — additional MCP servers and CLAUDE.md fragments are picked up
@@ -42,11 +42,11 @@
 #   ./install.sh --no-overlays         # skip overlay scanning
 #   ./install.sh --check-retired       # report retired-component residue, change nothing
 #   ./install.sh --no-retired-cleanup  # leave retired-component residue in place
-#   ./install.sh --purge-retired-state # also delete .ccprospect/.ccinsight/.ccteam
+#   ./install.sh --purge-retired-state # also delete .ccprospect/.ccinsight
 #                                        project state dirs (archived first)
 #   ./install.sh -h                    # show this help
 #
-# Retired components (ccprospect, ccinsight, ccteam) are detected and removed
+# Retired components (ccprospect, ccinsight) are detected and removed
 # automatically when residue is found — see "Retired-component cleanup" below.
 # The full uninstall+install dance is not needed for an ordinary upgrade.
 #
@@ -69,7 +69,7 @@ PURGE_RETIRED_STATE=0
 # still carrying their wiring — MCP registrations, hooks, skills, packages —
 # with nothing in the install path to clean it up. See the retired-cleanup
 # section below.
-RETIRED_COMPONENTS=(ccprospect ccinsight ccteam)
+RETIRED_COMPONENTS=(ccprospect ccinsight)
 
 # Dirs scanned for MCP server subdirs (anywhere a subdir with pyproject.toml lives).
 MCP_OVERLAY_DIRS=(
@@ -275,7 +275,7 @@ PY
 # ----------------------------------------------------------------------------
 # Retired-component cleanup
 #
-# ccprospect, ccinsight and ccteam were retired in v0.13.0. install.sh no
+# ccprospect and ccinsight were retired in v0.13.0. install.sh no
 # longer installs them, but "no longer installs" is not "removes": a box set
 # up before that release still has their MCP registrations in ~/.claude.json,
 # their hooks in settings.json, their skills and their pip dists. Nothing in
@@ -292,7 +292,7 @@ PY
 #
 # Scope discipline: this NEVER touches a component ccenv currently ships. It
 # passes --only for each detected retired component, so the uninstaller can
-# only remove those. Project state dirs (.ccprospect/ .ccinsight/ .ccteam/)
+# only remove those. Project state dirs (.ccprospect/ .ccinsight/)
 # are KEPT unless --purge-retired-state is given — deleting a user's data as a
 # side effect of an upgrade is not the installer's call, even though the
 # uninstaller archives before deleting.
@@ -313,7 +313,6 @@ skills_dir = home / ".claude" / "skills"
 KNOWN = {
     "ccprospect": (["ccprospect"],            ["prospect-integrate"],  ["ccprospect"]),
     "ccinsight":  (["ccinsight"],             ["ccinsight-integrate"], ["ccinsight"]),
-    "ccteam":     (["ccteam", "ccteam-mcp"],  [],                      ["ccteam"]),
 }
 
 
@@ -611,8 +610,8 @@ ensure_build_toolchain() {
 # matching interpreter. After a Python bump the old tagged .so lingers, the new
 # interpreter cannot import it, and pip — seeing the distribution already
 # "present" in the shared dir — never refetches the right-ABI wheel. The
-# originally observed symptom was the (since split out) ccteam MCP failing to
-# connect with `ModuleNotFoundError: No module named 'watchfiles._rust_notify'`.
+# observed symptom was an MCP server failing to connect with
+# `ModuleNotFoundError: No module named 'watchfiles._rust_notify'`.
 #
 # Fix: after everything is installed, walk the shared user-site for native
 # extension files whose ABI tag does not match the running interpreter, map each
@@ -620,8 +619,8 @@ ensure_build_toolchain() {
 # `pip install --force-reinstall --no-deps` it so the correct-ABI wheel lands.
 # Generic by construction — it heals ANY compiled dep, self-heals an
 # already-broken box, and is a near-instant no-op when every extension already
-# matches. Kept after ccteam left the bundle: the shared user-site is shared
-# with the user's own --user installs, so the hazard did not leave with it.
+# matches. The shared user-site is shared with the user's own --user installs,
+# so the hazard does not depend on which packages ccenv itself ships.
 # ----------------------------------------------------------------------------
 heal_stale_compiled_exts() {
     step "native deps" "checking for stale-ABI compiled extensions in the shared user-site"
@@ -906,7 +905,7 @@ PY
 if [ "$DO_RETIRED_CLEANUP" = "1" ]; then
     RETIRED_FOUND=$(retired_residue)
     if [ -n "$RETIRED_FOUND" ]; then
-        step "retired components" "residue found — removing ccprospect/ccinsight/ccteam leftovers"
+        step "retired components" "residue found — removing ccprospect/ccinsight leftovers"
         run_retired_cleanup "$RETIRED_FOUND"
     fi
 fi

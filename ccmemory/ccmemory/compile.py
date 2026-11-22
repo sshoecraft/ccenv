@@ -195,6 +195,18 @@ def env_int(name: str, default: int, minimum: int = 1) -> int:
     return default
 
 
+def compaction_disabled() -> bool:
+    """CCMEMORY_NO_COMPACTION=1: never ask this session to compact.
+
+    For sessions whose quota belongs to other work. ccdirector sets it for its
+    worker sessions: every worker relaunch is a new session, and each one used to
+    take the session-start nudge and dispatch compaction agents on the project's
+    store, spending the run's quota on housekeeping. The store is still compacted
+    by the sessions not told this — the director, or any ordinary session."""
+    return os.environ.get("CCMEMORY_NO_COMPACTION", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def threshold() -> int:
     """Backlog count at/above which compaction is suggested (env-overridable)."""
     return env_int("CCMEMORY_COMPILE_THRESHOLD", DEFAULT_THRESHOLD)
@@ -329,7 +341,7 @@ def nudge_suppressed(b: dict[str, Any]) -> bool:
     has nothing else left to ask for.
     """
     work = b["backlog"] + b.get("retained", 0) + b.get("merge_backlog", 0)
-    return work < b["threshold"] or in_cooldown(b)
+    return work < b["threshold"] or in_cooldown(b) or compaction_disabled()
 
 
 def _build_input(memories: list[dict]) -> str:

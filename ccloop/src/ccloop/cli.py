@@ -19,6 +19,8 @@ Usage:
   ccloop "<criteria>" "<task>"  start a new run with success criteria
                                 (empty criteria "" = legacy DONE-marker mode)
   ccloop --resume-run <run-id>  resume an existing run
+  ccloop --resume-run           resume the one unconverged run in the current
+                                project; errors if there are none or several
   ccloop --list                 list runs in the current project
   ccloop --prune [--force]      delete converged runs; dry-run by default
   ccloop install [--uninstall]  manually (un)register the guard hook
@@ -294,16 +296,26 @@ def main(argv=None):
         return runner.cmd_prune(force=force)
 
     if argv[0] == "--resume-run":
-        if len(argv) < 2:
-            print("ccloop: --resume-run requires a run-id", file=sys.stderr)
-            return 2
-        run_id = argv[1]
-        if not UUID_RE.match(run_id):
+        if len(argv) > 2:
             print(
-                f"ccloop: invalid run-id: must be a lowercase UUID (got: {run_id})",
+                f"ccloop: too many arguments after --resume-run: {argv[2]}",
                 file=sys.stderr,
             )
             return 2
+        if len(argv) == 2:
+            run_id = argv[1]
+            if not UUID_RE.match(run_id):
+                print(
+                    f"ccloop: invalid run-id: must be a lowercase UUID (got: {run_id})",
+                    file=sys.stderr,
+                )
+                return 2
+        else:
+            try:
+                run_id = runner.find_resumable_run()
+            except runner.CcloopError as exc:
+                print(f"ccloop: {exc}", file=sys.stderr)
+                return 2
         interactive, err = _resolve_interactive()
         if err is not None:
             return err

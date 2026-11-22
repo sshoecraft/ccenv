@@ -2,6 +2,315 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-11-22 — v0.56.0
+
+**ccloop: resuming a run without its id (ccloop 0.20.0).**
+
+- `ccloop --resume-run` with no id resumes the current project's only
+  unconverged run, meaning one whose `--list` status is `active`.
+  - With none, it exits 2 with `no unconverged runs` (or `no runs` when
+    `.ccloop/runs/` does not exist).
+  - With several, it exits 2 and lists each one's id, last activity and task,
+    newest first. It does not pick one, because a second live run in a project
+    is usually an abandoned one, and ccloop cannot tell which.
+  - Before, the id was required, and finding it meant running `--list` and
+    copying a full UUID.
+- `--resume-run <id> <anything>` now exits 2. It used to ignore the extra
+  argument.
+
+## 2026-11-18 — v0.55.2
+
+**ccdirector: worker MCP server health and the resource queue (ccdirector 0.17.2).**
+
+- The worker pool now relaunches a worker whose ccdirector MCP server has
+  frozen.
+  - Each server touches `workers/worker-N.alive` every minute from its only
+    thread. An alive file that has stopped moving for 10 minutes, after the
+    server came up in this launch, means none of that worker's ccdirector tools
+    answer. This applies under `--worker-stall 0` too.
+  - In one project, a worker's server sat for hours in uninterruptible sleep
+    inside an NFS open on `.ccdirector/`. Claude Code aborted its `acquire`,
+    then an instant `resources` call, after 30 minutes of silence each. The
+    worker carried on without `acquire`, `run` or `item_done`, and nothing
+    noticed: its log kept moving.
+  - The frozen process itself cannot be killed until the file operation
+    returns. The relaunched worker gets a new server.
+- A queued resource request whose caller has stopped asking is dropped after 2
+  minutes, logged as `abandoned` in `resources.log`.
+  - A waiting `acquire` asks every 2 seconds. When its call is gone without
+    withdrawing (a frozen server, or a call dropped without a cancel) but its
+    claude still runs, the dead-holder check cannot see it.
+  - The request would then never take its units, and every request it fits
+    ahead of would wait for it forever.
+- Measured with the new `tests/probe_mcp_timeout.py`:
+  - Claude Code sends a `progressToken` with each call, and progress resets its
+    30-minute silence limit.
+  - A per-server `"timeout"` in an MCP config is a hard wall-clock limit that
+    progress does not reset, so ccdirector sets none.
+
+## 2026-11-18 — v0.55.1
+
+**ccdirector: the work state and the resource queue (ccdirector 0.17.1).**
+
+- Only a change to an item's work, its `what` or `check`, counts as a revision.
+  - A revision is what sends a done, parked or waiting item back to pending and
+    tells the worker holding it. Changes to priority, paths, size, section,
+    dependencies or `check_timeout`, or the removal of a field the plan format
+    dropped, now change nothing.
+  - Before, every field counted. The plan repair that 0.17.0's validation forced
+    only removed item `resources`, yet it reopened 122 finished items in one
+    project, each to be claimed and checked again. The 0.16.0 resource-id repair
+    had done the same.
+  - State recorded before this version is compared the old way once, then
+    switches over, so the upgrade itself reopens nothing.
+  - Items that 0.17.0's repair already reopened stay pending.
+- A request for a shared resource that fits in the free units now goes ahead of
+  earlier requests that do not fit (backfill).
+  - Of several requests that fit, the earliest goes first.
+  - Once the head of the queue has waited 2 hours, nothing passes it any more,
+    and the units drain to it.
+  - Before, the queue was strictly in order. One worker's 3-unit request waited
+    behind another's whole-pool request with 30 of 32 units free, while the
+    whole-pool request itself waited for a 2-hour run to end. Two of four
+    workers sat idle on that one queue.
+- `ccdirector start` clears a `consult_required` flag on any item without 3
+  failed checks in a row. Those flags came from 0.16's rule of a consult after
+  3 parks, and would make the next worker consult before its first check.
+
+## 2026-11-16 — v0.55.0
+
+**ccdirector: each worker owns a goal until it is done (ccdirector 0.17.0, ccmemory 0.24.0).**
+
+- An item is now a goal that one worker carries from start to finish. The
+  worker keeps it until its check passes, and the director stays out of it
+  unless new information changes the goal.
+  - ccdirector exists to split a goal into pieces that run side by side. Two
+    plain sessions on two unrelated problems finish about twice as fast as one,
+    and N workers must match that.
+  - It had drifted to items that were steps, handed back and forth. In one
+    project, four workers ran at about 1.2 times one session, at about twice the
+    tokens per defect. Each hand-off meant a fresh worker relearning the code
+    (about 390k tokens to start) and a round trip through the director (a median
+    of 55 minutes).
+- A failed check never takes the item away. After 3 failed checks in a row, the
+  worker must ask an advisor before its next check, then carries on with the
+  item.
+  - Before, 3 failed checks parked the item for the director, and the next
+    worker started on it cold.
+  - Parking no longer counts toward a consult, because parking is now only a
+    deliberate report that the goal is wrong.
+- Checks can prove a whole goal. There is no 540 s cap any more:
+  `check_timeout` is optional, and 0 or absent means no limit.
+  - The worker's MCP server has a new `item_done` tool. It runs the check to
+    its end with progress reports, can be cancelled (which ends the check's
+    process tree and records nothing), and returns PASSED, FAILED or REFUSED
+    with the log.
+  - The cap existed because `item done` ran inside one Bash call. It made
+    directors write checks that proved only a step, and items shrank to steps.
+    Plans on file with a `check_timeout` stay valid.
+- Items no longer hold a resource or the whole tree. An item that names
+  `resources`, or sets `interface: true`, fails validation, and a plan on file
+  with either goes back to the director to repair.
+  - With goal-sized items lasting hours, holding a resource for a whole run
+    made every other item naming it wait, and an interface item stopped every
+    worker.
+  - Workers share resources unit by unit through `acquire`. A shared change
+    becomes its own item that others list in `depends_on`.
+- `ccdirector item park ID --after OTHER` parks a goal that turns out to need
+  another item done first. The item waits, the worker takes other work, and the
+  item comes back to that worker, marked `RESUMED`, once OTHER is done.
+  - The general form is `--until CMD`, a quick command that succeeds when what
+    the item waits for is there. Either form checks once a minute, from the
+    worker pool.
+  - An item still waiting after `--hours` (24 by default) goes to the director.
+  - `--after` refuses an unknown item, the item itself and an item already
+    done. `--until` refuses a command that already succeeds, one that cannot
+    run, and one slower than 30 s.
+  - Workers wait for their own tests, including ones queued on the project's
+    run queue, with `run`, as a single session would. Parking to wait for a
+    result is gone.
+- `plan submit` prints a `PARALLEL` line: how many items can be worked now,
+  against the number of workers. When there are fewer items, it says to split
+  further or explain why in `risks`. It never refuses on this count.
+- The director's planning and steering instructions and the worker's
+  instructions are rewritten around goal ownership.
+- A worker's MCP server now inherits the pool's `PYTHONPATH`, so it always
+  imports the same ccdirector as the pool.
+- `tests/e2e_director.py --source` runs this tree and reports ownership. On
+  its 4-function project with 4 workers, all 4 items were claimed within 2 s,
+  each was finished by the worker that claimed it, and none was parked.
+- To move a running project's step-sized plan to goal-sized items, start it
+  with `ccdirector start --replan`.
+- A worker's run now ends only when every item in the plan is done. Short of
+  that, `item_next` keeps waiting at no cost, through parked items, dependencies
+  and replans, and the worker takes the next item in the same session.
+  - Before, a worker ended its run whenever nothing was ready for it at that
+    moment, and was relaunched cold for the next item.
+  - In one project that was 122 worker sessions in 46 hours, each paying about
+    390k tokens to start, and the main reason a defect cost about twice what a
+    single plain session spent on one.
+- PROGRESS warns `WORKERS IDLE` when workers have nothing ready while the plan
+  is unfinished. The director's instructions then say to answer every parked
+  item and add independent work in one submission until every worker has an
+  item.
+  - Before, the director freed parked items one revision at a time, and workers
+    sat out while independent defects were still open.
+  - Workers on different defects test on separate units of a shared pool at
+    the same time.
+- Workers no longer spend their quota compacting the project's memory.
+  - Every worker relaunch is a new session. Each took ccmemory's session-start
+    nudge and dispatched compactor agents on the project's store. In one 2-hour
+    run, two workers made about 400 memory reads, deletes and plan calls this
+    way.
+  - ccmemory 0.24.0 adds `CCMEMORY_NO_COMPACTION=1`. A session with it set is
+    never asked to compact, either by the nudge or by the `memory_list` note,
+    including the feedback-overflow case.
+  - ccdirector sets it for workers. The director and ordinary sessions still
+    compact the store.
+
+## 2026-11-15 — v0.54.0
+
+**ccdirector: shared resources workers wait on (ccdirector 0.16.0, ccenvmcp 0.2.0).**
+
+- Each worker gets its own MCP server, `ccdirector mcp`, through
+  `--mcp-config`. Its tools block at no cost until their answer is ready:
+  - `item_next`: the next item;
+  - `acquire`: units of a shared resource, served first come first served per
+    resource;
+  - `release`: give units back;
+  - `run`: a command of any length, returning its exit code, output tail and
+    full log;
+  - `resources`: who holds and who waits.
+
+  Waiting used to cost tokens. A Bash call ends at 10 minutes, so long runs went
+  to the background and ccloop's Stop hook re-fed the session until they ended.
+  In one project 19% of all worker requests were such re-feeds, plus poll loops
+  and sleeps.
+- The plan declares shared resources once, in a `resources` registry of short
+  ids with capacities, for example `rig` with capacity 1 and `vm-pool` with
+  capacity 32. Items and workers may name only those ids, and `plan submit`
+  refuses anything else.
+  - Resources were free text, and the director described one VM pool in about
+    20 different sentences, so items needing it never waited for each other.
+  - A plan on file that still names resources in prose fails validation, which
+    sends it back to the director to repair.
+- An item that names a resource holds all of it while in progress. It is
+  handed out only when nothing holds any of it, and its own worker's `acquire`
+  on that resource returns at once.
+- A lease belongs to the worker's claude process. It is dropped when that
+  process is gone, when the pool sees the worker exit, and at `ccdirector
+  start`. Routine leases are logged to `resources.log`, not to the event log,
+  so they never wake the director. PROGRESS and `status` show each resource in
+  use, with its holders and waiters.
+- A worker waiting inside one of its ccdirector tools is not treated as hung.
+  The server touches a per-worker beat file every minute, and the pool counts
+  that as activity. Before, a wait in line longer than four times the stall
+  limit would have been killed.
+- The worker instructions say to wait only through these tools and never by
+  `sleep`, polling, backgrounding or ending the turn. They also say to acquire
+  a resource before using it, release it as soon as the run ends, and run long
+  commands with `run`. The director's instructions cover the registry and say
+  a check must not use a shared resource its item does not name.
+- The /proc process helpers moved from the worker pool to `procs.py`, shared by
+  the pool and the lease table.
+- ccenvmcp 0.2.0, the shim every MCP server here is built on:
+  - Each `tools/call` runs in its own task, so a long call no longer stalls
+    pings or other calls. Sync tools still run one at a time, in order, on one
+    thread, so ccmemory and ccusage behave exactly as before.
+  - A tool with a `ctx` parameter can send progress notifications, which keep
+    Claude Code from aborting a call that stays silent for 1800 s.
+  - A tool registered with `cancellable=True` stops when its call is cancelled
+    or stdin closes. Every other tool still runs to completion.
+
+## 2026-11-15 — v0.53.1
+
+**The installer and uninstaller: ccenv leaves packages it no longer owns alone (ccdirector 0.15.1).**
+
+- `install.sh` no longer treats a package that left ccenv to become its own
+  project as a retired component. Before, every ccenv install found that
+  package's MCP registration, binaries or dist and ran the uninstaller on it,
+  deleting the user's own separate install. Retirement now covers only
+  ccprospect and ccinsight, the components ccenv itself shipped and dropped.
+- `uninstall.sh` no longer lists that package either, so a full uninstall no
+  longer removes it or archives and deletes its per-project state.
+- `uninstall.sh` keeps the ccenvmcp shim while any installed `--user` package
+  imports it, found by scanning top-level modules for `import ccenvmcp`. A
+  fixed list of ccenv's own servers was checked before, so the shim was
+  removed from under any outside package built on it.
+- ccdirector no longer refuses to start where that package is configured. In
+  its shared-filesystem mode it neither replays edits nor blocks them, and
+  ccdirector's own edit lock keeps workers' writes apart either way.
+- Project state ccdirector wrote before 0.12.0 under `.ccteam/director/` is
+  still moved to `.ccdirector/` on first use, so a project that has not run
+  ccdirector since keeps its plan.
+- Docs, README, the shim's docs and `.gitignore` no longer name the package.
+
+## 2026-11-13 — v0.53.0
+
+**ccdirector: the worker pool (ccdirector 0.15.0).**
+
+- Workers now run in a pool of slots, each idle, starting, running or backing
+  off. Slot state, quick-failure count, relaunch count and retry time are kept
+  in `state.json`.
+- No count stops relaunching any more. Before this, three workers that died
+  within a minute stopped all launches for good. A Cloudflare 403 that lasted a
+  few minutes left a run with no workers for hours, and only restarting
+  `ccdirector start` brought them back. Now a slot whose worker dies fast waits
+  15 seconds, doubling each time up to 15 minutes, and tries again for as long
+  as the run lasts.
+- Three quick deaths in a row across the pool count as an outage
+  (`workers_failing`). During one, one worker is tried at a time. The first that
+  stays up raises `workers_resumed` and brings every slot back at once.
+- A hung worker is ended and relaunched. Hung means its log was silent for
+  `--worker-stall` minutes (default 30, four times that while a tool call is
+  open, 0 to turn it off). That raises `worker_stalled`.
+- Ending a worker, at a stall or at shutdown, now kills its whole process tree,
+  found through `/proc`. Before, only the worker's process group was killed,
+  and ccloop starts claude in a session of its own, outside that group.
+- PROGRESS shows a `pool:` line, and a `WORKERS PAUSED` line naming the next
+  try during an outage. `status` lists slots that are backing off. The
+  director's instructions say a worker death, hang or outage needs no restart
+  and is no reason to stop.
+
+## 2026-11-11 — v0.52.0
+
+**ccdirector: when a run may stop short of its gate (ccdirector 0.14.0).**
+
+- `goal-stuck` now needs `--probe CMD`: a command that succeeds when the
+  dependency the work needs is working. ccdirector runs it in the project root,
+  refuses to stop while it succeeds, and records the command and its output with
+  the reason. A director ended a run with every criterion still reachable by
+  more work, citing an advisor's advice to stop, a paper run it wanted approved,
+  a bar it wanted the user to change, and a data source the project never had.
+  The command took the reason on trust.
+- The director's instructions drop "no replan can fix it" and "a decision only
+  the user can make" as reasons to stop. Running out of ideas, an advisor saying
+  stop, a call that feels like the user's, and data the project has never had
+  are now named as not reasons: the director decides and records it in
+  `risks`, plans the work to get missing data, or tries a different kind of
+  change. Only a dependency that is down ends the run early.
+
+## 2026-11-11 — v0.51.1
+
+**ccdirector: recognizing a delivered consult answer (ccdirector 0.13.1).**
+
+- A backgrounded advisor answer now counts as soon as it reaches the session.
+  Claude Code 2.1.322 logs that delivery as an `attachment` record, not a `user`
+  message, and only `user` was recognized. The director got the answer within
+  minutes but `plan submit` kept refusing for 30 minutes, until the wait gave up
+  on it, and the consult it had made was never counted.
+
+## 2026-11-10 — v0.51.0
+
+**ccdirector: director options before the subcommand (ccdirector 0.13.0).**
+
+- `--model`, `--effort` and `--cutoff` can be given to `ccdirector` itself, before
+  `start`, as well as after it. Only `--cutoff` was accepted there, so
+  `ccdirector --model=fable start …` failed with an unrecognized-argument error
+  while `ccdirector --cutoff=500 start …` worked. A value given after `start` wins.
+- `ccdirector --model M goal` sets the goal-finder's model, the same as
+  `ccdirector goal --model M`.
+
 ## 2026-11-09 — v0.50.0
 
 **ccdirector: items that cannot be finished (ccdirector 0.12.0).**

@@ -43,7 +43,7 @@ make_dirty_home() {
 }
 JSON
     cat > "$h/.claude.json" <<'JSON'
-{"mcpServers": {"ccteam": {"command": "ccteam-mcp"}, "ccmemory": {"command": "ccmemory"}}}
+{"mcpServers": {"ccinsight": {"command": "ccinsight"}, "ccmemory": {"command": "ccmemory"}, "othertool": {"command": "othertool-mcp"}}}
 JSON
     echo "$h"
 }
@@ -57,7 +57,7 @@ if echo "$OUT" | grep -q "none — no uninstall needed"; then
 else
     bad "clean box needs no uninstall" "$OUT"
 fi
-if echo "$OUT" | grep -qE "ccprospect:|ccinsight:|ccteam:"; then
+if echo "$OUT" | grep -qE "ccprospect:|ccinsight:"; then
     bad "clean box names no component" "$OUT"
 else
     ok "clean box names no component"
@@ -68,7 +68,7 @@ rm -rf "$H"
 echo "=== detection: dirty HOME reports each component and why ==="
 H=$(make_dirty_home)
 OUT=$(HOME="$H" bash "$REPO/install.sh" --check-retired 2>&1)
-for pair in "ccprospect:binary" "ccprospect:hook" "ccinsight:skill" "ccteam:MCP"; do
+for pair in "ccprospect:binary" "ccprospect:hook" "ccinsight:skill" "ccinsight:MCP"; do
     comp=${pair%%:*}; kind=${pair##*:}
     if echo "$OUT" | grep -E "^  $comp:" | grep -q "$kind"; then
         ok "$comp detected via $kind"
@@ -81,6 +81,12 @@ if echo "$OUT" | grep -qE "^  ccmemory:"; then
     bad "shipping component untouched" "ccmemory was listed as retired residue"
 else
     ok "shipping component untouched (ccmemory not listed)"
+fi
+# Nor may a package that is not ccenv's, whatever MCP server it registers.
+if echo "$OUT" | grep -qE "^  othertool:"; then
+    bad "outside package untouched" "othertool was listed as retired residue"
+else
+    ok "outside package untouched (othertool not listed)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -104,7 +110,7 @@ HOME="$H" bash "$STAGE/install.sh" --only __none__ --no-overlays >"$STAGE/run.lo
 if [ -f "$ARGS_FILE" ]; then
     ok "uninstaller was invoked"
     ARGV=$(cat "$ARGS_FILE")
-    for comp in ccprospect ccinsight ccteam; do
+    for comp in ccprospect ccinsight; do
         if grep -qx -- "$comp" "$ARGS_FILE"; then
             ok "scoped --only $comp"
         else
@@ -122,7 +128,7 @@ if [ -f "$ARGS_FILE" ]; then
         bad "runs unattended (-y)" "$ARGV"
     fi
     # Nothing ccenv currently ships may be handed to the uninstaller.
-    if grep -qxE -- "ccmemory|ccusage|ccloop|ccproject|gitsync|ccenvmcp" "$ARGS_FILE"; then
+    if grep -qxE -- "ccmemory|ccusage|ccloop|ccproject|gitsync|ccenvmcp|othertool" "$ARGS_FILE"; then
         bad "never scopes a shipping component" "$ARGV"
     else
         ok "never scopes a shipping component"

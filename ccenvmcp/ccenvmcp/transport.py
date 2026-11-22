@@ -1,7 +1,7 @@
 """Stdlib stdio JSON-RPC 2.0 transport + a FastMCP-compatible server.
 
 This is a drop-in replacement for the slice of the official ``mcp`` SDK that
-the ccenv tools-only servers (ccmemory, ccusage, ccteam) actually use. The SDK
+the ccenv tools-only servers (ccmemory, ccusage) actually use. The SDK
 requires Python >=3.10 (it pulls in pydantic v2 / anyio); this module is pure
 stdlib and runs on 3.9 — the system Python on Debian 11, RHEL/Alma/Rocky 9,
 Ubuntu 20.04, and Raspberry Pi OS.
@@ -14,6 +14,19 @@ tools-only server the protocol surface is tiny:
     tools/list                 -> {tools: [{name, description, inputSchema}]}
     tools/call                 -> {content: [...], isError}
     ping                       -> {}
+    notifications/cancelled    -> stops the call, if its tool is cancellable
+
+Each tools/call runs in its own task, so a tool that blocks for hours (a wait,
+a lock, a long command) does not stall pings or other calls. A sync tool still
+runs start to finish on the event loop with no await in it, so sync tools never
+overlap one another and need no thread safety; only async tools can interleave,
+and only at their own awaits.
+
+A tool that declares a parameter named ``ctx`` receives a ``Context`` and can
+send progress notifications; Claude Code aborts a call that is silent for
+1800 s, so a long wait reports progress well inside that. A tool registered
+with ``cancellable=True`` is stopped when the client cancels its call or closes
+stdin; every other tool runs to completion and its cancel notice is ignored.
 
 All diagnostics go to stderr — stdout is reserved for protocol frames.
 """
@@ -30,6 +43,34 @@ import sys
 log = logging.getLogger("ccenvmcp")
 
 PROTOCOL_VERSION = "2024-11-05"
+
+#: A tool parameter with this name is given a Context instead of an argument.
+CONTEXT_PARAM = "ctx"
+
+
+class Context:
+    """What a tool that declares ``ctx`` gets: progress reporting for its call."""
+
+    def __init__(self, server, token):
+        self.server = server
+        self.token = token
+
+    async def report_progress(self, progress, total=None, message=None):
+        """Send notifications/progress for this call. A client that sent no
+        progressToken gets nothing; this never raises, because a heartbeat must
+        never end the wait it exists to protect."""
+        if self.token is None:
+            return
+        params = {"progressToken": self.token, "progress": progress}
+        if total is not None:
+            params["total"] = total
+        if message:
+            params["message"] = message
+        try:
+            self.server._write({"jsonrpc": "2.0", "method": "notifications/progress",
+                                "params": params})
+        except Exception:
+            log.exception("progress notification failed")
 
 
 # --------------------------------------------------------------------------
@@ -111,7 +152,7 @@ def build_input_schema(func) -> dict:
     properties: dict = {}
     required: list = []
     for pname, p in sig.parameters.items():
-        if pname == "self":
+        if pname in ("self", CONTEXT_PARAM):
             continue
         if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             continue
@@ -144,14 +185,17 @@ def _normalize_content(result):
 
 
 class _Tool:
-    __slots__ = ("name", "description", "schema", "func", "is_async")
+    __slots__ = ("name", "description", "schema", "func", "is_async", "wants_ctx",
+                 "cancellable")
 
-    def __init__(self, name, description, schema, func, is_async):
+    def __init__(self, name, description, schema, func, is_async, cancellable=False):
         self.name = name
         self.description = description
         self.schema = schema
         self.func = func
         self.is_async = is_async
+        self.wants_ctx = CONTEXT_PARAM in inspect.signature(func).parameters
+        self.cancellable = cancellable
 
 
 class FastMCP:
@@ -174,8 +218,11 @@ class FastMCP:
                 version = "0.1.0"
         self.version = version
         self._tools: dict = {}
+        # request id -> (task, tool) for every tools/call still running
+        self.inflight: dict = {}
 
-    def tool(self, func=None, *, name=None, description=None, schema=None):
+    def tool(self, func=None, *, name=None, description=None, schema=None,
+             cancellable=False):
         def register(fn):
             tname = name or fn.__name__
             if description is not None:
@@ -184,7 +231,7 @@ class FastMCP:
                 tdesc = inspect.getdoc(fn) or ""
             tschema = schema if schema is not None else build_input_schema(fn)
             self._tools[tname] = _Tool(
-                tname, tdesc, tschema, fn, inspect.iscoroutinefunction(fn)
+                tname, tdesc, tschema, fn, inspect.iscoroutinefunction(fn), cancellable
             )
             return fn
 
@@ -247,6 +294,9 @@ class FastMCP:
                 {"content": [{"type": "text", "text": "unknown tool: %s" % name}],
                  "isError": True},
             )
+        if tool.wants_ctx:
+            token = (params.get("_meta") or {}).get("progressToken")
+            args = dict(args, **{CONTEXT_PARAM: Context(self, token)})
         try:
             if tool.is_async:
                 result = await tool.func(**args)
@@ -274,6 +324,42 @@ class FastMCP:
         await loop.connect_read_pipe(lambda: protocol, sys.stdin)
         return reader
 
+    async def answer(self, msg):
+        """Handle one message and write its reply, if it has one."""
+        try:
+            resp = await self._handle(msg)
+        except asyncio.CancelledError:
+            return  # a cancelled call gets no reply
+        except Exception:
+            log.exception("dispatch failed")
+            resp = self._error(msg.get("id"), -32603, "internal error")
+        if resp is not None:
+            self._write(resp)
+
+    def start_call(self, msg):
+        """Run a tools/call in its own task, so a long call blocks nothing else."""
+        mid = msg.get("id")
+        tool = self._tools.get((msg.get("params") or {}).get("name"))
+        task = asyncio.ensure_future(self.answer(msg))
+        self.inflight[mid] = (task, tool)
+        task.add_done_callback(lambda done, mid=mid: self.inflight.pop(mid, None))
+
+    def cancel_call(self, params):
+        """notifications/cancelled: stop the call only if its tool allows it."""
+        entry = self.inflight.get((params or {}).get("requestId"))
+        if entry and entry[1] is not None and entry[1].cancellable:
+            entry[0].cancel()
+
+    async def finish(self):
+        """stdin closed: the client is gone. Cancellable calls stop (so their
+        cleanup runs); the others finish, though nobody will read the reply."""
+        for task, tool in list(self.inflight.values()):
+            if tool is not None and tool.cancellable:
+                task.cancel()
+        pending = [task for task, _ in self.inflight.values()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
     async def run_stdio_async(self):
         reader = await self._stdin_reader()
         while True:
@@ -288,13 +374,14 @@ class FastMCP:
             except Exception:
                 log.warning("dropping non-JSON line on stdin")
                 continue
-            try:
-                resp = await self._handle(msg)
-            except Exception:
-                log.exception("dispatch failed")
-                resp = self._error(msg.get("id"), -32603, "internal error")
-            if resp is not None:
-                self._write(resp)
+            method = msg.get("method")
+            if method == "tools/call" and "id" in msg:
+                self.start_call(msg)
+            elif method == "notifications/cancelled":
+                self.cancel_call(msg.get("params"))
+            else:
+                await self.answer(msg)
+        await self.finish()
 
     def run(self, transport=None):
         asyncio.run(self.run_stdio_async())

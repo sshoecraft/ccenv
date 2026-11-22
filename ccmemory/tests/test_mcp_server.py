@@ -321,3 +321,21 @@ def test_memory_write_refuses_a_compiled_article_over_the_ceiling(memory_dir, mo
     # Raw notes are not articles; the ceiling is not theirs.
     call("memory_write", name="raw-note", type="feedback", description="d", body="x" * 500)
     assert (memory_dir / "raw-note.md").exists()
+
+
+def test_note_asks_for_no_compaction_where_it_is_disabled(memory_dir, monkeypatch):
+    monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
+    for i in range(5):
+        write_memory(memory_dir, f"note{i}")
+    monkeypatch.setenv("CCMEMORY_NO_COMPACTION", "1")
+    note = call_json("memory_list")["note"]
+    assert "Compaction backlog" not in note and "memory-compactor" not in note
+
+
+def test_overflow_asks_for_no_compaction_where_it_is_disabled(memory_dir, monkeypatch):
+    overflow_feedback(memory_dir, monkeypatch)
+    monkeypatch.setenv("CCMEMORY_NO_COMPACTION", "1")
+    payload = json.loads(call("memory_list"))
+    assert payload["load_bearing_withheld"] > 0
+    assert 'memory_list(type="feedback")' in payload["note"], "recovery still offered"
+    assert "memory-compactor" not in payload["note"]

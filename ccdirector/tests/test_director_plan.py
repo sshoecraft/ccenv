@@ -17,13 +17,14 @@ GOOD = {
     "source": "board",
     "gate": "ccproject_criteria.py --gate",
     "criteria": ["coherency", "resize"],
+    "resources": {"vm-a": {"capacity": 4, "what": "VM group a, four nodes"}},
     "items": [
         {"id": "lock-order", "what": "Fix the lock order in the DLM.", "serves": ["coherency"],
          "priority": 1, "section": "dlm", "depends_on": [], "paths": ["src/dlm/**"],
-         "resources": [], "check": "tests/criteria/cache_coherency.sh", "size": "M"},
+         "check": "tests/criteria/cache_coherency.sh", "size": "M"},
         {"id": "resize-grow", "what": "Grow the journal on resize.", "serves": ["resize"],
          "priority": 2, "section": "journal", "depends_on": ["lock-order"],
-         "paths": ["src/journal/*.c"], "resources": ["vm group a"],
+         "paths": ["src/journal/*.c"],
          "check": "tests/criteria/online_resize.sh", "check_timeout": 400, "size": "L"},
     ],
     "risks": [],
@@ -34,22 +35,59 @@ def test_good_plan_has_no_problems():
     assert plan.problems(GOOD) == []
 
 
-def test_check_is_required_and_bounded():
+def test_an_item_may_not_hold_a_resource():
+    """An item lasts as long as its goal; holding a resource that long made every
+    other item naming it wait. Workers acquire units per run instead."""
+    bad = copy.deepcopy(GOOD)
+    bad["items"][1]["resources"] = ["vm-a"]
+    found = plan.problems(bad)
+    assert any("items[1].resources" in p and "acquire" in p for p in found)
+    bad["items"][1]["resources"] = []
+    assert plan.problems(bad) == [], "an empty list holds nothing"
+
+
+def test_resource_registry_ids_and_capacities_are_checked():
+    bad = copy.deepcopy(GOOD)
+    bad["resources"] = {"VM Pool": {"capacity": 0}, "rig": "one at a time"}
+    found = plan.problems(bad)
+    assert any("resources['VM Pool']: an id" in p for p in found)
+    assert any("resources['VM Pool'].capacity" in p for p in found)
+    assert any("resources['VM Pool'].what" in p for p in found)
+    assert any("resources['rig'] must be an object" in p for p in found)
+
+
+def test_the_registry_is_rendered():
+    text = plan.render(GOOD)
+    assert "## Shared resources" in text and "| `vm-a` | 4 | VM group a, four nodes |" in text
+
+
+def test_check_is_required_and_its_limit_is_optional():
     bad = copy.deepcopy(GOOD)
     del bad["items"][0]["check"]
-    bad["items"][1]["check_timeout"] = plan.MAX_CHECK_SECONDS + 1
+    bad["items"][1]["check_timeout"] = -1
     found = plan.problems(bad)
     assert any("items[0].check" in p for p in found)
     assert any("check_timeout" in p for p in found)
+    long = copy.deepcopy(GOOD)
+    long["items"][1]["check_timeout"] = 6 * 3600
+    long["items"][0]["check_timeout"] = 0
+    assert plan.problems(long) == [], "a goal's check may take as long as it needs"
+    long["items"][0]["check_timeout"] = "1h"
+    assert any("check_timeout" in p for p in plan.problems(long))
+    text = plan.render(GOOD)
+    assert "(no time limit)" in text and "(within 400 s)" in text
 
 
-def test_interface_and_section_types():
+def test_interface_items_are_refused_and_section_types_checked():
     bad = copy.deepcopy(GOOD)
-    bad["items"][0]["interface"] = "yes"
+    bad["items"][0]["interface"] = True
     bad["items"][1]["section"] = ""
     found = plan.problems(bad)
-    assert any("interface" in p for p in found)
+    assert any("items[0].interface" in p and "depends_on" in p for p in found)
     assert any("section" in p for p in found)
+    bad["items"][0]["interface"] = False
+    bad["items"][1]["section"] = "journal"
+    assert plan.problems(bad) == [], "interface: false asks for nothing"
 
 
 def test_unknown_dependency():
@@ -106,6 +144,13 @@ def test_submit_accepts_and_refuses(tmp_path):
     (folder / "goal.json").write_text(json.dumps({"workers": 2}))
     done = submit(tmp_path, json.dumps(GOOD))
     assert done.returncode == 0 and done.stdout.startswith("ACCEPTED")
+    assert "PARALLEL: items that can be worked now 1, workers 2; 1 of the workers have " \
+           "nothing to take" in done.stdout, "resize-grow waits for lock-order"
+    wide = copy.deepcopy(GOOD)
+    wide["items"][1]["depends_on"] = []
+    done = submit(tmp_path, json.dumps(wide))
+    assert "PARALLEL: items that can be worked now 2, workers 2\n" in done.stdout + "\n"
+    done = submit(tmp_path, json.dumps(GOOD))
     bad = copy.deepcopy(GOOD)
     bad["items"] = []
     done = submit(tmp_path, json.dumps(bad))
@@ -221,7 +266,7 @@ class StartRecord:
 
         record = self
 
-        class Supervisor:
+        class Pool:
             def __init__(self, root, options):
                 pass
 
@@ -234,8 +279,7 @@ class StartRecord:
         monkeypatch.setattr(cli, "planning", planning)
         monkeypatch.setattr(cli, "steering", steering)
         monkeypatch.setattr(cli.goalfinder, "find", find)
-        monkeypatch.setattr(cli.workers, "Supervisor", Supervisor)
-        monkeypatch.setattr(cli.conflicts, "ccteam", lambda root: [])
+        monkeypatch.setattr(cli.workers, "Pool", Pool)
 
 
 def start(root, *flags):
@@ -356,3 +400,14 @@ def test_plan_done_refuses_a_stored_plan_that_no_longer_validates(tmp_path):
     done = plan_done(tmp_path, "r1")
     assert done.returncode == 1 and "problem" in done.stdout
     assert not (tmp_path / ".ccloop" / "runs" / "r1" / "criteria-met").exists()
+
+
+def test_state_from_before_0_12_moves_to_ccdirector(tmp_path):
+    old = tmp_path / ".ccteam" / "director"
+    old.mkdir(parents=True)
+    (old / "goal.json").write_text("{}")
+    done = subprocess.run([sys.executable, "-m", "ccdirector.cli", "status", str(tmp_path)],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert (tmp_path / ".ccdirector" / "goal.json").is_file() and not old.exists()
+    assert "moved" in done.stderr

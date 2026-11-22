@@ -350,3 +350,31 @@ def test_the_prompt_makes_the_director_show_the_block():
 
 def test_the_prompt_says_what_stuck_means():
     assert "must differ in kind" in session.PROMPT_FILE.read_text()
+
+
+def test_the_prompt_allows_no_judgement_based_stop():
+    text = " ".join(session.PROMPT_FILE.read_text().split())
+    assert "no replan can fix it" not in text
+    assert "a decision only the user can make" not in text
+    assert "goal-stuck --probe CMD REASON" in text
+    for not_a_reason in ("An advisor saying to stop", "Data the project has never had",
+                         "A call that seems to belong to the user"):
+        assert not_a_reason in text
+
+
+def test_progress_says_when_workers_sit_idle_for_want_of_ready_items(tmp_path):
+    from ccdirector import plan as planmod, progress, work
+    current = {"goal": "g", "source": "directive", "gate": "", "criteria": ["c"],
+               "items": [{"id": i, "what": i, "serves": ["c"], "priority": 1, "paths": [],
+                          "check": "true", "size": "S"} for i in ("a", "b")], "risks": []}
+    planmod.write(tmp_path, current)
+    work.sync(tmp_path, current)
+    (planmod.folder(tmp_path) / "goal.json").write_text(json.dumps({"workers": 4}))
+    state = work.load(tmp_path)
+    assert progress.idle_workers(tmp_path, state, current, work.counts(state, current)) == 0, \
+        "items are ready"
+    work.next_item(tmp_path, "w1")
+    work.park(tmp_path, "w1", "a", "needs a decision")
+    work.next_item(tmp_path, "w2")
+    state = work.load(tmp_path)
+    assert progress.idle_workers(tmp_path, state, current, work.counts(state, current)) == 3

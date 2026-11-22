@@ -2,8 +2,8 @@
 
 A tiny, **stdlib-only**, Python **3.9+** MCP server shim. It reproduces the
 exact slice of the official `mcp` PyPI SDK that the ccenv tools-only servers
-(`ccmemory`, `ccusage`, `ccteam`) consume — without the SDK's `requires-python
->= 3.10` floor.
+(`ccmemory`, `ccusage`) consume — without the SDK's `requires-python >= 3.10`
+floor.
 
 ## Why this exists
 
@@ -16,10 +16,9 @@ swath of current stable servers:
 - Ubuntu 20.04 (3.9)
 
 `ccenv` is meant to drop onto any of those without installing a second
-interpreter (pyenv/conda/uv). The only thing forcing 3.10 across the three MCP
-servers was the SDK itself — `nats-py` needs only `>=3.7`, `watchfiles>=0.21`
-resolves to a 3.9-compatible build, and all packages already use
-`from __future__ import annotations` so PEP 604 unions are never evaluated. So
+interpreter (pyenv/conda/uv). The only thing forcing 3.10 on the MCP servers
+was the SDK itself — every package already uses
+`from __future__ import annotations`, so PEP 604 unions are never evaluated. So
 we replaced the SDK with this shim and lowered every server to `>=3.9`.
 
 ## Public API (FastMCP-compatible)
@@ -88,9 +87,43 @@ go to **stderr** only; stdout carries protocol frames exclusively.
 | `initialize`                | echo client `protocolVersion` (fallback `2024-11-05`); reply `{capabilities:{tools:{}}, serverInfo:{name,version}, instructions?}` |
 | `notifications/initialized` | notification — no reply |
 | `tools/list`                | `{tools: [{name, description, inputSchema}]}` |
-| `tools/call`                | dispatch (await if coroutine); reply `{content:[...], isError}` |
+| `tools/call`                | dispatch in its own task (await if coroutine); reply `{content:[...], isError}` |
+| `notifications/cancelled`   | cancel the call named by `requestId`, only if its tool is `cancellable` |
 | `ping`                      | `{}` |
 | unknown (request)           | JSON-RPC error `-32601` |
+
+## Long calls: concurrency, progress, cancellation
+
+A tool may block for hours — a lock, a queue, a long command — and Claude Code
+holds the calling session suspended for as long as it does. Three things make
+that work:
+
+- **Each `tools/call` runs in its own task**, so a blocked call never stalls
+  `ping` or other calls. A **sync** tool still runs start to finish on the event
+  loop with no await in it, so sync tools never overlap each other and need no
+  thread safety (ccmemory's SQLite access is unchanged). Only async tools can
+  interleave, at their own awaits. Replies can come out of order; JSON-RPC
+  matches them by id.
+- **Progress:** a tool that declares a parameter named `ctx` gets a `Context`;
+  `await ctx.report_progress(progress, total=None, message=None)` sends
+  `notifications/progress` when the client sent a `progressToken`, and never
+  raises. `ctx` is left out of the tool's schema. Claude Code aborts a call that
+  is silent for 1800 s, so a long wait reports progress well inside that.
+- **Cancellation is opt-in:** `@app.tool(cancellable=True)`. Such a tool is
+  cancelled (its `finally` blocks run) when the client sends
+  `notifications/cancelled` for it or closes stdin, and its call gets no reply.
+  Every other tool runs to completion; its cancel notice is ignored, as before.
+
+```python
+@app.tool(cancellable=True)
+async def wait_for(thing: str, ctx) -> dict:
+    while not ready(thing):
+        await asyncio.sleep(2)
+        await ctx.report_progress(elapsed())
+    return {"ready": thing}
+```
+
+Tools that use none of this behave exactly as they did.
 
 Return-value normalization for `tools/call`:
 
@@ -103,7 +136,11 @@ Return-value normalization for `tools/call`:
 
 - `ccmemory` — low-level style, 5 tools with explicit `schema=`/`description=`.
 - `ccusage` — 2 sync tools, `app.run()`.
-- `ccteam` — 9 async tools, `instructions=`, `await app.run_stdio_async()`.
+- `ccdirector mcp` — the worker's server: blocking, cancellable tools with
+  progress (`item_next`, `item_done`, `acquire`, `run`) and two sync ones.
+
+Packages outside ccenv may import the shim too; `uninstall.sh` keeps it while
+any installed `--user` package imports it.
 
 ## Distribution
 

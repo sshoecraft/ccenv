@@ -134,7 +134,8 @@ def _list_note(memory_dir, counts: dict, *, include_folded: bool,
         # threshold paces routine compaction, and a withheld correction is not
         # routine. The cooldown still applies — a compile pass that just ran
         # may still have agents in flight on these notes.
-        overflow = bool(lb and (behavior or merge)) and not compile_mod.in_cooldown(b)
+        overflow = (bool(lb and (behavior or merge)) and not compile_mod.in_cooldown(b)
+                    and not compile_mod.compaction_disabled())
         if overflow or not compile_mod.nudge_suppressed(b):
             merging = (f", and {merge} first-tier articles are due to merge into "
                        "their topic-mates") if merge else ""

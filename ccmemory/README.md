@@ -52,6 +52,10 @@ project-local `.ccmemory/` directory.
 Escape hatches:
 - `CCMEMORY_NO_AUTOINSTALL=1` — skip hook autoinstall
 - `CCMEMORY_NO_AUTOMIGRATE=1` — skip auto-migration
+- `CCMEMORY_NO_COMPACTION=1` — never ask this session to dispatch compaction
+  (neither the SessionStart nudge nor the `memory_list` note); for sessions whose
+  quota belongs to other work, such as ccdirector's workers. Other sessions still
+  compact the store.
 
 ## Memory location: it travels with the repo
 

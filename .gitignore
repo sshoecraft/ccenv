@@ -35,10 +35,6 @@ htmlcov/
 # ccloop runtime state (per-run state under a project)
 .ccloop/runs/
 
-# ccteam runtime state (sockets, pid files)
-.ccteam/sockets/
-.ccteam/runtime/
-
 # ccmemory local index
 .memory_index.db
 

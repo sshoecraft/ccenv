@@ -163,3 +163,193 @@ def test_unknown_method_errors():
     app = FastMCP("t")
     r = _run(app._handle({"jsonrpc": "2.0", "id": 7, "method": "bogus/method"}))
     assert r["error"]["code"] == -32601
+
+
+# --- concurrent dispatch, progress, cancellation ---------------------------
+
+def capture(app):
+    """Replace the app's stdout writer with a list."""
+    out = []
+    app._write = out.append
+    return out
+
+
+def call(mid, name, args=None, token=None):
+    params = {"name": name, "arguments": args or {}}
+    if token is not None:
+        params["_meta"] = {"progressToken": token}
+    return {"jsonrpc": "2.0", "id": mid, "method": "tools/call", "params": params}
+
+
+def test_ctx_is_not_in_the_schema_and_reports_progress_only_with_a_token():
+    app = FastMCP("t")
+
+    @app.tool()
+    async def wait(seconds: int, ctx) -> str:
+        await ctx.report_progress(1, total=2, message="half")
+        return "done"
+
+    tool = _run(app._handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+    schema = tool["result"]["tools"][0]["inputSchema"]
+    assert "ctx" not in schema["properties"] and schema["required"] == ["seconds"]
+    out = capture(app)
+    _run(app._handle(call(2, "wait", {"seconds": 1}, token="tok")))
+    assert out == [{"jsonrpc": "2.0", "method": "notifications/progress",
+                    "params": {"progressToken": "tok", "progress": 1, "total": 2,
+                               "message": "half"}}]
+    out.clear()
+    _run(app._handle(call(3, "wait", {"seconds": 1})))
+    assert out == [], "no token, no notification"
+
+
+def test_a_tool_without_ctx_sends_no_progress():
+    app = FastMCP("t")
+
+    @app.tool()
+    def plain() -> str:
+        return "x"
+
+    out = capture(app)
+    _run(app.answer(call(1, "plain", token="tok")))
+    assert [m.get("method") for m in out] == [None], "only the reply"
+
+
+def test_a_long_call_does_not_block_other_calls():
+    app = FastMCP("t")
+    gate = asyncio.Event()
+
+    @app.tool()
+    async def slow() -> str:
+        await gate.wait()
+        return "slow"
+
+    @app.tool()
+    def quick() -> str:
+        return "quick"
+
+    async def scenario():
+        out = capture(app)
+        app.start_call(call(1, "slow"))
+        app.start_call(call(2, "quick"))
+        await asyncio.sleep(0.05)
+        assert [m["id"] for m in out] == [2], "quick answered while slow waits"
+        gate.set()
+        await asyncio.sleep(0.05)
+        assert [m["id"] for m in out] == [2, 1]
+        assert not app.inflight
+
+    _run(scenario())
+
+
+def test_sync_tools_run_one_at_a_time_in_order():
+    app = FastMCP("t")
+    trace = []
+
+    @app.tool()
+    def step(n: int) -> int:
+        trace.append(("in", n))
+        trace.append(("out", n))
+        return n
+
+    async def scenario():
+        out = capture(app)
+        for n in range(5):
+            app.start_call(call(n, "step", {"n": n}))
+        await asyncio.sleep(0.05)
+        assert [m["id"] for m in out] == list(range(5))
+
+    _run(scenario())
+    assert trace == [(kind, n) for n in range(5) for kind in ("in", "out")]
+
+
+def test_cancel_stops_only_cancellable_tools():
+    app = FastMCP("t")
+    cleaned = []
+
+    @app.tool(cancellable=True)
+    async def queue() -> str:
+        try:
+            await asyncio.sleep(30)
+        finally:
+            cleaned.append("queue")
+        return "never"
+
+    @app.tool()
+    async def stubborn() -> str:
+        await asyncio.sleep(0.1)
+        return "finished"
+
+    async def scenario():
+        out = capture(app)
+        app.start_call(call(1, "queue"))
+        app.start_call(call(2, "stubborn"))
+        await asyncio.sleep(0.02)
+        app.cancel_call({"requestId": 1})
+        app.cancel_call({"requestId": 2})
+        await asyncio.sleep(0.3)
+        assert cleaned == ["queue"]
+        assert [m["id"] for m in out] == [2], "a cancelled call gets no reply"
+
+    _run(scenario())
+
+
+def test_closing_stdin_cancels_cancellable_calls():
+    app = FastMCP("t")
+    cleaned = []
+
+    @app.tool(cancellable=True)
+    async def queue() -> str:
+        try:
+            await asyncio.sleep(30)
+        finally:
+            cleaned.append("queue")
+
+    async def scenario():
+        capture(app)
+        app.start_call(call(1, "queue"))
+        await asyncio.sleep(0.02)
+        await asyncio.wait_for(app.finish(), 5)
+
+    _run(scenario())
+    assert cleaned == ["queue"]
+
+
+SERVER = r'''
+import asyncio
+from ccenvmcp import FastMCP
+app = FastMCP("pipe")
+
+@app.tool()
+async def nap(seconds: float, ctx) -> str:
+    await ctx.report_progress(0)
+    await asyncio.sleep(seconds)
+    return "rested"
+
+app.run()
+'''
+
+
+def test_over_a_real_pipe_ping_is_answered_during_a_long_call():
+    import json, os, subprocess, sys, time
+    from pathlib import Path
+    src = str(Path(__file__).resolve().parents[1])
+    env = dict(os.environ, PYTHONPATH=src)
+    proc = subprocess.Popen([sys.executable, "-c", SERVER], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, text=True, env=env)
+    try:
+        def send(obj):
+            proc.stdin.write(json.dumps(obj) + "\n")
+            proc.stdin.flush()
+
+        send(call(1, "nap", {"seconds": 1.5}, token="t1"))
+        send({"jsonrpc": "2.0", "id": 2, "method": "ping"})
+        started = time.time()
+        seen = [json.loads(proc.stdout.readline()) for _ in range(2)]
+        assert time.time() - started < 1.0, "progress and ping came before the nap ended"
+        assert {"jsonrpc": "2.0", "id": 2, "result": {}} in seen
+        assert any(m.get("method") == "notifications/progress" for m in seen)
+        last = json.loads(proc.stdout.readline())
+        assert last["id"] == 1 and "rested" in last["result"]["content"][0]["text"]
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=10)

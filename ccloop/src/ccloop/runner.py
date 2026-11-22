@@ -1273,6 +1273,59 @@ def _status_of(run_dir):
     return "active"
 
 
+def _task_line(run_dir):
+    """First non-blank line of the run's task.md, cut to 80 characters."""
+    tf = Path(run_dir) / "task.md"
+    if tf.is_file():
+        for line in tf.read_text(encoding="utf-8", errors="replace").split("\n"):
+            if line.strip():
+                return line[:80]
+    return "(no task.md)"
+
+
+def _last_activity(run_dir):
+    """Newest mtime among the run directory and the files ccloop rewrites
+    each session. The directory's own mtime changes only when entries are
+    added or removed, so a run that is still rewriting resume.md would look
+    stale by it alone."""
+    run_dir = Path(run_dir)
+    times = []
+    for p in (run_dir, run_dir / "resume.md", run_dir / "sessions.log"):
+        try:
+            times.append(p.stat().st_mtime)
+        except OSError:
+            pass
+    return max(times) if times else 0.0
+
+
+def find_resumable_run():
+    """The run-id to resume when ``--resume-run`` is given no id.
+
+    Only runs that have not converged (status ``active``) are candidates.
+    With exactly one, that one is returned. With none, or with more than
+    one, a CcloopError says so; for several, it lists them newest first so
+    the user can pick one by id, because choosing between live runs is not
+    something ccloop can know the answer to.
+    """
+    rd = runs_dir()
+    if not rd.is_dir():
+        raise CcloopError(f"no runs in {rd}")
+    active = [d for d in rd.iterdir()
+              if d.is_dir() and _status_of(d) == "active"]
+    if not active:
+        raise CcloopError(f"no unconverged runs in {rd}")
+    if len(active) > 1:
+        active.sort(key=_last_activity, reverse=True)
+        lines = [f"{len(active)} unconverged runs in {rd}; "
+                 "name one with --resume-run <run-id> (newest first):"]
+        for d in active:
+            stamp = time.strftime("%Y-%m-%d %H:%M",
+                                  time.localtime(_last_activity(d)))
+            lines.append(f"  {d.name}  {stamp}  {_task_line(d)}")
+        raise CcloopError("\n".join(lines))
+    return active[0].name
+
+
 def cmd_list():
     rd = runs_dir()
     if not rd.is_dir():
@@ -1285,14 +1338,7 @@ def cmd_list():
         slog = d / "sessions.log"
         sessions = slog.read_text(encoding="utf-8").count("\n") if slog.exists() else 0
         status = _status_of(d)
-        task = "(no task.md)"
-        tf = d / "task.md"
-        if tf.is_file():
-            for line in tf.read_text(encoding="utf-8", errors="replace").split("\n"):
-                if line.strip():
-                    task = line[:80]
-                    break
-        print(f"{d.name:<36}  {sessions:<8}  {status:<9}  {task}")
+        print(f"{d.name:<36}  {sessions:<8}  {status:<9}  {_task_line(d)}")
     return 0
 
 

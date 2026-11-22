@@ -100,9 +100,14 @@ Parses args and dispatches. The `guard` no-op path (the common case when
 the hook fires outside a ccloop run) returns **before importing any heavy
 modules**, keeping per-tool-call overhead to bare interpreter startup.
 
-Surface: bare task (run), `--resume-run <id>`, `--list`, `--prune
+Surface: bare task (run), `--resume-run [<id>]`, `--list`, `--prune
 [--force]`, `install [--uninstall]`, `guard`, `--no-hook`, `--help`,
 `--version`.
+
+`--resume-run` with no id resumes the project's only unconverged run. With
+none it errors, and with several it errors and lists them newest first.
+It never picks one of several: two live runs in one project usually means
+one was abandoned, and only the user knows which one.
 
 ### `runner.py` — the relay loop
 

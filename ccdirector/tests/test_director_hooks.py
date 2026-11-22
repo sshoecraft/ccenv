@@ -128,6 +128,13 @@ def transcript_line(kind, status="completed"):
     note = f"<task-notification>\n<task-id>kdgl3difr</task-id>\n<status>{status}</status>"
     if kind == "queued":
         return json.dumps({"type": "queue-operation", "operation": "enqueue", "content": note})
+    if kind == "attachment":
+        # Claude Code 2.1.322's delivery record, trimmed from a director transcript.
+        return json.dumps({"type": "attachment", "attachment": {
+            "type": "queued_command", "prompt": note, "commandMode": "task-notification",
+            "origin": {"kind": "task-notification", "producer": "session-task"}},
+            "rendered": [{"content": f"<system-reminder>\n{note}\n</system-reminder>"}],
+            "renderedRole": "system"})
     return json.dumps({"type": "user", "message": {"role": "user", "content": note}})
 
 
@@ -162,6 +169,14 @@ def test_a_delivered_answer_counts_and_clears_the_wait(tmp_path):
     assert progress.consult_waiting(tmp_path) == []
     assert progress.load(tmp_path)["consults"] == 1
     assert [e["advisor"] for e in work.events(tmp_path) if e["kind"] == "consulted"] == ["astra"]
+
+
+def test_an_answer_delivered_as_an_attachment_counts_and_clears_the_wait(tmp_path):
+    accepted(tmp_path, PLAN)
+    log = background(tmp_path)
+    log.write_text(transcript_line("queued") + "\n" + transcript_line("attachment") + "\n")
+    assert progress.consult_waiting(tmp_path) == []
+    assert progress.load(tmp_path)["consults"] == 1
 
 
 def test_a_failed_consult_clears_the_wait_without_counting(tmp_path):

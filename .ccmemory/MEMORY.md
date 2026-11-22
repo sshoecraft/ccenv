@@ -12,10 +12,15 @@
 - [compiled-ccenv-misc-feedback-hooks-installer-tokens](compiled-ccenv-misc-feedback-hooks-installer-tokens.md) — Assorted ccenv feedback: hook enforcement design, ccloop cutoff, installer settings seeding, handoff docs, scripts in repo, destructive-script tests,…
 - [compiled-ccenv-operating-lessons-assorted](compiled-ccenv-operating-lessons-assorted.md) — Assorted ccenv lessons: hook gates, ccloop cutoff, installer seeds settings, no handoff docs, scripts not in /tmp, destructive-script testing, one-li…
 - [compiled-verification-and-restraint-feedback](compiled-verification-and-restraint-feedback.md) — Assorted user corrections: verify our own prose, doc placement, hook gates, installer restraint, no handoff docs, scripts not in /tmp, fixture-only t…
+- [feedback-ccdirector-machinery-self-heals-transient-failures](feedback-ccdirector-machinery-self-heals-transient-failures.md) — ccdirector's own machinery (worker launches, retries) must never latch off on a failure count; API/network outages are expected and must self-recover.
 - [feedback-ccdirector-never-asks-reuses-plan](feedback-ccdirector-never-asks-reuses-plan.md) — ccdirector must never prompt the user or wait on a decision, and reuses the plan on file unless explicitly told to replan.
-- [feedback-ccdirector-never-gives-up-by-default](feedback-ccdirector-never-gives-up-by-default.md) — ccdirector keeps replanning on hard problems with no default limit, but stops and says exactly what is missing when truly blocked.
+- [feedback-ccdirector-never-gives-up-by-default](feedback-ccdirector-never-gives-up-by-default.md) — ccdirector keeps going until the gate passes; it stops early only when a dependency is down, proven by a failing probe — never on judgement.
+- [feedback-ccdirector-workers-own-a-unit-until-solved](feedback-ccdirector-workers-own-a-unit-until-solved.md) — ccdirector's purpose: turn any goal into a plan, split it into independent tasks, and have each worker own one task start to finish until done; never…
+- [feedback-ccenv-never-removes-a-package-that-left-it](feedback-ccenv-never-removes-a-package-that-left-it.md) — ccenv's installer/uninstaller must never retire or remove a package that left ccenv to become its own project; find shim dependents by import, not by…
 - [feedback-changelog-names-no-other-project](feedback-changelog-names-no-other-project.md) — ccenv's CHANGELOG must not mention mxfs or any other consuming project; describe the ccenv change in ccenv's own terms.
 - [feedback-do-not-repeat-install-reminders](feedback-do-not-repeat-install-reminders.md) — Do not keep telling the user a ccenv change still needs installing; say it at most once when the work is handed over.
+- [feedback-mxfs-tests-run-from-pools-not-a-serial-rig](feedback-mxfs-tests-run-from-pools-not-a-serial-rig.md) — Never call mxfs's rig serial: it allocates VMs and LUNs from pools by script, so laps run in parallel; read the allocator before asserting limits.
+- [feedback-never-cap-advisor-tokens](feedback-never-cap-advisor-tokens.md) — Never pass a small max_tokens to ask_astra/ask_gpt/ask_fable; a capped call burns its budget on reasoning and returns nothing, paid for twice.
 - [feedback-stay-inside-this-repo](feedback-stay-inside-this-repo.md) — A ccenv session never edits, runs, tests or offers to touch another project's repo (mxfs etc.); report what that project should do and stop.
 
 ## project
@@ -43,4 +48,4 @@
 - [compiled-python-userbase-install-pitfalls](compiled-python-userbase-install-pitfalls.md) — ccenv Python --user install traps: PYTHONUSERBASE/zshenv, ABI strandings, stdlib MCP shim, old setuptools crash, AppleDouble sidecars breaking wheels
 - [compiled-sqlite-nfs-bm25-and-ccprospect-pilot](compiled-sqlite-nfs-bm25-and-ccprospect-pilot.md) — SQLite traps (WAL on NFS /src, FTS5 bm25 IDF=0 on small fixtures) plus the ccprospect aitrader first live cycle results.
 - [compiled-sqlite-nfs-bm25-and-prospect-pilot](compiled-sqlite-nfs-bm25-and-prospect-pilot.md) — SQLite traps (WAL on NFS /src, FTS5 bm25 IDF zero on small corpora) plus the first live ccprospect aitrader pilot cycle results.
-- [compiled-src-tree-appledouble-sidecars](compiled-src-tree-appledouble-sidecars.md) — /src sits on an xattr-less FS that spawns macOS ._* AppleDouble sidecars, corrupting pip wheels; build from a clean /tmp stage.
+# [TRUNCATED — file_cap exceeded; tighten desc_cap or prune memories]

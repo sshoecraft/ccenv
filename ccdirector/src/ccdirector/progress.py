@@ -166,6 +166,20 @@ def record_backgrounded(root: Path, advisor: str, by: str, task: str, transcript
         work.event(root, "consult_backgrounded", advisor=advisor, by=by, task=task)
 
 
+def delivered_text(record: dict):
+    """The notification text of a transcript record that delivered it to the session,
+    else None. Claude Code has logged delivery two ways: as a `user` message, and
+    (2.1.3xx) as an `attachment` whose `commandMode` is `task-notification`. The
+    `queue-operation` records carry the same text but only mean it was queued."""
+    if record.get("type") == "user":
+        return (record.get("message") or {}).get("content")
+    attachment = record.get("attachment")
+    if record.get("type") == "attachment" and isinstance(attachment, dict) and \
+            attachment.get("commandMode") == "task-notification":
+        return attachment.get("prompt")
+    return None
+
+
 def task_status(entry: dict) -> str | None:
     """The task's final status once its answer has reached the session. Claude Code
     logs a queued notification first and the delivered one later; only delivery counts,
@@ -177,12 +191,13 @@ def task_status(entry: dict) -> str | None:
                 if tag not in line:
                     continue
                 try:
-                    message = json.loads(line)
+                    record = json.loads(line)
                 except ValueError:
                     continue
-                if message.get("type") != "user":
+                text = delivered_text(record)
+                if text is None:
                     continue
-                found = TASK_STATUS.search(json.dumps(message.get("message", {}).get("content")))
+                found = TASK_STATUS.search(text if isinstance(text, str) else json.dumps(text))
                 if found:
                     return found.group(1)
     except OSError:
@@ -276,6 +291,48 @@ def criteria_text(record: dict) -> str:
     return f"{text}, no gain for {elapsed(gained)}"
 
 
+def clock(stamp: str) -> str:
+    """HH:MMZ of an ISO time in UTC."""
+    return stamp[11:16] + "Z" if len(stamp) >= 16 else stamp
+
+
+def pool_lines(state: dict) -> list[str]:
+    """Workers starting or backing off, how often they were relaunched, and an outage."""
+    slots = state.get("workers", {})
+    starting = sorted(n for n, w in slots.items() if w.get("state") == "starting")
+    waiting = sorted((w.get("retry_at") or "", n) for n, w in slots.items()
+                     if w.get("state") == "backoff")
+    restarts = sum(w.get("restarts") or 0 for w in slots.values())
+    parts = []
+    if starting:
+        parts.append("starting " + ", ".join(starting))
+    if waiting:
+        parts.append("backing off " + ", ".join(f"{n} until {clock(t)}" for t, n in waiting))
+    if restarts:
+        parts.append(f"relaunched {restarts}x")
+    lines = ["  pool: " + "; ".join(parts)] if parts else []
+    pool = state.get("pool", {})
+    if pool.get("outage"):
+        lines.append(f"WORKERS PAUSED: {pool.get('failures')} workers in a row died within a "
+                     "minute of starting, so the cause is probably shared (API, network, "
+                     f"credential). ccdirector tries one again at {clock(pool.get('retry_at') or '')} "
+                     "and brings every worker back once one stays up. This needs nothing from "
+                     "you unless the worker logs show a problem with the plan.")
+    return lines
+
+
+def idle_workers(root: Path, state: dict, current: dict | None, tally: dict) -> int:
+    """Workers the run allows minus items in progress, when nothing is ready to hand
+    out and the plan is not finished: the director, not the work, is the limit."""
+    if current is None or work.all_done(state, current) or work.ready(state, current):
+        return 0
+    try:
+        allowed = int(json.loads((planmod.folder(root) / "goal.json").read_text())["workers"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+    return max(0, allowed - tally[work.CLAIMED])
+
+
 def report(root: Path) -> str:
     record = update(root)
     current = planmod.load(root)
@@ -287,7 +344,7 @@ def report(root: Path) -> str:
     rounds = record.get("rounds_since_gain", record.get("refusals_since_gain", 0))
     lines = ["PROGRESS " + " | ".join([
         f"items {tally[work.DONE]}/{sum(tally.values())} done, {tally[work.CLAIMED]} running, "
-        f"{tally[work.PARKED]} parked",
+        f"{tally[work.PARKED]} parked, {tally[work.WAITING]} waiting on other items",
         criteria_text(record),
         f"gate refused {record.get('refusals', 0)}x",
         f"plan extended {extensions(root)}x",
@@ -298,6 +355,15 @@ def report(root: Path) -> str:
     held = sorted((entry["worker"], item_id) for item_id, entry in state["items"].items()
                   if entry["status"] == work.CLAIMED and entry.get("worker"))
     lines += [f"  {worker} on {item_id}: {worker_line(root, worker)}" for worker, item_id in held]
+    lines += pool_lines(state)
+    lines += ["  resource " + line for line in work.resource_lines(state, current)]
+    idle = idle_workers(root, state, current, tally)
+    if idle:
+        lines.append(f"WORKERS IDLE: {idle} of the workers have nothing ready to take. Answer "
+                     "parked items and split or add work now, in one plan submission, until "
+                     "every worker has an independent goal; waiting workers cost nothing but "
+                     "do nothing. Leave waiting items alone: each returns to its worker by "
+                     "itself.")
     if stale >= WARN_AFTER_REFUSALS:
         lines.append(f"LIKELY LOOPING: the gate has refused {stale} times with no new "
                      "criterion green; finishing more items is not moving it.")

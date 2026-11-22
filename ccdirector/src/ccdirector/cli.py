@@ -1,16 +1,18 @@
 """ccdirector — a project-manager Claude session and the workers it directs.
 
-    ccdirector [--cutoff N] start [PROJECT] [--goal TEXT|FILE] [--workers N]
-               [--cutoff N] [--effort L] [--model M]
-               [--worker-cutoff N] [--worker-effort L] [--worker-model M] [--plan-only]
+    ccdirector [--cutoff N] [--effort L] [--model M] start [PROJECT] [--goal TEXT|FILE]
+               [--workers N] [--cutoff N] [--effort L] [--model M]
+               [--worker-cutoff N] [--worker-effort L] [--worker-model M]
+               [--worker-stall MIN] [--plan-only]
         Resolve the goal (the --goal directive, or the goal-finder); run the
         director's planning session until it has an accepted work plan; then run
         up to --workers worker sessions on the plan while the director steers,
         until the project's gate passes or the director reports it is stuck.
-        --cutoff/--effort/--model are the director's; --worker-* the workers'.
-        Cutoffs are ccloop's, in thousands of tokens (0 = relay only when the
-        context window fills). --plan-only stops after the plan.
-    ccdirector goal [PROJECT]
+        --cutoff/--effort/--model are the director's, given before or after
+        `start` (after wins); --worker-* the workers'. Cutoffs are ccloop's, in
+        thousands of tokens (0 = relay only when the context window fills).
+        --plan-only stops after the plan.
+    ccdirector [--model M] goal [PROJECT] [--model M]
         Run the goal-finder alone and print what it found.
     ccdirector check [PROJECT] [--build B]
         The done-check: the project's own gate. Exit 0 done, 1 not done,
@@ -23,13 +25,20 @@
                                               end the planning run
     ccdirector wait [--timeout S]             block until something happens
     ccdirector goal-done                      end the steering run if the gate passes
-    ccdirector goal-stuck REASON              end it when nothing can progress
+    ccdirector goal-stuck --probe CMD REASON  end it when a dependency is down (CMD fails)
 
   Used by worker sessions:
     ccdirector item next [--wait]             the worker's next item, WAIT or NONE
-    ccdirector item done ID                   run the item's check
-    ccdirector item park ID --reason TEXT     give an item back to the director
+    ccdirector item done ID                   run the item's check (the `item_done`
+                                              tool runs it with no time limit)
+    ccdirector item park ID --reason TEXT     give an item back to the director: its
+                                              goal is wrong or cannot be done
+               [--after ITEM | --until CMD]   or wait until ITEM is done or CMD
+               [--hours H]                    succeeds, then return to pending
     ccdirector hook pre|post                  the per-file edit lock (Claude Code hooks)
+    ccdirector mcp                            the worker's MCP server: item_next,
+                                              item_done, acquire, release, run, resources
+                                              (the waits block at no cost)
 """
 from __future__ import annotations
 
@@ -37,12 +46,14 @@ import argparse
 import datetime
 import json
 import os
+import re
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
 
-from . import (ccproject, conflicts, editlock, goalfinder, hooks, plan, progress, session, work,
+from . import (ccproject, editlock, goalfinder, hooks, plan, progress, session, work,
                workers)
 
 #: How many times ccdirector reopens a director run that ended without doing
@@ -51,6 +62,10 @@ ATTEMPTS = 3
 #: `wait` and `item next --wait` block inside one Bash tool call, which Claude
 #: Code caps at 10 minutes.
 WAIT_SECONDS = 540
+#: How long a `goal-stuck` probe may take before its dependency counts as not answering.
+PROBE_SECONDS = 60
+#: Probes that fail without testing anything, so they cannot show a dependency is down.
+TRIVIAL_PROBE = re.compile(r"^\s*((/usr/bin/|/bin/)?false|exit\s+\d+|!\s*(/usr/bin/|/bin/)?true)\s*;?\s*$")
 
 PLAN_CRITERIA = (
     "ccdirector has ACCEPTED your work plan (`ccdirector plan show` prints it), and its "
@@ -63,7 +78,7 @@ PLAN_CRITERIA = (
 
 STEER_CRITERIA = (
     "Either `ccdirector goal-done` has confirmed that the project's gate passes, or "
-    "`ccdirector goal-stuck` has recorded why nothing can progress without the user. Each "
+    "`ccdirector goal-stuck --probe CMD` has shown that a dependency the work needs is down. Each "
     "writes ccloop's marker itself when it accepts; you cannot write it, and nothing else "
     "ends this run."
 )
@@ -73,9 +88,9 @@ def project(path: str | None) -> Path:
     """The project: the argument, else CCDIRECTOR_ROOT (set in every director and worker
     session, whose shell may have changed directory), else the current directory.
 
-    State written while ccdirector shipped inside ccteam lives in `.ccteam/director/`;
-    it is moved to `.ccdirector/` the first time ccdirector meets the project, because
-    ccenv's uninstaller purges `.ccteam/` when it removes ccteam."""
+    State written by ccdirector before 0.12.0 lives in `.ccteam/director/`; it is moved
+    to `.ccdirector/` the first time ccdirector meets the project, so a project that has
+    not run ccdirector since then keeps its plan and work state."""
     root = Path(path or os.environ.get("CCDIRECTOR_ROOT") or ".").expanduser().resolve()
     if not root.is_dir():
         sys.exit(f"ccdirector: {root} is not a directory")
@@ -282,20 +297,12 @@ def terminate(signum, frame):
 
 def cmd_start(args) -> int:
     root = project(args.project)
-    found = conflicts.ccteam(root)
-    if found:
-        print("ccdirector: ccteam is configured here, and its plugin would run in the "
-              "director's and every worker's session, replaying edits and locking them a "
-              "second time. Remove it first (ccenv's install.sh removes it as a retired "
-              "component, or `claude plugin uninstall` / `claude mcp remove ccteam`):",
-              file=sys.stderr)
-        for where in found:
-            print(f"  - {where}", file=sys.stderr)
-        return 1
     if args.workers < 1:
         sys.exit("ccdirector: --workers must be at least 1")
     if args.round_limit < 0:
         sys.exit("ccdirector: --round-limit must be 0 (no limit) or more")
+    if args.worker_stall < 0:
+        sys.exit("ccdirector: --worker-stall must be 0 (never) or more minutes")
     for name in ("cutoff", "worker_cutoff"):
         value = getattr(args, name)
         if value is not None and value < 0:
@@ -330,15 +337,15 @@ def cmd_start(args) -> int:
         if stale.exists():
             stale.unlink()
         work.sync(root, plan.load(root))
-        supervisor = workers.Supervisor(root, workers.Options(
+        pool = workers.Pool(root, workers.Options(
             count=args.workers, cutoff=args.worker_cutoff, effort=args.worker_effort,
-            model=args.worker_model))
-        supervisor.start()
+            model=args.worker_model, stall=args.worker_stall))
+        pool.start()
         try:
             return steering(root, goal, args)
         finally:
             print("ccdirector: stopping workers…", file=sys.stderr)
-            supervisor.stop()
+            pool.stop()
             print(work.summary(root), file=sys.stderr)
     except session.SessionError as exc:
         print(f"ccdirector: {exc}", file=sys.stderr)
@@ -452,7 +459,23 @@ def cmd_plan(args) -> int:
     print(f"ACCEPTED: {json_path} and {md_path}")
     for change in changes:
         print(f"  {change}")
+    print(parallel_line(root, submitted))
     return 0
+
+
+def parallel_line(root: Path, current: dict) -> str:
+    """How many items a worker could take right now against how many workers the run
+    has: the speed of a run is set by how many goals can be worked side by side."""
+    count = load_goal(root).get("workers")
+    state = work.load(root)
+    open_now = len(work.ready(state, current)) + work.counts(state, current)[work.CLAIMED]
+    text = f"PARALLEL: items that can be worked now {open_now}" + (
+        f", workers {count}" if count else "")
+    if count and open_now < count and not work.all_done(state, current):
+        text += (f"; {count - open_now} of the workers have nothing to take. Split the goal "
+                 "into more independent items if it can be split, or say in `risks` why it "
+                 "cannot.")
+    return text
 
 
 def describe(record: dict) -> str:
@@ -487,7 +510,7 @@ def cmd_wait(args) -> int:
     elif work.stalled(state, current):
         print("\nSTALLED: nothing is in progress and nothing can be handed out. Revise the "
               "plan (answer parked items by resubmitting them, add or split items), or, if "
-              "nothing can progress without the user, run `ccdirector goal-stuck REASON`.")
+              "a dependency the work needs is down, run `ccdirector goal-stuck --probe CMD REASON`.")
     return 0
 
 
@@ -557,11 +580,40 @@ def cmd_goal_done(args) -> int:
     return 0
 
 
+NOT_A_BLOCKER = (
+    "A run stops short of its gate only when a dependency the work needs is down. Running "
+    "out of ideas, an advisor saying stop, a decision that seems to be the user's, and data "
+    "the project has never had are not that: make the call and record it in `risks`, plan "
+    "the work to get the data, or try a different kind of change, and keep going."
+)
+
+
+def run_probe(root: Path, command: str) -> tuple[bool, str]:
+    """(works, output) for a probe command run in the project root. A timeout means
+    the dependency does not answer, which is the same as down."""
+    try:
+        done = subprocess.run(command, shell=True, cwd=root, capture_output=True, text=True,
+                              timeout=PROBE_SECONDS)
+    except subprocess.TimeoutExpired:
+        return False, f"no answer within {PROBE_SECONDS}s"
+    output = (done.stdout + done.stderr).strip()[-2000:]
+    return done.returncode == 0, f"exit {done.returncode}" + (f": {output}" if output else "")
+
+
 def cmd_goal_stuck(args) -> int:
     root = project(args.project)
     reason = " ".join(args.reason).strip()
     if not reason:
-        print("REFUSED: give the reason: what blocks progress and what is needed from the user")
+        print("REFUSED: give the reason: which dependency is down and what is needed to bring it back")
+        return 1
+    probe = (args.probe or "").strip()
+    if not probe:
+        print("REFUSED: name the dependency that is down with --probe CMD, a command that "
+              "succeeds when it works (for example `nc -z gateway.local 4002`). " + NOT_A_BLOCKER)
+        return 1
+    if TRIVIAL_PROBE.match(probe):
+        print(f"REFUSED: `{probe}` fails whatever the dependency does. The probe must test the "
+              "dependency itself.")
         return 1
     current = plan.load(root)
     state = work.load(root)
@@ -569,15 +621,23 @@ def cmd_goal_stuck(args) -> int:
         print("REFUSED: work is still in progress or can still be handed out:\n"
               + work.summary(root))
         return 1
+    works, output = run_probe(root, probe)
+    if works:
+        with work.locked(root):
+            work.event(root, "goal_stuck_refused", probe=probe, output=output)
+        print(f"REFUSED: `{probe}` succeeds ({output}), so that dependency is working. "
+              + NOT_A_BLOCKER)
+        return 1
     ok, detail = signal_run(root)
     if not ok:
         print(f"REFUSED: {detail}")
         return 1
     plan.atomic(plan.folder(root) / "stuck.json",
-                json.dumps({"reason": reason, "time": work.now()}, indent=2) + "\n")
+                json.dumps({"reason": reason, "probe": probe, "probe_output": output,
+                            "time": work.now()}, indent=2) + "\n")
     with work.locked(root):
-        work.event(root, "goal_stuck", reason=reason)
-    print(f"STOPPED: recorded the reason and wrote {detail}")
+        work.event(root, "goal_stuck", reason=reason, probe=probe, output=output)
+    print(f"STOPPED: `{probe}` fails ({output}); recorded the reason and wrote {detail}")
     return 0
 
 
@@ -586,6 +646,29 @@ def worker_name() -> str:
     if not name:
         sys.exit("ccdirector: CCDIRECTOR_WORKER is not set; `item` commands are for worker sessions")
     return name
+
+
+def item_report(root: Path, kind: str, value) -> str:
+    """What `item next` says for one outcome; the command and the MCP tool share it.
+    NONE writes the worker's ccloop marker, which ends its run."""
+    if kind == "item":
+        text = "ITEM\n" + json.dumps(value, indent=2)
+        text += ("\n\nThis item is yours until its check passes (`item_done`). A failed check "
+                 "does not end it: keep working.")
+        if work.consult_required(root, value["id"]):
+            text += ("\n\nCONSULT FIRST: its checks have failed several times in a row. Ask "
+                     "an advisor about it (ask_astra, ask_fable or ask_gpt) and wait for the "
+                     "answer. `item_done` is refused until you have it.")
+        back = work.resumed(root, value["id"])
+        if back:
+            text += (f"\n\nRESUMED: this item waited from {back.get('since')} for "
+                     f"{back.get('waited_for')}, and that is there now. The note left when it "
+                     f"was parked: {back.get('note') or '(none)'}\nPick up from there.")
+        return text
+    if kind == "wait":
+        return f"WAIT: {value}"
+    ok, detail = signal_run(root)
+    return f"NONE: {value}" + (f"; wrote {detail}" if ok else f" ({detail})")
 
 
 def cmd_item(args) -> int:
@@ -598,35 +681,24 @@ def cmd_item(args) -> int:
             if kind != "wait" or time.time() >= end:
                 break
             time.sleep(3)
-        if kind == "item":
-            print("ITEM")
-            print(json.dumps(value, indent=2))
-            if work.consult_required(root, value["id"]):
-                print("\nCONSULT FIRST: this item has been parked repeatedly with nobody asking "
-                      "for help. Ask an advisor about it (ask_astra, ask_fable or ask_gpt) and "
-                      "wait for the answer. `item done` is refused until you have it.")
-            return 0
-        if kind == "wait":
-            print(f"WAIT: {value}")
-            return 0
-        ok, detail = signal_run(root)
-        print(f"NONE: {value}" + (f"; wrote {detail}" if ok else f" ({detail})"))
+        print(item_report(root, kind, value))
         return 0
     if not args.id:
         sys.exit(f"ccdirector: item {args.action} needs an item id")
     if args.action == "done":
         progress.settle_consults(root)      # a backgrounded answer may have just arrived
         outcome, output = work.finish(root, worker, args.id)
-        label = {"done": "PASSED", "failed": "FAILED", "refused": "REFUSED",
-                 "parked": "PARKED"}[outcome]
+        label = {"done": "PASSED", "failed": "FAILED", "refused": "REFUSED"}[outcome]
         print(f"{label}: {args.id}")
         print(output)
         return 0 if outcome == "done" else 1
     reason = (args.reason or "").strip()
     if not reason:
         sys.exit("ccdirector: item park needs --reason")
-    ok, detail = work.park(root, worker, args.id, reason)
-    print(("PARKED: " if ok else "REFUSED: ") + detail)
+    ok, detail = work.park(root, worker, args.id, reason, until=args.until, hours=args.hours,
+                           after=args.after)
+    label = ("WAITING: " if args.until or args.after else "PARKED: ") if ok else "REFUSED: "
+    print(label + detail)
     return 0 if ok else 1
 
 
@@ -643,21 +715,30 @@ def build_parser() -> argparse.ArgumentParser:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     cutoff_help = ("ccloop relay cutoff for the director, in thousands of tokens "
                    "(0 = relay only when the context window fills; default: ccloop's)")
+    effort_help = "reasoning effort for the director (ccloop --effort)"
+    model_help = "model for the director session (for `goal`, the goal-finder's)"
     parser.add_argument("--cutoff", type=int, help=cutoff_help)
+    parser.add_argument("--effort", help=effort_help)
+    parser.add_argument("--model", help=model_help)
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # The director's options are accepted before or after the subcommand. SUPPRESS on
+    # the subcommand's copy: given there it wins; absent, the value given before stays.
     p = sub.add_parser("start", help="resolve the goal, plan it, and carry it out")
     p.add_argument("project", nargs="?")
     p.add_argument("--goal", help="the goal, as text or a file holding it")
-    # SUPPRESS: given here it wins; absent, the value given before `start` stays.
     p.add_argument("--cutoff", type=int, default=argparse.SUPPRESS, help=cutoff_help)
-    p.add_argument("--effort", help="reasoning effort for the director (ccloop --effort)")
-    p.add_argument("--model", help="model for the director session")
+    p.add_argument("--effort", default=argparse.SUPPRESS, help=effort_help)
+    p.add_argument("--model", default=argparse.SUPPRESS, help=model_help)
     p.add_argument("--workers", type=int, default=4, help="most workers running at once")
     p.add_argument("--worker-cutoff", type=int,
                    help="ccloop relay cutoff for each worker, thousands of tokens")
     p.add_argument("--worker-effort", help="reasoning effort for each worker")
     p.add_argument("--worker-model", help="model for each worker")
+    p.add_argument("--worker-stall", type=int, default=workers.STALL_MINUTES,
+                   help="minutes a worker's log may stay silent before it is ended as hung "
+                        f"and relaunched ({workers.TOOL_STALL_FACTOR}x that while a tool call "
+                        "is open); 0 never ends one")
     p.add_argument("--plan-only", action="store_true", help="stop once the plan is accepted")
     p.add_argument("--replan", action="store_true",
                    help="write a new plan instead of using the one on file")
@@ -673,7 +754,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("goal", help="run the goal-finder alone")
     p.add_argument("project", nargs="?")
-    p.add_argument("--model")
+    p.add_argument("--model", default=argparse.SUPPRESS, help="model for the goal-finder")
     p.add_argument("--timeout", type=float, default=goalfinder.DEFAULT_TIMEOUT)
     p.set_defaults(handler=cmd_goal)
 
@@ -703,9 +784,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--build")
     p.set_defaults(handler=cmd_goal_done)
 
-    p = sub.add_parser("goal-stuck", help="director: end the steering run when nothing can "
-                                          "progress without the user")
+    p = sub.add_parser("goal-stuck", help="director: end the steering run when a dependency "
+                                          "the work needs is down")
     p.add_argument("reason", nargs="+")
+    p.add_argument("--probe", required=False,
+                   help="a command that succeeds when the dependency works; refused while it does")
     p.add_argument("--project")
     p.set_defaults(handler=cmd_goal_stuck)
 
@@ -713,14 +796,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", choices=["next", "done", "park"])
     p.add_argument("id", nargs="?")
     p.add_argument("--wait", action="store_true", help="next: wait up to 9 minutes for one")
-    p.add_argument("--reason", help="park: what is wrong and what is needed")
+    p.add_argument("--reason", help="park: what is wrong with the goal and what is needed, "
+                                    "or, when waiting, where you are and what is left")
+    p.add_argument("--after", metavar="ITEM",
+                   help="park: wait until item ITEM is done, then return the item to pending")
+    p.add_argument("--until", metavar="CMD",
+                   help="park: wait until CMD succeeds, then return the item to pending; CMD "
+                        "must answer at once whether what you wait for is there")
+    p.add_argument("--hours", type=float, default=work.DEFAULT_WAIT_HOURS,
+                   help="park --after/--until: hours to wait before the item goes to the "
+                        f"director (default {work.DEFAULT_WAIT_HOURS})")
     p.add_argument("--project")
     p.set_defaults(handler=cmd_item)
 
     p = sub.add_parser("hook", help="worker: Claude Code edit-lock hook")
     p.add_argument("stage", choices=["pre", "post", "notify", "consult"])
     p.set_defaults(handler=cmd_hook)
+
+    p = sub.add_parser("mcp", help="worker: the MCP server with the blocking tools")
+    p.set_defaults(handler=cmd_mcp)
     return parser
+
+
+def cmd_mcp(args) -> int:
+    from . import mcpserver
+    return mcpserver.serve()
 
 
 def main() -> None:

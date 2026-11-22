@@ -13,11 +13,13 @@
 #   - its per-project state directories
 #
 # Components:
-#   ccproject gitsync ccmemory ccprospect ccinsight ccusage ccloop ccteam
+#   ccproject gitsync ccmemory ccprospect ccinsight ccusage ccloop
 #   ccdirector ccenvmcp
 #
-# This list is EVERYTHING ccenv has ever installed, not just what the current
-# install.sh ships. Running this script is the documented first step of an
+# This list is every component ccenv has shipped and still owns, not just what
+# the current install.sh ships. A package that left ccenv to become its own
+# project is not listed: removing it is that project's job, and listing it here
+# would uninstall the user's own install of it. Running this script is the documented first step of an
 # upgrade: uninstall, then install. A box being upgraded is by definition
 # carrying the older set, so every one of these must be removable here — a
 # component dropped from this list would strand its hooks, MCP registration,
@@ -26,7 +28,7 @@
 # Usage:
 #   ./uninstall.sh                       # remove EVERYTHING
 #   ./uninstall.sh --only ccprospect     # remove one component (repeatable)
-#   ./uninstall.sh --only ccprospect --only ccinsight --only ccteam
+#   ./uninstall.sh --only ccprospect --only ccinsight
 #   ./uninstall.sh --skip ccmemory       # remove all but one (repeatable)
 #   ./uninstall.sh --dry-run             # print every action, change nothing
 #   ./uninstall.sh -y                    # no confirmation prompt
@@ -38,7 +40,7 @@
 #   ./uninstall.sh -h                    # show this help
 #
 # PROJECT DATA POLICY
-#   .ccprospect/  .ccinsight/  .ccteam/   -> ARCHIVED to ~/ccenv-uninstall-<stamp>/
+#   .ccprospect/  .ccinsight/             -> ARCHIVED to ~/ccenv-uninstall-<stamp>/
 #                                            as a .tar.gz, THEN deleted.
 #                                            (opt out entirely: --keep-project-data)
 #   .ccmemory/                            -> NEVER touched. It is committed repo
@@ -70,7 +72,7 @@ REMOVE_PATH=0
 FAILURES=0
 EXTRA_PROJECTS=()
 
-ALL_COMPONENTS=(ccproject gitsync ccmemory ccprospect ccinsight ccusage ccloop ccteam ccdirector ccenvmcp)
+ALL_COMPONENTS=(ccproject gitsync ccmemory ccprospect ccinsight ccusage ccloop ccdirector ccenvmcp)
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -254,7 +256,7 @@ if [ "$DRY_RUN" != "1" ] && [ "$ASSUME_YES" != "1" ]; then
     echo "strip their hooks/MCP/skills, and rewrite files under $PROJECT_COUNT project"
     echo "directories to delete injected integration blocks."
     if [ "$KEEP_PROJECT_DATA" != "1" ]; then
-        echo "It will also DELETE .ccprospect/, .ccinsight/ and .ccteam/ state dirs"
+        echo "It will also DELETE .ccprospect/ and .ccinsight/ state dirs"
         echo "(each tarred to $STATE_ARCHIVE_DIR/ first)."
     fi
     echo ".ccmemory/ is never touched. Backups: <file>.uninstall-bak.$STAMP"
@@ -305,7 +307,6 @@ OWNED = {
     "ccprospect": ({"ccprospect"},            {"session", "stop", "guard"}),
     "ccinsight":  ({"ccinsight"},             {"session", "stop", "guard", "posttool"}),
     "ccloop":     ({"ccloop"},                {"guard", "keepgoing"}),
-    "ccteam":     ({"ccteam", "ccteam-mcp"},  {"session-start"}),
 }
 
 def owner(command):
@@ -841,18 +842,6 @@ if should_remove ccloop; then
 fi
 
 # ----------------------------------------------------------------------------
-# ccteam — MCP + package + per-project coordination state.
-# ----------------------------------------------------------------------------
-if should_remove ccteam; then
-    step ccteam "unregistering MCP + removing package"
-    unregister_mcp ccteam
-    pip_uninstall ccteam
-
-    step ccteam "purging per-project state"
-    purge_project_state ccteam ".ccteam"
-fi
-
-# ----------------------------------------------------------------------------
 # ccdirector — package only; it registers no MCP server and no global hooks
 # (its workers' hooks live in each worker's launch settings). Per-project
 # .ccdirector/ holds a project's work plan and work state, so it is left alone
@@ -879,8 +868,36 @@ if should_remove ccenvmcp; then
     # Check real on-disk state — that correctly catches --keep-packages and a
     # failed pip uninstall. The one exception is a dry run, where nothing was
     # actually removed: there, assume the in-scope dependents would be gone.
+    # Dependents are found by what they import, not by a list: none of them
+    # declares ccenvmcp in its metadata, and a package outside ccenv that
+    # imports the shim must keep it just as much as ccenv's own servers do.
     remaining=""
-    for d in ccmemory ccprospect ccinsight ccusage-mcp ccteam; do
+    for d in $(python3 - <<'PY'
+import importlib.metadata as md, re, site
+uses = re.compile(r"^\s*(from|import)\s+ccenvmcp\b", re.M)
+found = set()
+# The shim is a --user install, and so is everything built on it.
+for dist in md.distributions(path=[site.getusersitepackages()]):
+    name = dist.metadata["Name"]
+    if not name or name.lower() == "ccenvmcp":
+        continue
+    for f in dist.files or []:
+        # An MCP server's entry module sits at the top of its package; reading
+        # every file of every large library would take seconds per run.
+        if f.suffix != ".py" or len(f.parts) > 2:
+            continue
+        try:
+            path = f.locate()
+            if path.stat().st_size > 500000:
+                continue
+            if uses.search(path.read_text(errors="replace")):
+                found.add(name)
+                break
+        except OSError:
+            continue
+print("\n".join(sorted(found)))
+PY
+); do
         case "$d" in
             ccusage-mcp) comp=ccusage ;;
             *)           comp="$d" ;;
@@ -888,7 +905,7 @@ if should_remove ccenvmcp; then
         if [ "$DRY_RUN" = "1" ] && should_remove "$comp"; then
             continue
         fi
-        python3 -m pip show "$d" >/dev/null 2>&1 && remaining="$remaining $d"
+        remaining="$remaining $d"
     done
     if [ -n "$remaining" ]; then
         warn "still installed and dependent on ccenvmcp:$remaining — leaving the shim in place"
@@ -1013,7 +1030,7 @@ echo "=== verifying removal ==="
 echo ""
 echo "console scripts still on PATH:"
 left=0
-for cmd in ccmemory ccprospect ccinsight ccusage-mcp ccusage-statusline ccloop ccteam ccteam-mcp ccdirector; do
+for cmd in ccmemory ccprospect ccinsight ccusage-mcp ccusage-statusline ccloop ccdirector; do
     resolved=$(command -v "$cmd" 2>/dev/null)
     if [ -n "$resolved" ]; then
         info "PRESENT  $cmd -> $resolved"
@@ -1028,7 +1045,7 @@ done
 echo ""
 echo "pip distributions still installed:"
 found=0
-for d in ccenvmcp ccmemory ccprospect ccinsight ccloop ccteam ccdirector ccusage-mcp; do
+for d in ccenvmcp ccmemory ccprospect ccinsight ccloop ccdirector ccusage-mcp; do
     if python3 -m pip show "$d" >/dev/null 2>&1; then
         info "PRESENT  $d"
         found=$((found + 1))
@@ -1039,7 +1056,7 @@ done
 echo ""
 echo "ccenv hooks still in $SETTINGS_JSON:"
 if [ -f "$SETTINGS_JSON" ]; then
-    grep -oE '"command": "[^"]*(ccmemory|ccprospect|ccinsight|ccloop|ccteam|awareness_hooks|check_sync_status)[^"]*"' \
+    grep -oE '"command": "[^"]*(ccmemory|ccprospect|ccinsight|ccloop|awareness_hooks|check_sync_status)[^"]*"' \
         "$SETTINGS_JSON" 2>/dev/null | sed 's/^/  /' || info "(none)"
 else
     info "(no settings.json)"

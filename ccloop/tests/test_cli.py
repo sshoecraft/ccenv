@@ -89,8 +89,82 @@ def test_resume_rejects_non_uuid(bad, capsys):
     assert "invalid run-id" in capsys.readouterr().err
 
 
-def test_resume_requires_arg(capsys):
-    assert cli.main(["--resume-run"]) == 2
+def _make_run(project, run_id, task="do a thing", resume="still working",
+              criteria=None, criteria_met=None, mtime=None):
+    import os
+    d = project / ".ccloop" / "runs" / run_id
+    d.mkdir(parents=True)
+    (d / "task.md").write_text(task + "\n", encoding="utf-8")
+    (d / "resume.md").write_text(resume, encoding="utf-8")
+    if criteria is not None:
+        (d / "criteria.md").write_text(criteria, encoding="utf-8")
+    if criteria_met is not None:
+        (d / "criteria-met").write_text(criteria_met, encoding="utf-8")
+    if mtime is not None:
+        for p in (d, d / "resume.md"):
+            os.utime(p, (mtime, mtime))
+    return d
+
+
+RID_A = "aaaaaaaa-1111-1111-1111-111111111111"
+RID_B = "bbbbbbbb-2222-2222-2222-222222222222"
+RID_C = "cccccccc-3333-3333-3333-333333333333"
+
+
+def test_resume_no_id_no_runs_dir(project, monkeypatch, capsys):
+    captured = _stub_resume(monkeypatch)
+    assert cli.main(["-i", "--resume-run"]) == 2
+    assert "no runs in" in capsys.readouterr().err
+    assert captured == {}
+
+
+def test_resume_no_id_only_converged_runs(project, monkeypatch, capsys):
+    captured = _stub_resume(monkeypatch)
+    _make_run(project, RID_A, resume="DONE all finished")
+    _make_run(project, RID_B, criteria="tests pass", criteria_met="YES")
+    _make_run(project, RID_C, resume="")
+    assert cli.main(["-i", "--resume-run"]) == 2
+    assert "no unconverged runs" in capsys.readouterr().err
+    assert captured == {}
+
+
+def test_resume_no_id_picks_the_one_unconverged(project, monkeypatch):
+    captured = _stub_resume(monkeypatch)
+    _make_run(project, RID_A, resume="DONE all finished")
+    _make_run(project, RID_B, criteria="tests pass", criteria_met="NO: 3 fail")
+    _make_run(project, RID_C, criteria="tests pass", criteria_met="YES")
+    assert cli.main(["-i", "--cutoff=80", "--resume-run"]) == 0
+    assert captured["run_id"] == RID_B
+    assert captured["cutoff_tokens"] == 80_000
+
+
+def test_resume_no_id_several_unconverged_lists_newest_first(project, monkeypatch, capsys):
+    captured = _stub_resume(monkeypatch)
+    _make_run(project, RID_A, task="older task", mtime=1_700_000_000)
+    _make_run(project, RID_B, task="newer task", mtime=1_700_100_000)
+    _make_run(project, RID_C, resume="DONE")
+    assert cli.main(["-i", "--resume-run"]) == 2
+    err = capsys.readouterr().err
+    assert "2 unconverged runs" in err
+    assert RID_C not in err
+    assert err.index(RID_B) < err.index(RID_A)
+    assert "newer task" in err and "older task" in err
+    assert captured == {}
+
+
+def test_resume_explicit_id_still_works_with_several(project, monkeypatch):
+    captured = _stub_resume(monkeypatch)
+    _make_run(project, RID_A)
+    _make_run(project, RID_B)
+    assert cli.main(["-i", "--resume-run", RID_A]) == 0
+    assert captured["run_id"] == RID_A
+
+
+def test_resume_rejects_extra_args(project, monkeypatch, capsys):
+    captured = _stub_resume(monkeypatch)
+    assert cli.main(["-i", "--resume-run", RID_A, "extra"]) == 2
+    assert "too many arguments" in capsys.readouterr().err
+    assert captured == {}
 
 
 def test_list_empty(project, capsys):

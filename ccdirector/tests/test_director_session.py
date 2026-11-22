@@ -64,3 +64,36 @@ def test_cli_accepts_cutoff_before_or_after_start(argv, expected):
     from ccdirector import cli
     args = cli.build_parser().parse_args(argv)
     assert args.cutoff == expected
+
+
+@pytest.mark.parametrize("argv, model, effort", [
+    (["--model=fable", "--effort=high", "start"], "fable", "high"),
+    (["start", "--model=fable", "--effort=high"], "fable", "high"),
+    (["--model=opus", "--effort=low", "start", "--model=fable", "--effort=high"],
+     "fable", "high"),
+    (["start"], None, None),
+])
+def test_cli_accepts_model_and_effort_before_or_after_start(argv, model, effort):
+    from ccdirector import cli
+    args = cli.build_parser().parse_args(argv)
+    assert cli.director_flags(args) == dict(headless=False, model=model, cutoff=None,
+                                            effort=effort)
+
+
+def test_cli_wrapper_line_parses():
+    from ccdirector import cli
+    args = cli.build_parser().parse_args(
+        ["--model=fable", "--cutoff=500", "start", "--worker-model=opus",
+         "--worker-effort=high", "--worker-cutoff=500", "--goal", "g.md", "--replan"])
+    assert (args.model, args.cutoff, args.effort) == ("fable", 500, None)
+    assert (args.worker_model, args.worker_effort, args.worker_cutoff) == ("opus", "high", 500)
+
+
+@pytest.mark.parametrize("argv, expected", [
+    (["--model=haiku", "goal"], "haiku"),
+    (["goal", "--model=haiku"], "haiku"),
+    (["goal"], None),
+])
+def test_cli_goal_model_before_or_after_goal(argv, expected):
+    from ccdirector import cli
+    assert cli.build_parser().parse_args(argv).model == expected

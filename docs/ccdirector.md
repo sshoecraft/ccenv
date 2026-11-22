@@ -31,8 +31,8 @@ whether an item is done (its check) and whether the goal is met (the gate),
 and serialising writes to a file.
 
 Judgement is the director's; mechanics and verdicts are ccdirector's; the
-workers do the work; the user sets the goal and answers what only the user
-can.
+workers do the work; the user sets the goal. Nobody answers questions during a
+run: the director makes every call itself and records it.
 
 ```
 ccdirector start [--goal TEXT|FILE] [--workers N] [PROJECT]
@@ -48,8 +48,8 @@ STEERING run: the director loops on `ccdirector wait`, revising the plan
   ║    while ccdirector's supervisor keeps up to N workers running:
   ║    each takes the next ready item, works, `item done` runs its check
   ▼
-`goal-done` (the gate passes) or `goal-stuck REASON` (nothing can move
-without the user) ends the steering run; workers are stopped; ccdirector
+`goal-done` (the gate passes) or `goal-stuck --probe CMD REASON` (a
+dependency is down: CMD fails) ends the steering run; workers are stopped; ccdirector
 reports and exits 0 (gate passes) or 1
 ```
 
@@ -70,8 +70,8 @@ is never met with no rows.
 ccdirector never reads the board or the queue itself. The tools own the
 format, apply the project's driver (`.ccproject/driver.py`) and decide what
 blocks; a second reader would drift from them. A project's
-`.ccproject/config.json` can keep its files anywhere in the tree (mxfs keeps
-them under `data/`), so whether there is a board is the tool's answer
+`.ccproject/config.json` can keep its files anywhere in the tree (under
+`data/`, for example), so whether there is a board is the tool's answer
 (`--json` lists rows), never a file test. The one exception: an emptied queue
 and no queue look the same through the tool, so ccdirector locates the queue
 file the way the tools do and tests only that it exists.
@@ -171,12 +171,37 @@ ccdirector finds the run afterwards by a marker line in its `task.md`.
 The prompt walks it through: repair a plan on file rather than starting over;
 add the proposed criteria to the board, so the board, not the
 director's memory, is the definition of done; find out why each not-green
-criterion is not green, recording what is broken as defects; break the work
-into items one worker can finish and check, each with a command that decides
-it; group them by section; prioritise (data loss, crashes and safety first,
-then what others depend on, then what turns the most criteria green, then
-cheap fixes that remove noise); order what conflicts with dependencies and
-interface items; and say honestly how much can run at once.
+criterion is not green, recording what is broken as defects; split the goal
+into items that are goals of their own, each one a worker can carry from start
+to finish, each with a command that proves it; group them by section;
+prioritise (data loss, crashes and safety first, then what others depend on,
+then what turns the most criteria green, then cheap fixes that remove noise);
+order what conflicts with dependencies; and aim for at least as many items
+ready at once as there are workers, saying so in `risks` when the goal cannot
+be split that far.
+
+#### Items are goals, not steps
+
+The director is the captain of a fleet, not the navigator of each ship. It
+sets destinations (items), watches the weather (the board, the gate, what
+workers report) and changes a destination when the weather calls for it. Each
+worker plots and sails its own course to its destination: it takes an item and
+works it the way a single session would — read, change, test, read the
+result, change again — until the item's check passes, and only then takes
+another.
+
+This is the reason for running several workers at all. Two plain sessions,
+each told to work on one of two unrelated problems, finish about twice as fast
+as one. ccdirector must do at least that with N workers on N independent
+items, and it can only if an item stays with its worker. Earlier versions let
+items shrink to steps: checks were capped at 540 s, so they could prove only a
+step; three failed checks took the item away; workers parked items back to
+the director to wait for results; an item that named a resource held all of
+it, and interface items stopped every worker. Each hand-off made a fresh
+worker relearn the code (about 390k tokens to start, in one project) and
+waited on the director (a median of 55 minutes per round trip). In that
+project four workers ran at about 1.2 times one session, at about twice the
+tokens per defect.
 
 Bash stays available for read-only inspection and for the ccproject and
 ccdirector commands. The deny rule covers Edit, Write and NotebookEdit; a
@@ -215,36 +240,50 @@ The plan holds only what is the director's. The definition of done and the
 known work stay on the project's board and queue.
 
 - `goal`, `source`, `gate`, `criteria` (board ids the goal rests on);
-- `items`, each with:
+- `resources`: the registry of everything workers share — machines, rigs,
+  devices, pools — each declared once by a short id with a `capacity` (units
+  usable at once) and a `what` (see Shared resources);
+- `items`, each a goal one worker owns from start to finish, with:
   - `id`, `what`, `serves` (criteria), `priority` (1 most urgent), `size`;
   - `check`: a shell command run from the project root that exits 0 when the
-    item is done, and `check_timeout` (1–540 s, default 300);
+    item's goal is met. It proves the goal, however long that takes; workers
+    run it through their `item_done` tool, which has no time limit.
+    `check_timeout` (seconds) is optional; 0 or absent means no limit;
   - `section`: the area of the project, so a worker keeps to one area;
   - `depends_on`: items that must be done first — also how the director keeps
-    apart items that touch different files but conflict anyway;
-  - `resources`: things besides files needing exclusive use (test machines,
-    rigs); two items naming one never run at once;
-  - `interface`: an item changing something many items use; it runs only
-    while nothing else is in progress, and nothing else starts until it is
-    done;
+    apart items that touch different files but conflict anyway, and how a
+    shared change (a struct, a signature, a locking rule) goes first, as an
+    item of its own;
   - `paths`: where the work is expected to land — guidance for the worker,
     not a lock;
 - `risks`.
 
-Items are not assigned to workers in the plan. The plan says what the work is
-and what may run together; workers take items while the work runs.
+Items are not assigned to workers in the plan. The plan says what the goals
+are and what depends on what; workers take items while the work runs, and
+`plan submit` ends with a `PARALLEL` line: how many items can be worked right
+now against the number of workers, and, when fewer, a reminder to split
+further or say in `risks` why the goal cannot be split. It never refuses on
+that count, because a refusal would push the director to invent independence.
 
-Validation refuses: missing or mistyped fields, a missing check or one allowed
-longer than 540 s (a worker runs it inside one Bash call, which Claude Code
-caps at 10 minutes), unknown dependencies, dependency cycles, and an item
-serving a criterion the plan does not list.
+Validation refuses: missing or mistyped fields, a missing check, a
+`check_timeout` that is not a whole number of seconds of 0 or more, unknown
+dependencies, dependency cycles, an item serving a criterion the plan does not
+list, a registry id that is not 1–40 characters of `a-z 0-9 . _ -` or a
+capacity below 1, an item that names `resources`, and an item with
+`interface: true`. The last two were how an item held a resource or the whole
+tree for its whole run; with goal-sized items that run for hours, both
+serialised everything near them. A plan on file that still has either fails
+validation, which sends it back to the director to repair. Resources used to
+be free text; in one project the director described the same VM pool in a
+slightly different sentence on every item, and since resources compared as
+text, nothing ever waited for the pool. Resources are now named only in the
+registry and by workers' `acquire` calls.
 
 Earlier versions gave each worker exclusive ownership of paths. That was
-dropped: in a project like mxfs nearly every defect touches the same core
-sources, so file ownership serialises all the work onto one worker. What two
-workers in one file actually risk is handled by the edit lock, Claude Code's
-own stale-read check, dependencies and interface items (see Edits in one
-tree).
+dropped: in a project where nearly every defect touches the same core sources,
+file ownership serialises all the work onto one worker. What two workers in
+one file actually risk is handled by the edit lock, Claude Code's own
+stale-read check and dependencies (see Edits in one tree).
 
 ### When a run ends
 
@@ -275,12 +314,19 @@ The steering director loops:
 1. `ccdirector wait` blocks (up to 540 s, inside one Bash call) until there
    are events it has not seen, then prints them with every item's state. It
    returns at once when every item is done or the work is stalled.
-2. It acts: an item done whose criteria are still red gets new items; an
-   item failing its check repeatedly is split or corrected; a parked item is
-   answered by resubmitting it revised; a failing worker's log is read.
+2. It acts: an item done whose criteria are still red gets new items; idle
+   workers get new independent goals; a parked item (its worker says the goal
+   itself is wrong) is answered by resubmitting it revised; a check that
+   cannot pass however good the work is gets fixed; a failing worker's log is
+   read. An item in progress is left to its worker unless new information
+   changes its goal.
 3. `plan submit` is the only lever. Resubmitting merges into the work state:
-   new items start pending; a revised parked or done item goes back to
-   pending; a revised item in progress stays with its worker, and a dropped
+   new items start pending; an item is revised when its `what` or `check`
+   changes, and a revised parked, waiting or done item goes back to pending (a
+   change to any other field — priority, paths, size, section, dependencies,
+   a field the plan format dropped — is bookkeeping and reopens nothing: when
+   every field counted, two plan-format repairs that only removed item resource
+   fields reopened every finished item, 122 of them in one project); a revised item in progress stays with its worker, and a dropped
    item is dropped; either way the worker holding it is told on its next tool
    call by a PreToolUse hook, because a worker reads its item once and can then
    work for hours on text the director has withdrawn.
@@ -325,15 +371,19 @@ submit` is refused while one of the director's consults is pending. A pending
 consult is dropped after 30 minutes or at the next `ccdirector start`, because
 the task does not survive its session and nothing else would clear it.
 
-An item that cannot be finished is handled at the item's level. A worker asking an
-advisor about its item is troubleshooting; the director asking one is choosing a
-direction, so the two are counted apart and neither satisfies the other. After 3
-failed checks in a row ccdirector parks the item, so a worker cannot grind on it
-forever. An item parked 3 times with nobody asking for help makes its next worker
-consult, and `item done` is refused until the answer is back. Any consult by the
-worker holding the item resets its count, which is why a worker that already asked,
-as a project's own rules may tell it to, pays for no second call. Nothing here gives
-up: the director can still revise or drop the item, or stop if it is truly blocked.
+A hard item stays with its worker. A failed check returns its output and the
+worker keeps going; nothing takes the item away. After 3 failed checks in a row
+the worker must ask an advisor before its next check (`item_done` is refused
+until the answer is back), so it does not grind on one idea, and then it
+carries on with the item. Any consult by the worker holding the item resets
+the count, which is why a worker that already asked, as a project's own rules
+may tell it to, pays for no second call. A worker asking an advisor about its
+item is troubleshooting; the director asking one is choosing a direction, so
+the two are counted apart and neither satisfies the other. Only the worker
+gives an item back, and only for weather: the goal itself is wrong or cannot be
+done as written (parked, for the director to revise), or it needs another item
+done first (waiting, see Waiting on another item). Nothing here gives up: the
+director can still revise or drop the item, or stop if it is truly blocked.
 
 By default a run has no round limit: it exists to keep trying until the gate
 passes. `--round-limit N` ends it after N rounds with no criterion gained, and
@@ -342,9 +392,21 @@ once however often `goal-done` is retried, and needs the plan to have changed, s
 starting again on the same plan allows one more round rather than ending at once.
 
 The director cannot declare the goal met. `goal-done` runs the project's gate
-and writes ccloop's marker only if it passes. `goal-stuck REASON` records the
-reason in `stuck.json` and ends the run, and is refused while anything is in
+and writes ccloop's marker only if it passes. `goal-stuck --probe CMD REASON`
+is the only other way out, for one case: a dependency the work already uses
+(a machine, a gateway, a credential, a data feed) is down. CMD is a command that
+succeeds when the dependency works; ccdirector runs it in the project root
+(60 s limit, a timeout counts as down) and refuses while it succeeds, so the
+stop rests on a measurement, not the director's judgement. A probe that fails
+by construction (`false`, `exit 1`) is refused. On a stop, `stuck.json` holds
+the reason, the probe and its output. It is also refused while anything is in
 progress or can be handed out.
+
+Judgement-based stops were removed on purpose. A director ended a run with
+every criterion still open to more work, because an advisor saw no lever left,
+it wanted a paper run approved, it wanted a bar changed, and it wanted data the
+project never had. Each of those is the director's call to make or work to
+plan, so none ends a run.
 
 ## Workers
 
@@ -358,25 +420,193 @@ output to `.ccdirector/workers/<name>.log`, launched with:
 - `CCLOOP_SETTINGS`: deny rules on `.ccdirector/**` and `.ccloop/**`, and the
   edit-lock hooks;
 - `CCDIRECTOR_ROLE=worker`, `CCDIRECTOR_WORKER=worker-N`, `CCDIRECTOR_ROOT`;
+- its own MCP server, `ccdirector mcp`, through `--mcp-config
+  .ccdirector/workers/worker-N.mcp.json`, passed to claude by ccloop's
+  `CCLOOP_CLAUDE_EXTRA_ARGS` (see Waiting at no cost);
 - `--worker-cutoff`, `--worker-effort`, `--worker-model`, separate from the
   director's `--cutoff`, `--effort`, `--model`.
 
-A worker loops on `ccdirector item next --wait` (an item, `WAIT`, or `NONE`),
-does the item, and reports with `item done ID`, which runs the item's check:
-pass marks it done, fail returns the output and the worker keeps it. A worker
-that cannot finish an item parks it with a reason. `NONE` writes the worker's
-ccloop marker, so the worker's run ends when nothing is left for it, instead
-of idling. A worker that exits gives back any item it still held; the
-supervisor launches another when work appears. Three workers in a row that
-exit nonzero within a minute stop further launches, with a
-`workers_failing` event for the director.
+A worker loops on the `item_next` tool (an item, or `NONE`), carries the item
+to done, and reports with the `item_done` tool, which runs the item's check to
+its end however long it takes (`ccdirector item done ID` in Bash runs the same
+check but ends at Claude Code's 10-minute Bash limit): pass marks it done, fail
+returns the output and the worker keeps it. The worker waits for its own runs
+and tests, including ones queued on the project's run queue, with the `run`
+tool, which blocks at no cost. `NONE` comes only when every item in the plan
+is done; it writes the worker's ccloop marker and the run ends.
+Short of that — items in progress, parked items the director has yet to revise,
+waiting items, a plan being reworked — `item_next` keeps waiting,
+which costs nothing, and the worker takes the next item in the same session with
+its context intact. Ending the run whenever nothing was momentarily ready cost a
+fresh session per item: in one project, 122 worker sessions in 46 hours, each
+paying about 390k tokens of cache creation to start, which made a defect cost
+about twice what it cost in a single plain session. A worker that exits gives
+back any item it still held.
 
-An item is ready when it is pending, its dependencies are done, no item in
-progress holds a resource it names, and no interface item is in progress.
-Ready items go out by priority, then the worker's own section, then id.
+### Waiting on another item
+
+A goal can turn out to need another item done first: a dependency the plan
+missed. Its worker parks it until that item is done, `item park ID --after
+OTHER --reason TEXT [--hours H]`, or, for something outside the plan, until a
+condition, `--until CMD`, a quick command that succeeds once what it waits for
+is there. The item is then `waiting`, not `parked`:
+
+- It is not the director's to answer. The worker takes other work.
+- The pool's second thread checks every waiting item once a minute: `--after`
+  from the work state, `--until` by running the command, side by side, outside
+  the work lock, each run limited to 30 s. When one is free the item returns
+  to pending at once. Among items of equal priority, the worker that parked it
+  is first in line, since it already has the context. `item_next` hands it
+  over with `RESUMED`, what it waited for, and the worker's reason.
+- After H hours (24 by default) without it coming free, the item is parked for
+  the director, with a reason that starts "waited since".
+- A director revision of a waiting item returns it to pending and ends the
+  wait.
+
+`park --after` refuses an unknown item, the item itself and an item already
+done. `park --until` runs the condition once before accepting it, and refuses
+one that already succeeds, one the shell cannot run (exit 126 or 127), which
+would never succeed, and one that runs past 30 s, because that is a wait, not
+a test. While any item waits, the work is not stalled: `goal-stuck` is refused,
+and `wait` does not report `STALLED`.
+
+A worker does not park to wait for its own results. Its item is its goal, and
+waiting for the goal's test is part of doing it, as in a single session; it
+waits with `run`, which costs nothing. Parking to wait sent each result
+through the director (a median of 55 minutes in one project) and back to a
+worker that had to relearn the item.
+
+### The worker pool
+
+`ccdirector start` holds a pool of `--workers` slots, `worker-1` to
+`worker-N`, and keeps as many running as there is work for: items in progress
+plus items ready to hand out. Each slot is idle, starting, running or backing
+off. Its state, quick-failure count, relaunch count and retry time are in
+`state.json` under `workers`, and the pool's own outage state is under `pool`.
+
+- **Worker ended.** When a worker exits, its item goes back and its slot is
+  free. The pool relaunches into the slot as soon as there is work.
+- **Quick death.** A worker that exits nonzero within 60 seconds of starting
+  never got going. Its slot backs off 15 seconds, doubling each time up to 15
+  minutes, before it relaunches. No count ever stops the retries. A worker that
+  stays up past 60 seconds, or exits 0, resets the count.
+- **Outage.** Three quick deaths in a row across the pool point to a shared
+  cause: the API, the network, a credential. That raises `workers_failing`, and
+  the pool then tries one worker at a time on the same doubling wait. The first
+  worker that stays up raises `workers_resumed`, clears every slot's backoff
+  and brings the pool back to full strength. Whether the run needs a dependency
+  that is down is still decided only by `goal-stuck --probe`. The pool never
+  ends a run.
+- **Hung worker.** A worker whose log has been silent for `--worker-stall`
+  minutes (default 30; 0 turns this off) is hung, and this raises
+  `worker_stalled`. While its log shows an open tool call (`→ Tool` with no
+  `ok`/`ERROR` result after it), the limit is four times longer. That covers
+  advisor consults, subagents and a blocking `item next --wait`. A worker
+  blocked in one of its ccdirector tools (in line for the rig, inside a long
+  `run`) writes nothing to its log, but its MCP server touches
+  `workers/worker-N.beat` every minute, and the pool counts that as activity:
+  however long it waits, it is not hung. A worker that is waiting on background
+  work through Bash is never this quiet either: ccloop's Stop hook
+  re-feeds it every few minutes, and each re-feed writes to its log. The pool
+  ends the worker's whole process tree, SIGTERM then SIGKILL 20 seconds later.
+  It walks `/proc` for this, because ccloop starts claude in a session of its
+  own, outside the worker's process group. The slot then backs off as after a
+  quick death.
+- **Frozen MCP server.** Each worker's MCP server touches
+  `workers/worker-N.alive` every minute from its event loop, its only thread.
+  Once it has come up in the current launch, an alive file that has not moved
+  for 10 minutes means the server has stopped answering: every ccdirector tool
+  of that worker is dead, however busy its log looks. The pool ends and
+  relaunches the worker as for a hung one, also under `--worker-stall 0`. In
+  one project a server sat for hours in uninterruptible sleep inside an NFS
+  open on `.ccdirector/`; Claude Code aborted its `acquire`, then an instant
+  `resources` call, after 30 minutes of silence each, and the worker went on
+  without its tools. A server in that state cannot be killed until the file
+  operation returns, but the relaunched worker gets a new one. The alive file
+  is separate from the beat file because the beat file means "waiting inside
+  a tool" to the hung-worker check; a server touching that file all the time
+  would hide a hung claude.
+
+PROGRESS shows a `pool:` line for slots that are starting or backing off and
+the relaunch count. During an outage it adds a `WORKERS PAUSED` line naming
+the next try. The director's instructions say none of these needs a restart
+or is a reason to stop.
+
+An item is ready when it is pending and its dependencies are done. Ready items
+go out by priority, then to the worker that parked the item (it has the
+context), then by the worker's own section, then id.
+
+### Waiting at no cost
+
+A worker that waits through Bash pays for every minute of it. A Bash call ends
+within 10 minutes, so a long rig run becomes a background command, and from
+then on ccloop's Stop hook re-feeds the session — a full request with the whole
+context — every time its in-hook sleep runs out. Measured in one project: 3,632 of
+19,054 worker requests (19%) were such re-feeds, plus poll loops and `sleep`s.
+
+An MCP tool call that does not return keeps the session suspended in place, no
+turns and no tokens, for as long as it takes (scheduler-mcp is built on the same
+fact). So each worker gets `ccdirector mcp` (`mcpserver.py`), whose tools block:
+
+| Tool | Returns when |
+|---|---|
+| `item_next` | an item is ready for this worker, or every item is done (`NONE` ends its run) |
+| `item_done(id)` | the item's check ends, however long it takes: PASSED, FAILED (the item stays with the worker) or REFUSED, with the output tail and the full log under `.ccdirector/runs/` |
+| `acquire(resource, units, why)` | the units are granted; returns a lease |
+| `release(lease)` | at once |
+| `run(command, timeout_minutes)` | the command ends: exit code, seconds, output tail, full log under `.ccdirector/runs/` |
+| `resources` | at once: units in use, holders, waiters |
+
+Three Claude Code limits apply to a long MCP call. A call silent for 1800 s is
+aborted, so every blocking tool sends a progress notification each 60 s (Claude
+Code sends a `progressToken` with each call, and progress resets that limit). A
+per-server `"timeout"` in the MCP config is not a way to allow longer waits: it
+is a hard wall-clock limit that progress does not reset, measured with
+`tests/probe_mcp_timeout.py`, so ccdirector sets none. An
+interactive session moves a call over 2 minutes to the background; workers are
+headless (`-p`), which is exempt. The wall-clock limit (`MCP_TOOL_TIMEOUT`) is
+about 28 hours. `acquire`, `run` and `item_done` are cancellable: a cancelled
+or abandoned `acquire` leaves the queue, and a cancelled `run` or `item_done`
+ends the command's whole process tree; a cancelled check records no result.
+
+The server is built on the ccenvmcp shim, which runs each call in its own task
+(so a wait never stalls pings or other calls), hands a `ctx` to tools that ask
+for progress, and stops only tools registered as cancellable.
+
+### Shared resources
+
+The plan's registry declares each shared resource with a capacity. A worker
+takes units only while it runs on the resource — `acquire`, run, `release` —
+and keeps editing and thinking without holding anything. Requests that do not
+fit wait in one queue per resource, in order, with one exception: a request that
+fits in the free units goes ahead of earlier ones that do not (backfill), and of
+several that fit the earliest goes first. Strict order left a 3-unit request
+idle behind a whole-pool request with 30 of 32 units free, in one project, while
+the whole-pool request itself waited for a 2-hour run to end. So that a
+whole-pool request is not put off forever by a stream of small ones, nothing
+passes the head of the queue once it has waited 2 hours: from then on the units
+drain to it. No item holds a
+resource for its whole run: workers on different goals share a pool unit by
+unit, and a check that needs a resource runs while its worker holds a lease.
+
+Leases and the queue are in `state.json` (`leases`, `queue`), changed under the
+same POSIX lock as everything else. A lease records the worker's claude process
+(the MCP server's parent, pinned by pid and start time): when that process is
+gone the lease is dropped at the next `acquire` by anyone, and the pool drops a
+worker's leases and queue places when it sees the worker exit. A waiting
+`acquire` asks again every 2 seconds and each ask stamps its queue place; a
+place not asked about for 2 minutes belongs to a call that is gone without
+withdrawing (a frozen server, a call dropped without a cancel) while its claude
+lives on, and it is dropped with an `abandoned` line in `resources.log`. Left
+in line it would never take its units, and every request it fits ahead of
+would wait for it forever. `ccdirector
+start` clears both, since the holders died with the earlier run. Routine
+acquires and releases go to `resources.log`, not `events.jsonl`, so they never
+wake the director; PROGRESS and `status` show a line per resource in use.
 
 The work state is `.ccdirector/state.json` (per item: status pending,
-claimed, done or parked; holder; attempts; last check output) and
+claimed, done, parked or waiting; holder; attempts; last check output; for a
+waiting item its condition, since when and its deadline) and
 `events.jsonl`, both changed only under one POSIX lock (`work.lock`). Items
 still marked in progress when `ccdirector start` begins are returned: the
 workers that held them died with the earlier ccdirector.
@@ -400,38 +630,17 @@ Workers share the tree and its files. What can go wrong, and what handles it:
 - **Two workers reworking the same code.** Dependencies and sections: the
   director orders items that change the same logic, and keeps a section's
   items with one worker where it can.
-- **Interface changes** (a shared struct, a signature, a locking rule):
-  interface items run alone.
+- **Shared changes** (a struct, a signature, a locking rule): an item of
+  their own that the items needing them list in `depends_on`.
 - **A broken tree in the middle of another worker's change.** The worker
   instructions say a build or test failure may be someone else's unfinished
-  change, to check before chasing it, and to park only if it persists.
+  change, to check before chasing it, and to give it a few minutes before
+  running again.
 - **Edits through Bash** (`sed -i`, redirects, formatters) bypass the hook and
   Claude Code's check. The worker instructions forbid them; nothing enforces
   it.
 - **Changes correct alone and wrong together** are caught by item checks and
   the gate on the combined tree, which the director then investigates.
-
-### ccteam
-
-ccdirector began inside ccteam, to use ccteam's lock layer for worker file
-ownership, and left once ownership was dropped: it uses nothing of ccteam.
-ccteam's lock reaches its DLM through a per-session MCP server whose IPC
-socket every session in a project shares (the last to start takes it), and
-its hook lets the edit through when no server answers. Workers are on one
-machine in one tree, which a lease file covers without a server.
-
-The two cannot run in the same sessions. ccteam's plugin loads in every
-Claude Code session, so it would run in the director's and every worker's:
-in its NATS mode each session's watcher publishes edits and applies the other
-sessions' edits to its own copy of the tree, which here is the same copy, so
-every edit would be replayed onto a tree that already has it; its hook would
-take a second lock around every edit through a server that cannot tell the
-sessions apart, and tell the model to `force_claim` when it refuses.
-`ccdirector start` therefore refuses to run while ccteam is configured — an
-MCP server named `ccteam` (user scope, the project's entry in
-`~/.claude.json`, or the project's `.mcp.json`), an installed or enabled
-plugin whose name contains `ccteam`, or a hook running `ccteam` — and names
-what it found. ccenv's installer removes ccteam as a retired component.
 
 ## Alternatives evaluated
 
@@ -475,8 +684,17 @@ compacting; user reports describe dropped constraints after compaction.
 
 - Whether a second `--append-system-prompt-file` would let the director keep
   Claude Code's default system prompt instead of replacing it.
-- Resources are exclusive between items ccdirector hands out; nothing stops a
-  worker using a machine its item does not name.
+- Nothing stops a worker using a shared resource without acquiring it; the
+  instructions say to, and the project's own locks still sit underneath.
+- An item's check that uses a shared resource relies on its worker holding a
+  lease while it calls `item_done`; nothing enforces it.
+- Whether directors split goals finely enough to keep every worker busy on a
+  real project, and whether N workers then reach about N times one session's
+  rate there: the `PARALLEL` line and the `WORKERS IDLE` warning say when they
+  do not, but a measured run is still owed.
+- The broker is one host's: leases live in the project's `state.json` under a
+  POSIX lock, which is only safe while every worker runs on the machine that
+  runs `ccdirector start`.
 - Per-worker accounts (`CLAUDE_CODE_OAUTH_TOKEN` per worker) are not wired:
   every worker runs on the account of the user who started ccdirector.
 - Function-level claims (the first edit to a function claiming it until the
@@ -484,7 +702,5 @@ compacting; user reports describe dropped constraints after compaction.
   dependencies only prevent when the director foresees it.
 - Builds from a snapshot of the tree, so another worker's half-finished change
   cannot break a running build.
-- Work whose proof takes longer than 540 s has no item check of its own; the
-  long run belongs to a criterion's detector.
 - Workers run headless; there is no view of a worker but its log.
 - Anthropic's terms for sessions run with nobody attached.

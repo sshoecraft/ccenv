@@ -19,11 +19,13 @@ MCP registrations, skills, managed CLAUDE.md regions, and the blocks the
 ```
 
 Components: `ccproject gitsync ccmemory ccprospect ccinsight ccusage ccloop
-ccteam ccdirector ccenvmcp`.
+ccdirector ccenvmcp`.
 
-That list is everything ccenv has **ever** installed, which is deliberately
-wider than what the current `install.sh` ships — `ccprospect`, `ccinsight` and
-`ccteam` were removed from the bundle in v0.13.0.
+That list is every component ccenv has shipped and still owns, which is
+deliberately wider than what the current `install.sh` ships — `ccprospect` and
+`ccinsight` were removed from the bundle in v0.13.0. A package that left ccenv
+to become its own project is not on it: removing that package is its own
+project's job, and listing it here would uninstall the user's own install of it.
 
 This is the point of the script. `install.sh` only ever adds; it cannot remove
 a hook, MCP registration, skill or state directory belonging to a component it
@@ -49,9 +51,8 @@ up. Removals from `install.sh` must therefore never be mirrored here.
 | ccinsight  | `ccinsight`   | `hook session\|posttool\|stop\|guard`                  | `ccinsight`  | `ccinsight-integrate`           | injected blocks + `.ccinsight/` |
 | ccusage    | `ccusage-mcp` | — (owns `statusLine`)                                  | `ccusage`    | —                               | `/etc/claude-code/managed-*.json` when root-installed |
 | ccloop     | `ccloop`      | PostToolUse `guard`, Stop `keepgoing`                  | —            | —                               | `.ccloop/` run state **left in place**, listed |
-| ccteam     | `ccteam`      | SessionStart `ccteam session-start`                    | `ccteam`     | —                               | `.ccteam/` |
 | ccdirector | `ccdirector`  | — (worker hooks live in each worker's launch settings) | —            | —                               | `.ccdirector/` work state **left in place**, listed |
-| ccenvmcp   | `ccenvmcp`    | —                                                      | —            | —                               | removed LAST, and only once no dependent dist remains |
+| ccenvmcp   | `ccenvmcp`    | —                                                      | —            | —                               | removed LAST, and only once no installed `--user` package imports it (ccenv's or anyone's) |
 
 Global artifacts — the `[CCENV MANAGED]` region of `~/.claude/CLAUDE.md`,
 `~/.config/ccenv/`, and the `# [ccenv]` shell exports — come out only on a
@@ -166,7 +167,7 @@ written — including no backups.
 
 - **v0.13.0** — fenced-code markers are ignored and unterminated blocks leave
   the file untouched (this script had truncated its own docs). Retains
-  `ccprospect` / `ccinsight` / `ccteam` after their removal from `install.sh`,
+  `ccprospect` / `ccinsight` after their removal from `install.sh`,
   making uninstall-then-install the documented upgrade path.
 - **v0.12.1** — backup is once-per-file and only on real changes; gitsync
   removes the emptied `~/.claude/hooks/`.

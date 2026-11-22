@@ -46,7 +46,7 @@ extensions are ABI-tagged** (`foo.cpython-314-darwin.so`) and only load under th
 matching interpreter. So a Python bump (3.9 → 3.14) leaves the old
 `cpython-39` `.so` behind, the new interpreter can't import it, and pip — seeing
 the distribution already "present" — never refetches the right-ABI wheel. The
-observed symptom was the **ccteam MCP failing to connect** with
+observed symptom was **an MCP server failing to connect** with
 `ModuleNotFoundError: No module named 'watchfiles._rust_notify'`.
 
 ## `heal_stale_compiled_exts()` — the fix (v0.1.5)
@@ -164,7 +164,7 @@ the suite runs the real code without running the installer.
 
 ## Retired-component cleanup (v0.16.0)
 
-`ccprospect`, `ccinsight` and `ccteam` were retired in v0.13.0. install.sh
+`ccprospect` and `ccinsight` were retired in v0.13.0. install.sh
 stopped installing them — but "stopped installing" is not "removes". A box set
 up before that release keeps their MCP registrations in `~/.claude.json`, their
 hooks in `settings.json`, their skill dirs and their pip dists, and nothing in
@@ -182,7 +182,7 @@ any. Read-only: two JSON parses plus a handful of stat calls.
 
 | Signal | Where |
 |---|---|
-| console script | `$USER_BIN/ccprospect`, `ccinsight`, `ccteam`, `ccteam-mcp` |
+| console script | `$USER_BIN/ccprospect`, `ccinsight` |
 | hook entry | any `hooks.*[].hooks[].command` in `settings.json` whose argv[0] basename matches a console script |
 | MCP registration | `mcpServers` in `~/.claude.json`, user scope **and** per project |
 | pip dist | `<comp>-*.dist-info` in the `--user` site |
@@ -197,7 +197,11 @@ the uninstaller can only touch what it is scoped to, so a component ccenv
 currently ships can never be swept up. `-y` because this runs inside an install
 the user already invoked; prompting would stall an unattended run.
 
-Per-project state dirs (`.ccprospect/`, `.ccinsight/`, `.ccteam/`) are **kept**
+Only components ccenv itself shipped and retired are in this list. A package
+that left ccenv to become its own project is not retired: it is the user's
+install of another project, and the installer never touches it.
+
+Per-project state dirs (`.ccprospect/`, `.ccinsight/`) are **kept**
 by default: `--keep-project-data` is passed unless `--purge-retired-state` is
 given. Deleting a user's data as a side effect of an upgrade is not the
 installer's call, even though the uninstaller archives before it deletes.
@@ -244,10 +248,10 @@ from the box it runs on.
   is now actively removed from existing registrations. It was a 5 s deadline
   that proceeded degraded rather than a barrier, and it cost ccmemory its
   entire tool surface on non-Anthropic-model setups.
-- **v0.6.0** — `enable_always_load()`: mark ccmemory (and, then, ccteam)
-  `alwaysLoad: true`. Removed in v0.13.2, see above.
+- **v0.6.0** — `enable_always_load()`: mark ccmemory `alwaysLoad: true`.
+  Removed in v0.13.2, see above.
 - **v0.1.5** — added `heal_stale_compiled_exts()` and the `python-tag` marker;
-  fixes ccteam failing after a Python version bump (`watchfiles._rust_notify`).
+  fixes an MCP server failing after a Python version bump (`watchfiles._rust_notify`).
 - **v0.1.4** — auto-append `PYTHONUSERBASE` + a runtime-guarded `~/.local/bin`
   PATH-prepend to the shell env file (`~/.zshenv` / `~/.bashrc`).
 - Earlier history: see `CHANGELOG.md`.

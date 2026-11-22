@@ -425,3 +425,17 @@ def test_compaction_nudge_asks_for_one_dispatch_of_claiming_agents(memory_dir, m
     # Paid at every SessionStart: it names no seeds, so it does not grow with
     # the backlog.
     assert "`note" not in msg
+
+
+def test_compaction_nudge_is_silent_where_compaction_is_disabled(memory_dir, monkeypatch):
+    """CCMEMORY_NO_COMPACTION=1 (ccdirector's worker sessions): every relaunch of
+    a worker is a new session, and each used to dispatch compactors on the same
+    store with quota meant for the run's work."""
+    from ccmemory import hooks
+    monkeypatch.setenv("CCMEMORY_COMPILE_THRESHOLD", "3")
+    for i in range(5):
+        write_memory(memory_dir, f"note{i}")
+    monkeypatch.setenv("CCMEMORY_NO_COMPACTION", "1")
+    assert hooks._compaction_nudge(memory_dir) == ""
+    monkeypatch.setenv("CCMEMORY_NO_COMPACTION", "0")
+    assert "Memory compaction available" in hooks._compaction_nudge(memory_dir)

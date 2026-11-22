@@ -165,9 +165,14 @@ model exit, after which ccloop's normal relay takes over.
 ```sh
 ccloop --list                       # list runs in current project
 ccloop --resume-run <run-id>        # continue an aborted run
+ccloop --resume-run                 # continue the only unconverged run
 ccloop --prune                      # dry-run: show converged runs to delete
 ccloop --prune --force              # actually delete converged runs
 ```
+
+`--resume-run` with no id resumes the one run whose status is `active`. With
+no active run it exits 2. With several, it exits 2 and lists them newest
+first so you can pass the one you want by id.
 
 `--list` shows each run's ID, session count, status (`done` / `active` /
 `empty` / `missing`), and the start of the original task. `--prune`

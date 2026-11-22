@@ -29,13 +29,12 @@ back to `pip3 install --user <path>` (non-editable) for the rest.
 
 ### Removed in v0.13.0
 
-Three components are gone from the bundle:
+Two components are gone from the bundle:
 
 | Component    | Status                          |
 |--------------|---------------------------------|
 | `ccprospect` | Retired                         |
 | `ccinsight`  | Retired                         |
-| `ccteam`     | Moved to its own repository     |
 
 They installed hooks, MCP servers, skills and per-project state. As of
 v0.16.0 `./install.sh` detects anything they left behind and removes it
@@ -86,7 +85,7 @@ components before installing anything. A clean box does no work at all.
 That matters because an install otherwise only ever *adds*: it cannot
 remove a hook, MCP registration or skill belonging to a component the
 bundle no longer ships, so upgrading in place used to leave
-`ccprospect`, `ccinsight` and `ccteam` fully wired into every session —
+`ccprospect` and `ccinsight` fully wired into every session —
 SessionStart hooks still firing, MCP servers still registering, and their
 binaries still present so nothing failed loudly.
 
@@ -96,23 +95,23 @@ Check without changing anything:
 ./install.sh --check-retired
 ```
 
-Per-project `.ccprospect/`, `.ccinsight/` and `.ccteam/` state dirs are
+Per-project `.ccprospect/` and `.ccinsight/` state dirs are
 **kept** by this automatic pass. Add `--purge-retired-state` to have them
 archived and removed too, or run the uninstaller yourself for a full
 teardown:
 
 ```sh
-./uninstall.sh          # removes EVERYTHING ccenv has ever installed
+./uninstall.sh          # removes EVERYTHING ccenv owns
 ```
 
-`uninstall.sh` knows about every component ccenv has ever shipped,
-including the three that were removed, which is exactly why it has to run
-from the NEW checkout rather than the old one.
+`uninstall.sh` knows about every component ccenv has shipped and still
+owns, including the two that were retired, which is exactly why it has to
+run from the NEW checkout rather than the old one.
 
 What it will not touch: `.ccmemory/` directories (committed repo content
 that travels with your repos), `.ccloop/` run state and `.ccdirector/` work
-state, which it lists rather than deletes. Per-project `.ccprospect/`, `.ccinsight/` and
-`.ccteam/` state is tarred into `~/ccenv-uninstall-<stamp>/` before
+state, which it lists rather than deletes. Per-project `.ccprospect/` and
+`.ccinsight/` state is tarred into `~/ccenv-uninstall-<stamp>/` before
 removal, and every file it rewrites is backed up beside the original.
 
 Preview it first if you like — it changes nothing:
