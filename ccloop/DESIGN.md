@@ -460,10 +460,35 @@ session. Counting bare presence therefore wedged sessions permanently:
 once any background command had ever run, its orphaned `.output` re-fired
 the gate on every subsequent Stop, so the run could neither relay nor
 exit (it just emitted "N background command(s) still running" until the
-context wall). The gate now counts an `.output` only when a **live process
-holds it open** — read from `/proc/<pid>/fd` (no subprocess, only on Stop),
-with an mtime freshness window (`STALE_OUTPUT_SECONDS`) as the non-procfs
-(e.g. macOS) fallback so a stale file can never fire the gate indefinitely.
+context wall).
+
+The gate counts only proof that a task is running, and the two kinds of task
+give different proof:
+
+- **A Bash background command.** Its `.output` is a regular file that its
+  shell holds open while it runs. It counts only while **a live process holds
+  it open**. That is read from `/proc/<pid>/fd` on Linux (no subprocess, only
+  on Stop), and asked of `lsof` where there is no procfs (macOS). With
+  neither, nothing counts.
+- **A background agent.** Its `.output` is a symlink to the agent's own
+  transcript. The agent runs inside the claude process, which appends to that
+  transcript and closes it, so there is no open file to find. It counts until
+  its completion notification reaches the session, as read from the session
+  transcript (`transcript_path` in the hook input), in either record shape:
+  a `user` message, or an `attachment` with `commandMode: task-notification`.
+  A `queue-operation` record only means queued. An agent whose own transcript
+  has been silent for `AGENT_SILENT_SECONDS` (30 minutes) stops counting, so
+  one that died without a notification cannot hold a session forever.
+
+Every doubt resolves to "not running", because the two mistakes cost very
+different amounts. In an interactive session a "running" answer lets the turn
+end on the promise that the task's notification will wake it. A finished task
+counted as running parks the session at its prompt with nothing left to wake
+it, until someone types into it. A running task counted as finished costs one
+re-feed. The macOS fallback used to be an mtime window: an `.output` written in
+the last 90 seconds counted as running. A task's last write is the moment it
+finishes, so a session that ended its turn within 90 seconds of reading a
+result sat idle for hours.
 
 ### `guard.py` — PostToolUse hook (`ccloop guard`)
 

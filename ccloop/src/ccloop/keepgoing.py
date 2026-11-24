@@ -36,6 +36,9 @@ counter is kept under the run dir (``<run-dir>/keepgoing-<sess>.count``).
 import glob
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -285,10 +288,20 @@ def _emit_wait(n):
 
 PROC_ROOT = "/proc"
 
-# Non-procfs (e.g. macOS) fallback: an .output file modified within this
-# many seconds is treated as a still-running task. Bounds the false positive
-# to this window instead of forever; a procfs-equipped host never uses it.
-STALE_OUTPUT_SECONDS = 90
+#: Seconds to let ``lsof`` answer before treating it as unavailable. It takes
+#: well under a second on macOS; the bound only keeps a wedged lsof from
+#: holding the Stop hook past its own timeout.
+LSOF_TIMEOUT = 10
+
+#: A background agent whose completion has not reached the session, but whose
+#: own transcript has not been written for this long, is treated as gone. An
+#: agent at work appends to its transcript on every model turn and tool call,
+#: and a Bash call inside it is capped at 10 minutes, so a running agent never
+#: goes this quiet. The bound exists so an agent that died without a
+#: notification cannot park an interactive session at its prompt forever.
+AGENT_SILENT_SECONDS = 1800
+
+TASK_ID_RE = re.compile(r"<task-id>([^<\s]+)</task-id>")
 
 #: Seconds the Stop hook itself sleeps while background work is live, instead
 #: of re-feeding the model immediately. Every re-feed costs a full request, and
@@ -349,7 +362,7 @@ def _outputs_with_live_writer(output_paths):
     every path is accounted for, and only on Stop.
 
     Returns the set of live paths, or ``None`` when procfs is unavailable
-    (the caller then falls back to an mtime window).
+    (the caller then asks ``lsof``).
     """
     targets = set(output_paths)
     try:
@@ -377,38 +390,136 @@ def _outputs_with_live_writer(output_paths):
     return live
 
 
-def _recently_modified(output_paths, now):
-    """Subset of ``output_paths`` modified within ``STALE_OUTPUT_SECONDS``.
+def _outputs_open_by_lsof(output_paths):
+    """Subset of ``output_paths`` some process holds open, asked of ``lsof``.
 
-    The non-procfs liveness approximation: a genuinely-running task writes
-    (or at least was created) recently, while a leftover .output from a
-    long-finished task is stale and must not keep the gate firing forever.
+    The platforms without procfs (macOS) answer the same question procfs
+    does through ``lsof``. lsof reports each file under its real path
+    (``/private/tmp/...`` for ``/tmp/...``), so paths are compared resolved.
+
+    Returns the set of live paths, or ``None`` when lsof cannot be run.
     """
-    fresh = set()
-    for p in output_paths:
+    if not output_paths:
+        return set()
+    lsof = shutil.which("lsof") or ("/usr/sbin/lsof" if os.path.exists("/usr/sbin/lsof") else None)
+    if lsof is None:
+        return None
+    by_real = {os.path.realpath(p): p for p in output_paths}
+    try:
+        proc = subprocess.run(
+            [lsof, "-w", "-F", "n", "--", *by_real],
+            capture_output=True, text=True, timeout=LSOF_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # lsof exits 1 when any named file has no opener. That is an answer
+    # ("not open"), not a failure; anything else is.
+    if proc.returncode not in (0, 1):
+        return None
+    live = set()
+    for line in proc.stdout.splitlines():
+        if line.startswith("n"):
+            path = by_real.get(line[1:])
+            if path is not None:
+                live.add(path)
+    return live
+
+
+def _delivered_text(record):
+    """The notification text of a transcript record that delivered a task's
+    completion to the session, else None.
+
+    Claude Code has logged delivery as a ``user`` message and, in 2.1.3xx, as
+    an ``attachment`` whose ``commandMode`` is ``task-notification``. A
+    ``queue-operation`` record carries the same text but only means it was
+    queued, not that the session has it.
+    """
+    if record.get("type") == "user":
+        content = (record.get("message") or {}).get("content")
+        return content if isinstance(content, str) else json.dumps(content)
+    attachment = record.get("attachment")
+    if record.get("type") == "attachment" and isinstance(attachment, dict) and \
+            attachment.get("commandMode") == "task-notification":
+        prompt = attachment.get("prompt")
+        return prompt if isinstance(prompt, str) else json.dumps(prompt)
+    return None
+
+
+def _delivered_task_ids(transcript_path):
+    """Task ids whose completion notification has reached the session, read
+    from its transcript. ``None`` when the transcript cannot be read."""
+    if not transcript_path:
+        return None
+    ids = set()
+    try:
+        with open(transcript_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "<task-id>" not in line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                text = _delivered_text(record)
+                if text:
+                    ids.update(TASK_ID_RE.findall(text))
+    except OSError:
+        return None
+    return ids
+
+
+def _live_agents(agent_outputs, transcript_path, now):
+    """Subset of ``agent_outputs`` (the tasks dir's symlinks to background
+    agents' own transcripts) whose agent is still running.
+
+    A background agent runs inside the claude process, and its transcript is
+    appended to and closed, never held open, so there is no process or open
+    file to look for. An agent is running until its completion notification
+    reaches the session; ``AGENT_SILENT_SECONDS`` of silence in its own
+    transcript ends that early. An unreadable session transcript counts no
+    agent as running.
+    """
+    if not agent_outputs:
+        return set()
+    delivered = _delivered_task_ids(transcript_path)
+    if delivered is None:
+        return set()
+    live = set()
+    for p in agent_outputs:
+        task_id = os.path.basename(p)[: -len(".output")]
+        if task_id in delivered:
+            continue
         try:
             mtime = os.stat(p).st_mtime
         except OSError:
-            continue
-        if now - mtime <= STALE_OUTPUT_SECONDS:
-            fresh.add(p)
-    return fresh
+            continue  # dangling link: the agent's transcript is gone
+        if now - mtime <= AGENT_SILENT_SECONDS:
+            live.add(p)
+    return live
 
 
-def _pending_background_task_count(session_id):
-    """Return how many of this session's ``*.output`` files belong to a
-    background command that is STILL RUNNING.
+def _pending_background_task_count(session_id, transcript_path=None):
+    """Return how many of this session's background tasks are STILL RUNNING.
 
-    Claude Code stores per-session Bash-background output under
+    Claude Code keeps per-session background output under
     ``/tmp/claude-<uid>/<slug>/<session-id>/tasks/<task-id>.output`` and does
-    NOT delete the file when the command completes — it persists for the life
-    of the session. Counting bare presence therefore wedges ccloop: once any
-    background command has ever run, its orphaned .output makes this gate
-    re-fire on every subsequent Stop forever, so the session can never relay
-    or exit (it just emits "N background command(s) still running" until the
-    context wall). The fix is a liveness check — only an .output held open by
-    a live process counts (procfs), with an mtime window as the non-procfs
-    fallback.
+    NOT delete it when the task completes — it persists for the life of the
+    session. So file *presence* is never *liveness*, and neither is a recent
+    write: a task's last write is the moment it finishes.
+
+    - A Bash background command's ``.output`` is a regular file its shell
+      holds open while it runs. It counts only while some process holds it
+      open: procfs on Linux, ``lsof`` elsewhere. With neither, nothing counts.
+    - A background agent's ``.output`` is a symlink to the agent's own
+      transcript; see ``_live_agents``.
+
+    Every doubt resolves to "not running". In an interactive session a
+    "running" answer lets the turn end on the promise that the task's
+    notification will wake it, so a finished task counted as running parks
+    the session at its prompt with nothing left to wake it. A running task
+    counted as finished costs one re-feed.
 
     Returns 0 on any error or when the dir can't be located.
     """
@@ -429,9 +540,15 @@ def _pending_background_task_count(session_id):
         return 0
     if not outputs:
         return 0
-    live = _outputs_with_live_writer(outputs)
-    if live is None:
-        live = _recently_modified(outputs, time.time())
+    agents = [p for p in outputs if os.path.islink(p)]
+    commands = [p for p in outputs if not os.path.islink(p)]
+    live = set()
+    if commands:
+        open_now = _outputs_with_live_writer(commands)
+        if open_now is None:
+            open_now = _outputs_open_by_lsof(commands)
+        live |= open_now or set()
+    live |= _live_agents(agents, transcript_path, time.time())
     return len(live)
 
 
@@ -502,7 +619,8 @@ def main(argv=None):
     # allowing the stop loses the running task. Block (re-feed) to keep
     # the session alive. Counter intentionally NOT bumped — wait cycles
     # are bounded by external work, not the model-pathology cap protects.
-    n_pending = _pending_background_task_count(own_sid)
+    transcript_path = hook_input.get("transcript_path")
+    n_pending = _pending_background_task_count(own_sid, transcript_path)
     if n_pending and os.environ.get("CCLOOP_INTERACTIVE"):
         # THE SESSION IS ALLOWED TO SIMPLY WAIT. Return 0 — do not block, do
         # not re-feed, do not sleep.
@@ -523,11 +641,13 @@ def main(argv=None):
         # honest answer was "still waiting" — observed as ~20 one-word turns
         # across a ten-minute build.
         #
-        # Residual risk: if the completion notification never arrives (the task
-        # died without one), the session idles until the user or the run's own
-        # watchdog intervenes. That is strictly better than burning the request
-        # pool, and the liveness check means we only take this path while a
-        # local process genuinely holds the task's output open.
+        # The price of this path is that a wrong "still running" answer parks
+        # the session at its prompt with nothing left to wake it. That is why
+        # the count takes only proof that the task is running: an open writer
+        # for a Bash command, an undelivered notification for an agent. It used
+        # to accept "written in the last 90 seconds" on macOS, and a task's last
+        # write is the moment it finishes, so a session that ended its turn
+        # within 90 seconds of its last result sat idle for hours.
         return 0
 
     if n_pending:
@@ -561,7 +681,7 @@ def main(argv=None):
         while step and waited < budget:
             time.sleep(step)
             waited += step
-            n_pending = _pending_background_task_count(own_sid)
+            n_pending = _pending_background_task_count(own_sid, transcript_path)
             if not n_pending:
                 # Work finished inside the budget: give the model a real turn
                 # rather than another "still running" no-op.

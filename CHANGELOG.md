@@ -2,6 +2,34 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-11-24 — v0.56.1
+
+**ccloop: how the Stop hook tells running background work from finished work
+(ccloop 0.20.1).**
+
+- An interactive ccloop session no longer sits idle at its prompt after its
+  last background task finishes.
+  - On macOS the Stop hook counted any task `.output` written in the last 90
+    seconds as still running, because there is no `/proc` to check whether a
+    process holds it open. A task's last write is the moment it finishes. A
+    session that ended its turn within 90 seconds of reading a result was
+    allowed to stop on the promise of a notification that had already come,
+    and nothing woke it again.
+  - One session sat idle this way for 7 hours, and repeatedly before that.
+    Its final stop came 51 seconds after its last task finished.
+- A Bash background command now counts as running only while a process holds
+  its `.output` open. Linux reads `/proc` as before, and macOS now asks
+  `lsof`. With neither available, nothing counts.
+- A background agent now counts as running until its completion notification
+  is delivered in the session transcript. Agents run inside the claude
+  process and hold no file open.
+  - Before, on macOS, an agent that had just finished counted for 90 seconds
+    more, the same way as a Bash task. On Linux, a running agent never counted.
+  - An agent whose own transcript has been silent for 30 minutes stops
+    counting, so one that died without a notification cannot hold a session.
+- The hook's open-file check is now tested on macOS. Before, it was skipped
+  there.
+
 ## 2026-11-22 — v0.56.0
 
 **ccloop: resuming a run without its id (ccloop 0.20.0).**

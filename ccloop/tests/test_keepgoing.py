@@ -374,11 +374,12 @@ def test_no_cache_at_all_does_not_fire(monkeypatch, tmp_path):
 # the file is reaped falls through to the normal keepgoing logic.
 #
 # Detection requires LIVENESS, not bare file presence. Claude Code does NOT
-# reap an .output file when its background command finishes — it lingers for
+# reap an .output file when its background task finishes — it lingers for
 # the whole session — so counting presence wedges ccloop forever once any
-# task has run. Only an .output held open by a live process counts (procfs
-# /proc/<pid>/fd scan, no subprocess); platforms without procfs fall back to
-# an mtime freshness window so a stale file can't fire the gate indefinitely.
+# task has run. A Bash command's .output counts only while a live process
+# holds it open (procfs /proc/<pid>/fd scan, or lsof without procfs). A
+# background agent's .output (a symlink to its transcript) counts until its
+# completion notification is delivered in the session transcript.
 # ---------------------------------------------------------------------------
 
 def test_pending_background_blocks_with_wait_message(monkeypatch, tmp_path):
@@ -389,7 +390,7 @@ def test_pending_background_blocks_with_wait_message(monkeypatch, tmp_path):
     monkeypatch.setenv("CCLOOP_RUN_ID", "r1")
     monkeypatch.setenv("CCLOOP_SESSION_ID", "s1")
     monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
-    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 2)
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda *_a: 2)
     rc, out = run(monkeypatch, {"session_id": "s1"})
     payload = json.loads(out)
     assert rc == 0
@@ -405,7 +406,7 @@ def test_no_pending_background_runs_keepgoing(monkeypatch, tmp_path):
     monkeypatch.setenv("CCLOOP_RUN_ID", "r1")
     monkeypatch.setenv("CCLOOP_SESSION_ID", "s1")
     monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
-    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 0)
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda *_a: 0)
     rc, out = run(monkeypatch, {"session_id": "s1"})
     payload = json.loads(out)
     assert payload["decision"] == "block"
@@ -423,12 +424,12 @@ def test_pending_background_does_not_bump_keepgoing_counter(monkeypatch, tmp_pat
     monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
 
     # Phase 1: two wait re-feeds while background is pending.
-    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 1)
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda *_a: 1)
     run(monkeypatch, {"session_id": "s1"})
     run(monkeypatch, {"session_id": "s1"})
 
     # Phase 2: nothing pending — first keepgoing re-feed must be #1.
-    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 0)
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda *_a: 0)
     rc, out = run(monkeypatch, {"session_id": "s1"})
     assert "re-fed #1" in json.loads(out)["systemMessage"]
 
@@ -441,7 +442,7 @@ def test_done_wins_over_pending_background(monkeypatch, tmp_path):
     monkeypatch.setenv("CCLOOP_RUN_ID", "r1")
     monkeypatch.setenv("CCLOOP_SESSION_ID", "s1")
     monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
-    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 1)
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda *_a: 1)
     rc, out = run(monkeypatch, {"session_id": "s1"})
     assert rc == 0 and out == ""
 
@@ -459,7 +460,7 @@ def test_cutoff_wins_over_pending_background(monkeypatch, tmp_path):
     monkeypatch.setenv("CCLOOP_SESSION_ID", "s1")
     monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
     write_cache("s1", used_percentage=99)   # well over the 50000 cutoff
-    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 3)
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda *_a: 3)
     rc, out = run(monkeypatch, {"session_id": "s1"})
     assert rc == 0
     assert out == ""                          # cutoff allows stop, no JSON
@@ -478,8 +479,11 @@ def _redirect_tmp_glob(monkeypatch, tmp_path):
     monkeypatch.setattr(keepgoing.glob, "glob", patched)
 
 
-@pytest.mark.skipif(not os.path.isdir("/proc"),
-                    reason="procfs liveness check requires /proc")
+HAVE_LSOF = keepgoing.shutil.which("lsof") is not None or os.path.exists("/usr/sbin/lsof")
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc") and not HAVE_LSOF,
+                    reason="liveness check needs /proc or lsof")
 def test_pending_counts_only_outputs_with_live_writer(tmp_path, monkeypatch):
     """The regression that wedged a session: a finished task's .output lingers
     on disk with no process holding it open (the harness never reaps it), so
@@ -512,26 +516,136 @@ def test_pending_counts_only_outputs_with_live_writer(tmp_path, monkeypatch):
     assert keepgoing._pending_background_task_count(sess) == 0
 
 
-def test_pending_falls_back_to_mtime_without_procfs(tmp_path, monkeypatch):
-    """On platforms without procfs, liveness is approximated by an mtime
-    window: a freshly-written .output counts, a stale one does not — so a
-    leftover file can never wedge the loop indefinitely."""
-    sess = "deadbeef-1234-5678-9abc-def012345678"
+def _tasks_dir(tmp_path, monkeypatch, sess="deadbeef-1234-5678-9abc-def012345678"):
     tasks = tmp_path / f"claude-{os.getuid()}" / "-fake-slug" / sess / "tasks"
     tasks.mkdir(parents=True)
     _redirect_tmp_glob(monkeypatch, tmp_path)
+    return sess, tasks
 
-    # Force the no-procfs path.
+
+@pytest.mark.skipif(not HAVE_LSOF, reason="needs lsof")
+def test_without_procfs_lsof_decides_liveness(tmp_path, monkeypatch):
+    """With no procfs, the open-file question goes to lsof: the file a live
+    process holds open counts, the closed one does not."""
+    sess, tasks = _tasks_dir(tmp_path, monkeypatch)
     monkeypatch.setattr(keepgoing, "_outputs_with_live_writer", lambda paths: None)
+    (tasks / "done.output").write_text("finished\n")
+    running = tasks / "running.output"
+    running.write_text("")
+    fh = open(running, "a")
+    try:
+        assert keepgoing._pending_background_task_count(sess) == 1
+    finally:
+        fh.close()
+    assert keepgoing._pending_background_task_count(sess) == 0
 
-    fresh = tasks / "fresh.output"
-    fresh.write_text("x")
-    stale = tasks / "stale.output"
-    stale.write_text("x")
-    old = time.time() - keepgoing.STALE_OUTPUT_SECONDS - 60
-    os.utime(stale, (old, old))
 
-    assert keepgoing._pending_background_task_count(sess) == 1
+def test_task_that_just_finished_is_not_running(tmp_path, monkeypatch):
+    """The failure that parked an interactive session for 7 hours: a Bash
+    task finished 51 seconds before the turn ended, and its .output, written
+    at the moment it finished, was counted as running because it was fresh.
+    A file nothing holds open is finished, however recently it was written."""
+    sess, tasks = _tasks_dir(tmp_path, monkeypatch)
+    monkeypatch.setattr(keepgoing, "_outputs_with_live_writer", lambda paths: None)
+    monkeypatch.setattr(keepgoing, "_outputs_open_by_lsof", lambda paths: set())
+    (tasks / "bvawo8585.output").write_text("exit 0\n")   # mtime = now
+    assert keepgoing._pending_background_task_count(sess) == 0
+
+
+def test_no_way_to_see_processes_counts_nothing(tmp_path, monkeypatch):
+    """Neither procfs nor lsof: nothing counts as running, so the session is
+    re-fed rather than left at its prompt on a guess."""
+    sess, tasks = _tasks_dir(tmp_path, monkeypatch)
+    monkeypatch.setattr(keepgoing, "_outputs_with_live_writer", lambda paths: None)
+    monkeypatch.setattr(keepgoing, "_outputs_open_by_lsof", lambda paths: None)
+    (tasks / "x.output").write_text("")
+    assert keepgoing._pending_background_task_count(sess) == 0
+
+
+def _agent_output(tasks, tmp_path, task_id, age=0):
+    """A background agent's .output: a symlink to its own transcript."""
+    sub = tmp_path / "subagents"
+    sub.mkdir(exist_ok=True)
+    target = sub / f"agent-{task_id}.jsonl"
+    target.write_text('{"type":"assistant"}\n')
+    if age:
+        then = time.time() - age
+        os.utime(target, (then, then))
+    (tasks / f"{task_id}.output").symlink_to(target)
+
+
+def _notification(task_id, status="completed"):
+    return (f"<task-notification>\n<task-id>{task_id}</task-id>\n"
+            f"<status>{status}</status>\n</task-notification>")
+
+
+def test_agent_runs_until_its_notification_is_delivered(tmp_path, monkeypatch):
+    sess, tasks = _tasks_dir(tmp_path, monkeypatch)
+    _agent_output(tasks, tmp_path, "a5d0e2afa19acde1e")
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(json.dumps({"type": "assistant", "message": {}}) + "\n")
+    assert keepgoing._pending_background_task_count(sess, str(transcript)) == 1
+
+    # Queued is not delivered.
+    with open(transcript, "a") as fh:
+        fh.write(json.dumps({"type": "queue-operation", "operation": "enqueue",
+                             "content": _notification("a5d0e2afa19acde1e")}) + "\n")
+    assert keepgoing._pending_background_task_count(sess, str(transcript)) == 1
+
+    # Delivered as a user message: the agent is finished, however recently
+    # its own transcript was written.
+    with open(transcript, "a") as fh:
+        fh.write(json.dumps({"type": "user", "message": {
+            "role": "user", "content": _notification("a5d0e2afa19acde1e")}}) + "\n")
+    assert keepgoing._pending_background_task_count(sess, str(transcript)) == 0
+
+
+def test_agent_notification_delivered_as_attachment(tmp_path, monkeypatch):
+    sess, tasks = _tasks_dir(tmp_path, monkeypatch)
+    _agent_output(tasks, tmp_path, "ab93a4ed1b4b95d9e")
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "attachment",
+        "attachment": {"type": "queued_command", "commandMode": "task-notification",
+                       "prompt": _notification("ab93a4ed1b4b95d9e", "killed")},
+    }) + "\n")
+    assert keepgoing._pending_background_task_count(sess, str(transcript)) == 0
+
+
+def test_silent_agent_without_notification_stops_counting(tmp_path, monkeypatch):
+    sess, tasks = _tasks_dir(tmp_path, monkeypatch)
+    _agent_output(tasks, tmp_path, "aaaa", age=keepgoing.AGENT_SILENT_SECONDS + 60)
+    _agent_output(tasks, tmp_path, "bbbb", age=60)
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+    assert keepgoing._pending_background_task_count(sess, str(transcript)) == 1
+
+
+def test_unreadable_session_transcript_counts_no_agent(tmp_path, monkeypatch):
+    sess, tasks = _tasks_dir(tmp_path, monkeypatch)
+    _agent_output(tasks, tmp_path, "cccc")
+    assert keepgoing._pending_background_task_count(sess, None) == 0
+    assert keepgoing._pending_background_task_count(
+        sess, str(tmp_path / "missing.jsonl")) == 0
+
+
+def test_hook_passes_transcript_path_to_the_count(monkeypatch, tmp_path):
+    """The gate reads agent completions from the transcript named in the
+    hook's input; an interactive session with a running agent may wait."""
+    resume = tmp_path / "resume.md"
+    resume.write_text("body\n")
+    monkeypatch.setenv("CCLOOP_RUN_ID", "r1")
+    monkeypatch.setenv("CCLOOP_SESSION_ID", "s1")
+    monkeypatch.setenv("CCLOOP_RESUME_FILE", str(resume))
+    monkeypatch.setenv("CCLOOP_INTERACTIVE", "1")
+    seen = {}
+    def count(sid, transcript_path=None):
+        seen["args"] = (sid, transcript_path)
+        return 1
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", count)
+    rc, out = run(monkeypatch, {"session_id": "s1", "transcript_path": "/x/s1.jsonl"})
+    assert seen["args"] == ("s1", "/x/s1.jsonl")
+    assert rc == 0 and out == ""
 
 
 def _wait_env(monkeypatch, tmp_path, budget):
@@ -554,7 +668,7 @@ def test_hook_absorbs_the_wait_instead_of_refeeding(monkeypatch, tmp_path):
     slept = {"n": 0}
     monkeypatch.setattr(keepgoing.time, "sleep",
                         lambda s: slept.__setitem__("n", slept["n"] + 1))
-    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 1)
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda *_a: 1)
     rc, out = run(monkeypatch, {"session_id": "s1"})
     assert slept["n"] >= 1, "hook returned without sleeping — the spin is back"
     assert json.loads(out)["decision"] == "block"
@@ -567,7 +681,7 @@ def test_finished_work_unblocks_into_a_real_turn(monkeypatch, tmp_path):
     state = {"n": 2}
     monkeypatch.setattr(keepgoing.time, "sleep", lambda s: state.__setitem__("n", 0))
     monkeypatch.setattr(keepgoing, "_pending_background_task_count",
-                        lambda _s: state["n"])
+                        lambda *_a: state["n"])
     rc, out = run(monkeypatch, {"session_id": "s1"})
     payload = json.loads(out)
     assert payload["decision"] == "block"
@@ -581,7 +695,7 @@ def test_finished_work_does_not_consume_the_continue_cap(monkeypatch, tmp_path):
     state = {"n": 1}
     monkeypatch.setattr(keepgoing.time, "sleep", lambda s: state.__setitem__("n", 0))
     monkeypatch.setattr(keepgoing, "_pending_background_task_count",
-                        lambda _s: state["n"])
+                        lambda *_a: state["n"])
     run(monkeypatch, {"session_id": "s1"})
     assert not list(run_dir.glob("keepgoing-*.count")), "wait bumped the continue cap"
 
@@ -591,7 +705,7 @@ def test_zero_budget_restores_the_immediate_refeed(monkeypatch, tmp_path):
     slept = {"n": 0}
     monkeypatch.setattr(keepgoing.time, "sleep",
                         lambda s: slept.__setitem__("n", slept["n"] + 1))
-    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 1)
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda *_a: 1)
     rc, out = run(monkeypatch, {"session_id": "s1"})
     assert slept["n"] == 0
     assert "ccloop wait" in json.loads(out)["systemMessage"]
@@ -608,7 +722,7 @@ def test_interactive_session_is_allowed_to_simply_wait(monkeypatch, tmp_path):
     slept = {"n": 0}
     monkeypatch.setattr(keepgoing.time, "sleep",
                         lambda s: slept.__setitem__("n", slept["n"] + 1))
-    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 1)
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda *_a: 1)
     rc, out = run(monkeypatch, {"session_id": "s1"})
     assert rc == 0
     assert out.strip() == "", "hook emitted a decision — the stop was not allowed"
@@ -622,7 +736,7 @@ def test_headless_still_blocks_because_a_stop_exits_the_process(monkeypatch, tmp
     _wait_env(monkeypatch, tmp_path, 20)
     monkeypatch.delenv("CCLOOP_INTERACTIVE", raising=False)
     monkeypatch.setattr(keepgoing.time, "sleep", lambda s: None)
-    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 1)
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda *_a: 1)
     rc, out = run(monkeypatch, {"session_id": "s1"})
     assert json.loads(out)["decision"] == "block"
 
@@ -632,7 +746,7 @@ def test_interactive_without_pending_work_still_keeps_going(monkeypatch, tmp_pat
     otherwise an interactive session could stop for good and stall the run."""
     _wait_env(monkeypatch, tmp_path, 50)
     monkeypatch.setenv("CCLOOP_INTERACTIVE", "1")
-    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda _s: 0)
+    monkeypatch.setattr(keepgoing, "_pending_background_task_count", lambda *_a: 0)
     rc, out = run(monkeypatch, {"session_id": "s1"})
     payload = json.loads(out)
     assert payload["decision"] == "block"
