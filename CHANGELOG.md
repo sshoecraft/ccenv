@@ -2,6 +2,27 @@
 
 patch = fix, minor = feature, major = breaking.
 
+## 2026-11-25 — v0.56.2
+
+**ccloop: how the Stop hook tells running background agents from finished
+ones (ccloop 0.20.2).**
+
+- A background agent now counts as finished as soon as the session transcript
+  holds any task-notification for it, whatever the shape of the record.
+  - 0.20.1 accepted only a delivered `user` or `attachment` record. Claude Code
+    also delivers a notification that arrives during a turn into that turn and
+    logs it only as `queue-operation` `remove` with reason `absorbed_mid_turn`.
+    Those agents counted as running for good.
+  - In one session, every Stop was let through on seven agents that had
+    finished, and the session sat idle at its prompt. Its keepgoing hook ran
+    each time and left no trace, because an allowed stop writes nothing.
+  - The notification is created only once the task has stopped, so its
+    presence answers whether the task is running. Whether the session has
+    read it is a different question, and it is not the one the hook asks.
+- `ccloop/tests/probe_keepgoing_stops.py` shows, for a session id, each Stop
+  in its transcript with whether keepgoing blocked it, and what keepgoing
+  concludes about each of its background tasks now, with the evidence.
+
 ## 2026-11-24 — v0.56.1
 
 **ccloop: how the Stop hook tells running background work from finished work

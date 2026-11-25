@@ -473,12 +473,18 @@ give different proof:
 - **A background agent.** Its `.output` is a symlink to the agent's own
   transcript. The agent runs inside the claude process, which appends to that
   transcript and closes it, so there is no open file to find. It counts until
-  its completion notification reaches the session, as read from the session
-  transcript (`transcript_path` in the hook input), in either record shape:
-  a `user` message, or an `attachment` with `commandMode: task-notification`.
-  A `queue-operation` record only means queued. An agent whose own transcript
-  has been silent for `AGENT_SILENT_SECONDS` (30 minutes) stops counting, so
-  one that died without a notification cannot hold a session forever.
+  the session transcript (`transcript_path` in the hook input) holds any
+  task-notification for it. Claude Code creates the notification only once
+  the task has stopped, so its existence is the answer, and the record's shape
+  is deliberately ignored. The same notification has appeared as a `user`
+  message, as an `attachment` with `commandMode: task-notification`, as
+  `queue-operation` `enqueue`/`dequeue`, and, when it lands mid-turn, only as
+  `queue-operation` `remove` with reason `absorbed_mid_turn`. Whether the
+  session has *read* the result is a different question, and not the one this
+  gate asks. An agent whose own transcript has been silent for
+  `AGENT_SILENT_SECONDS` (30 minutes) stops counting at the next Stop. That
+  bound cannot rescue a session that is already idle, since an idle session
+  has no next Stop. Only an accurate count can do that.
 
 Every doubt resolves to "not running", because the two mistakes cost very
 different amounts. In an interactive session a "running" answer lets the turn

@@ -378,8 +378,8 @@ def test_no_cache_at_all_does_not_fire(monkeypatch, tmp_path):
 # the whole session — so counting presence wedges ccloop forever once any
 # task has run. A Bash command's .output counts only while a live process
 # holds it open (procfs /proc/<pid>/fd scan, or lsof without procfs). A
-# background agent's .output (a symlink to its transcript) counts until its
-# completion notification is delivered in the session transcript.
+# background agent's .output (a symlink to its transcript) counts until the
+# session transcript holds a task-notification for it, in any record shape.
 # ---------------------------------------------------------------------------
 
 def test_pending_background_blocks_with_wait_message(monkeypatch, tmp_path):
@@ -579,36 +579,56 @@ def _notification(task_id, status="completed"):
             f"<status>{status}</status>\n</task-notification>")
 
 
-def test_agent_runs_until_its_notification_is_delivered(tmp_path, monkeypatch):
+def test_agent_runs_until_a_notification_for_it_exists(tmp_path, monkeypatch):
     sess, tasks = _tasks_dir(tmp_path, monkeypatch)
     _agent_output(tasks, tmp_path, "a5d0e2afa19acde1e")
+    _agent_output(tasks, tmp_path, "a1e7e5c226cbcc489")
     transcript = tmp_path / "session.jsonl"
-    transcript.write_text(json.dumps({"type": "assistant", "message": {}}) + "\n")
-    assert keepgoing._pending_background_task_count(sess, str(transcript)) == 1
+    # The launch result names the agent, but that is no notification.
+    transcript.write_text(json.dumps({"type": "user", "message": {"content": [
+        {"type": "tool_result", "content": "Async agent launched successfully.\n"
+                                           "agentId: a5d0e2afa19acde1e"}]}}) + "\n")
+    assert keepgoing._pending_background_task_count(sess, str(transcript)) == 2
 
-    # Queued is not delivered.
-    with open(transcript, "a") as fh:
-        fh.write(json.dumps({"type": "queue-operation", "operation": "enqueue",
-                             "content": _notification("a5d0e2afa19acde1e")}) + "\n")
-    assert keepgoing._pending_background_task_count(sess, str(transcript)) == 1
-
-    # Delivered as a user message: the agent is finished, however recently
-    # its own transcript was written.
+    # A notification for the other agent leaves this one running.
     with open(transcript, "a") as fh:
         fh.write(json.dumps({"type": "user", "message": {
-            "role": "user", "content": _notification("a5d0e2afa19acde1e")}}) + "\n")
+            "role": "user", "content": _notification("a1e7e5c226cbcc489")}}) + "\n")
+    assert keepgoing._pending_background_task_count(sess, str(transcript)) == 1
+
+
+# Every shape Claude Code has logged a task-notification in. Each one means the
+# task has stopped. The last is the one 0.20.1 missed: a notification that
+# arrives during a turn is absorbed into it and logged only as a queue removal.
+NOTIFICATION_SHAPES = {
+    "user message": lambda n: {"type": "user", "message": {"role": "user", "content": n}},
+    "attachment": lambda n: {"type": "attachment", "attachment": {
+        "type": "queued_command", "commandMode": "task-notification", "prompt": n}},
+    "queue enqueue": lambda n: {"type": "queue-operation", "operation": "enqueue",
+                                "content": n},
+    "queue dequeue": lambda n: {"type": "queue-operation", "operation": "dequeue",
+                                "content": n},
+    "absorbed mid-turn": lambda n: {"type": "queue-operation", "operation": "remove",
+                                    "content": n, "reason": "absorbed_mid_turn"},
+}
+
+
+@pytest.mark.parametrize("shape", sorted(NOTIFICATION_SHAPES))
+def test_any_notification_record_means_the_agent_finished(shape, tmp_path, monkeypatch):
+    sess, tasks = _tasks_dir(tmp_path, monkeypatch)
+    _agent_output(tasks, tmp_path, "a097a79ed10913ae6")
+    transcript = tmp_path / "session.jsonl"
+    record = NOTIFICATION_SHAPES[shape](_notification("a097a79ed10913ae6", "completed"))
+    transcript.write_text(json.dumps(record) + "\n")
     assert keepgoing._pending_background_task_count(sess, str(transcript)) == 0
 
 
-def test_agent_notification_delivered_as_attachment(tmp_path, monkeypatch):
+def test_killed_agent_counts_as_finished(tmp_path, monkeypatch):
     sess, tasks = _tasks_dir(tmp_path, monkeypatch)
     _agent_output(tasks, tmp_path, "ab93a4ed1b4b95d9e")
     transcript = tmp_path / "session.jsonl"
-    transcript.write_text(json.dumps({
-        "type": "attachment",
-        "attachment": {"type": "queued_command", "commandMode": "task-notification",
-                       "prompt": _notification("ab93a4ed1b4b95d9e", "killed")},
-    }) + "\n")
+    transcript.write_text(json.dumps(NOTIFICATION_SHAPES["attachment"](
+        _notification("ab93a4ed1b4b95d9e", "killed"))) + "\n")
     assert keepgoing._pending_background_task_count(sess, str(transcript)) == 0
 
 

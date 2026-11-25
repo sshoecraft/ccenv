@@ -425,46 +425,29 @@ def _outputs_open_by_lsof(output_paths):
     return live
 
 
-def _delivered_text(record):
-    """The notification text of a transcript record that delivered a task's
-    completion to the session, else None.
+def _notified_task_ids(transcript_path):
+    """Task ids the session transcript holds a task-notification for.
+    ``None`` when the transcript cannot be read.
 
-    Claude Code has logged delivery as a ``user`` message and, in 2.1.3xx, as
-    an ``attachment`` whose ``commandMode`` is ``task-notification``. A
-    ``queue-operation`` record carries the same text but only means it was
-    queued, not that the session has it.
+    Claude Code creates a task-notification only once the task has stopped
+    (completed, failed or killed), so any record carrying one proves the task
+    is no longer running. The record's shape does not matter, and is
+    deliberately not looked at: Claude Code has logged the same notification
+    as a ``user`` message, as an ``attachment`` with ``commandMode``
+    ``task-notification``, as ``queue-operation`` ``enqueue``/``dequeue``,
+    and, when it arrives during a turn and is absorbed into it, only as
+    ``queue-operation`` ``remove`` with reason ``absorbed_mid_turn``. Keying
+    on any one shape counted every agent delivered the other way as running
+    for the rest of the session.
     """
-    if record.get("type") == "user":
-        content = (record.get("message") or {}).get("content")
-        return content if isinstance(content, str) else json.dumps(content)
-    attachment = record.get("attachment")
-    if record.get("type") == "attachment" and isinstance(attachment, dict) and \
-            attachment.get("commandMode") == "task-notification":
-        prompt = attachment.get("prompt")
-        return prompt if isinstance(prompt, str) else json.dumps(prompt)
-    return None
-
-
-def _delivered_task_ids(transcript_path):
-    """Task ids whose completion notification has reached the session, read
-    from its transcript. ``None`` when the transcript cannot be read."""
     if not transcript_path:
         return None
     ids = set()
     try:
         with open(transcript_path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                if "<task-id>" not in line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                text = _delivered_text(record)
-                if text:
-                    ids.update(TASK_ID_RE.findall(text))
+                if "task-notification" in line and "<task-id>" in line:
+                    ids.update(TASK_ID_RE.findall(line))
     except OSError:
         return None
     return ids
@@ -476,20 +459,20 @@ def _live_agents(agent_outputs, transcript_path, now):
 
     A background agent runs inside the claude process, and its transcript is
     appended to and closed, never held open, so there is no process or open
-    file to look for. An agent is running until its completion notification
-    reaches the session; ``AGENT_SILENT_SECONDS`` of silence in its own
-    transcript ends that early. An unreadable session transcript counts no
-    agent as running.
+    file to look for. An agent is running until the session transcript holds
+    a task-notification for it; ``AGENT_SILENT_SECONDS`` of silence in its
+    own transcript ends that early. An unreadable session transcript counts
+    no agent as running.
     """
     if not agent_outputs:
         return set()
-    delivered = _delivered_task_ids(transcript_path)
-    if delivered is None:
+    notified = _notified_task_ids(transcript_path)
+    if notified is None:
         return set()
     live = set()
     for p in agent_outputs:
         task_id = os.path.basename(p)[: -len(".output")]
-        if task_id in delivered:
+        if task_id in notified:
             continue
         try:
             mtime = os.stat(p).st_mtime
@@ -644,7 +627,7 @@ def main(argv=None):
         # The price of this path is that a wrong "still running" answer parks
         # the session at its prompt with nothing left to wake it. That is why
         # the count takes only proof that the task is running: an open writer
-        # for a Bash command, an undelivered notification for an agent. It used
+        # for a Bash command, no notification yet for an agent. It used
         # to accept "written in the last 90 seconds" on macOS, and a task's last
         # write is the moment it finishes, so a session that ended its turn
         # within 90 seconds of its last result sat idle for hours.
